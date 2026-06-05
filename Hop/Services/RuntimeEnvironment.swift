@@ -11,7 +11,7 @@ enum RuntimeEnvironment {
     }
 
     static var sharedContainerURL: URL {
-        if let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier) {
+        if let url = appGroupContainerURL {
             return url
         }
 
@@ -19,6 +19,10 @@ enum RuntimeEnvironment {
             .appendingPathComponent("Hop", isDirectory: true)
         try? FileManager.default.createDirectory(at: fallback, withIntermediateDirectories: true)
         return fallback
+    }
+
+    static var appGroupContainerURL: URL? {
+        FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)
     }
 
     static var stateFileURL: URL {

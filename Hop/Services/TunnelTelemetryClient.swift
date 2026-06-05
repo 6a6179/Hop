@@ -1,7 +1,7 @@
 import Foundation
 
 #if canImport(Libbox)
-    import Libbox
+    @preconcurrency import Libbox
 
     final class TunnelTelemetryClient: @unchecked Sendable {
         var onStatus: ((TrafficCounters) -> Void)?
@@ -13,6 +13,7 @@ import Foundation
         private var activeToken: UInt64 = 0
         private var connectionsStore: LibboxConnections?
         private let connectionsLock = NSLock()
+        private let libboxRuntime = LibboxCommandRuntime()
 
         func start() {
             guard commandClient == nil, !isConnecting else {
@@ -28,19 +29,21 @@ import Foundation
                     return
                 }
 
-                let options = LibboxCommandClientOptions()
-                options.addCommand(LibboxCommandStatus)
-                options.addCommand(LibboxCommandConnections)
-                options.statusInterval = Int64(NSEC_PER_SEC)
-
-                guard let client = LibboxNewCommandClient(TunnelTelemetryHandler(client: self, token: token), options) else {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.finishStart(token: token, client: nil, error: "libbox returned no command client")
-                    }
-                    return
-                }
-
                 do {
+                    try libboxRuntime.ensureConfigured()
+
+                    let options = LibboxCommandClientOptions()
+                    options.addCommand(LibboxCommandStatus)
+                    options.addCommand(LibboxCommandConnections)
+                    options.statusInterval = Int64(NSEC_PER_SEC)
+
+                    guard let client = LibboxNewCommandClient(TunnelTelemetryHandler(client: self, token: token), options) else {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.finishStart(token: token, client: nil, error: "libbox returned no command client")
+                        }
+                        return
+                    }
+
                     try client.connect()
                     DispatchQueue.main.async { [weak self] in
                         self?.finishStart(token: token, client: client, error: nil)
@@ -71,13 +74,21 @@ import Foundation
         }
 
         func closeAllConnections() {
-            DispatchQueue.global(qos: .utility).async {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self else {
+                    return
+                }
+                try? libboxRuntime.ensureConfigured()
                 try? LibboxNewStandaloneCommandClient()?.closeConnections()
             }
         }
 
         func closeConnection(id: String) {
-            DispatchQueue.global(qos: .utility).async {
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                guard let self else {
+                    return
+                }
+                try? libboxRuntime.ensureConfigured()
                 try? LibboxNewStandaloneCommandClient()?.closeConnection(id)
             }
         }
@@ -264,6 +275,56 @@ import Foundation
         func writeGroups(_: (any LibboxOutboundGroupIteratorProtocol)?) {}
         func initializeClashMode(_: (any LibboxStringIteratorProtocol)?, currentMode _: String?) {}
         func updateClashMode(_: String?) {}
+    }
+
+    private final class LibboxCommandRuntime: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isConfigured = false
+
+        func ensureConfigured() throws {
+            lock.lock()
+            defer {
+                lock.unlock()
+            }
+
+            guard !isConfigured else {
+                return
+            }
+
+            guard let container = RuntimeEnvironment.appGroupContainerURL else {
+                throw TunnelTelemetryError.appGroupUnavailable(RuntimeEnvironment.appGroupIdentifier)
+            }
+
+            let workingPath = container.appendingPathComponent("Working", isDirectory: true)
+            let tempPath = container.appendingPathComponent("Temp", isDirectory: true)
+            try FileManager.default.createDirectory(at: workingPath, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: tempPath, withIntermediateDirectories: true)
+
+            let setup = LibboxSetupOptions()
+            setup.basePath = container.path
+            setup.workingPath = workingPath.path
+            setup.tempPath = tempPath.path
+            setup.logMaxLines = 3000
+
+            var setupError: NSError?
+            LibboxSetup(setup, &setupError)
+            if let setupError {
+                throw setupError
+            }
+
+            isConfigured = true
+        }
+    }
+
+    private enum TunnelTelemetryError: LocalizedError {
+        case appGroupUnavailable(String)
+
+        var errorDescription: String? {
+            switch self {
+            case let .appGroupUnavailable(appGroup):
+                "App Group \(appGroup) is unavailable; live telemetry requires Hop and HopTunnel to be signed with the same App Group entitlement."
+            }
+        }
     }
 #else
     final class TunnelTelemetryClient {
