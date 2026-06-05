@@ -60,9 +60,10 @@ targets:
         CODE_SIGN_ENTITLEMENTS: HopTunnel/HopTunnel.entitlements
         APPLICATION_EXTENSION_API_ONLY: YES
         # libbox invokes the platform interface synchronously from Go threads
-        # and traffics in non-Sendable gomobile types; Swift 5 language mode
-        # keeps the bridging code (PlatformInterface/PacketTunnelProvider) sane.
-        SWIFT_VERSION: "5.0"
+        # and traffics in non-Sendable gomobile types; keep bridge boundaries
+        # explicit with value snapshots, @preconcurrency, and narrow unchecked
+        # Sendable wrappers.
+        SWIFT_VERSION: "6.2"
   HopTests:
     type: bundle.unit-test
     platform: iOS

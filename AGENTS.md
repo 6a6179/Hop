@@ -8,7 +8,7 @@ Guidance for AI coding agents working in this repository.
 - The Xcode project is generated from `project.yml` with XcodeGen. Treat `project.yml` as the source of truth for targets, sources, settings, and dependencies.
 - Main targets:
   - `Hop`: SwiftUI app, Swift 6.2.
-  - `HopTunnel`: Network Extension, intentionally Swift 5.0 because libbox/gomobile bridge types are not Swift 6 Sendable-friendly.
+  - `HopTunnel`: Network Extension, Swift 6.2. Its libbox/gomobile bridge keeps concurrency boundaries explicit with value snapshots, `@preconcurrency`, and narrow unchecked `Sendable` wrappers.
   - `HopTests`: iOS unit tests.
 - Shared code lives in `Shared/` and is compiled into both app and extension.
 - `Frameworks/Libbox.xcframework` is a vendored static sing-box/libbox engine. Its provenance is checked by `scripts/verify-libbox.sh` against `Frameworks/Libbox.xcframework.sha256`.
@@ -34,7 +34,7 @@ swiftformat Hop HopTunnel Shared HopTests
 - For Swift concurrency:
   - Keep app code compatible with Swift 6.2 checking.
   - Be careful when crossing from gomobile/libbox callback types into Swift concurrency; convert non-Sendable libbox objects into Hop-owned value types before dispatching or crossing actor/thread boundaries.
-  - Do not raise `HopTunnel` back to Swift 6 without auditing the libbox bridge.
+  - Keep `HopTunnel` in Swift 6.2 and avoid broad `@unchecked Sendable`; use it only for tightly scoped bridge wrappers with clear synchronization or lifetime guarantees.
 
 ## Build and test commands
 

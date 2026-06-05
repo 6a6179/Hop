@@ -45,7 +45,6 @@
 		9D665400C7AA86557E1617CB /* HopTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2F56D7492B7FE1C62E0D33C4 /* HopTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		9EEEB24C881C3C68E0352A2C /* TransportOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69C0C9005A0C151FA0DC2689 /* TransportOptions.swift */; };
 		9FB2271C955A485CAA0AFCFB /* ProtocolOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = F292E846B530A70604A3BCD3 /* ProtocolOptions.swift */; };
-		A1A8C1F82DA2E444C4CFBD12 /* RunBlocking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62433961BC01B95ECF8FEC02 /* RunBlocking.swift */; };
 		AAE7EED0088A0A41343A6655 /* ProxyProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D3E00168EA2AEF3116D3EC8 /* ProxyProtocol.swift */; };
 		AC74C8D9D2A6AD187A7C182D /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 63AAF67F67AFF0C9362B98CF /* libresolv.tbd */; };
 		AD240E6D07071E6DC56FB0E6 /* TunnelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */; };
@@ -117,7 +116,6 @@
 		5C3B1EEDC81180DA191011CE /* SecurityOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecurityOptions.swift; sourceTree = "<group>"; };
 		5F3D56CD2BA215E54A3E5A68 /* Libbox.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libbox.xcframework; path = Frameworks/Libbox.xcframework; sourceTree = "<group>"; };
 		6146D2EF82C372A7318EE941 /* ProxyLinkParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyLinkParserTests.swift; sourceTree = "<group>"; };
-		62433961BC01B95ECF8FEC02 /* RunBlocking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunBlocking.swift; sourceTree = "<group>"; };
 		63AAF67F67AFF0C9362B98CF /* libresolv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = SDKROOT; };
 		680E9CD0B46D248970774323 /* TunnelTelemetryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelTelemetryClient.swift; sourceTree = "<group>"; };
 		69C0C9005A0C151FA0DC2689 /* TransportOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransportOptions.swift; sourceTree = "<group>"; };
@@ -318,7 +316,6 @@
 				41A4CF6E4FE8A01D7895AA00 /* Info.plist */,
 				C3C1A1195D47528F1006C545 /* PacketTunnelProvider.swift */,
 				DC7386115F302B34587AD99B /* PlatformInterface.swift */,
-				62433961BC01B95ECF8FEC02 /* RunBlocking.swift */,
 			);
 			path = HopTunnel;
 			sourceTree = "<group>";
@@ -520,7 +517,6 @@
 			files = (
 				5BA2FBD9CFCD766F1DC84C64 /* PacketTunnelProvider.swift in Sources */,
 				E85711D6F29ED59CCD026AA3 /* PlatformInterface.swift in Sources */,
-				A1A8C1F82DA2E444C4CFBD12 /* RunBlocking.swift in Sources */,
 				6AF29EED002D33D2B3A140F4 /* SecretReference.swift in Sources */,
 				C401585B7F6AC399B4DB9679 /* SecretStore.swift in Sources */,
 			);
@@ -597,7 +593,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = cat.string.hop.tunnel;
 				SDKROOT = iphoneos;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.2;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -699,7 +695,7 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = cat.string.hop.tunnel;
 				SDKROOT = iphoneos;
-				SWIFT_VERSION = 5.0;
+				SWIFT_VERSION = 6.2;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;

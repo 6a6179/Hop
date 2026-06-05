@@ -3,7 +3,7 @@ import Network
 import NetworkExtension
 
 #if canImport(Libbox)
-    import Libbox
+    @preconcurrency import Libbox
 
     /// Bridges sing-box's `libbox` engine to iOS NetworkExtension APIs.
     ///
@@ -43,9 +43,7 @@ import NetworkExtension
             let settings = try Self.makeNetworkSettings(from: options)
             networkSettings = settings
 
-            try runBlocking {
-                try await provider.setTunnelNetworkSettings(settings)
-            }
+            try Self.applyNetworkSettings(settings, to: provider)
 
             // The NEPacketTunnelFlow exposes the utun fd via KVC; fall back to
             // libbox's own loop-based lookup if Apple ever hides it.
@@ -64,22 +62,21 @@ import NetworkExtension
         func clearDNSCache() {
             guard let provider, let networkSettings else { return }
             // Re-applying the settings flushes the system resolver cache.
-            runBlocking {
-                try? await provider.setTunnelNetworkSettings(nil)
-                try? await provider.setTunnelNetworkSettings(networkSettings)
-            }
+            try? Self.applyNetworkSettings(nil, to: provider)
+            try? Self.applyNetworkSettings(networkSettings, to: provider)
         }
 
         func startDefaultInterfaceMonitor(_ listener: LibboxInterfaceUpdateListenerProtocol?) throws {
             guard let listener else { return }
+            let listenerBox = DefaultInterfaceListener(listener)
             let monitor = NWPathMonitor()
             pathMonitor = monitor
             let semaphore = DispatchSemaphore(value: 0)
             monitor.pathUpdateHandler = { path in
-                Self.notify(listener, of: path)
+                listenerBox.notify(of: path)
                 semaphore.signal()
                 monitor.pathUpdateHandler = { path in
-                    Self.notify(listener, of: path)
+                    listenerBox.notify(of: path)
                 }
             }
             monitor.start(queue: .global())
@@ -246,7 +243,24 @@ import NetworkExtension
             return routes
         }
 
-        private static func notify(_ listener: LibboxInterfaceUpdateListenerProtocol, of path: Network.NWPath) {
+        private static func applyNetworkSettings(_ settings: NEPacketTunnelNetworkSettings?, to provider: NEPacketTunnelProvider) throws {
+            let result = NetworkSettingsResult()
+            let semaphore = DispatchSemaphore(value: 0)
+
+            provider.setTunnelNetworkSettings(settings) { error in
+                if let error {
+                    result.set(.failure(error))
+                } else {
+                    result.set(.success(()))
+                }
+                semaphore.signal()
+            }
+
+            semaphore.wait()
+            try result.get()
+        }
+
+        fileprivate static func notify(_ listener: LibboxInterfaceUpdateListenerProtocol, of path: Network.NWPath) {
             guard path.status != .unsatisfied, let primary = path.availableInterfaces.first else {
                 listener.updateDefaultInterface("", interfaceIndex: -1, isExpensive: false, isConstrained: false)
                 return
@@ -285,6 +299,42 @@ import NetworkExtension
     }
 
     // MARK: - Supporting types
+
+    /// NWPathMonitor invokes its handler from a Sendable closure; libbox owns the
+    /// listener lifetime and expects updates from that monitor queue.
+    private final class DefaultInterfaceListener: @unchecked Sendable {
+        private let listener: LibboxInterfaceUpdateListenerProtocol
+
+        init(_ listener: LibboxInterfaceUpdateListenerProtocol) {
+            self.listener = listener
+        }
+
+        func notify(of path: Network.NWPath) {
+            HopPlatformInterface.notify(listener, of: path)
+        }
+    }
+
+    /// `setTunnelNetworkSettings` completes asynchronously, while libbox's TUN
+    /// callback is synchronous. The lock protects the callback result handoff.
+    private final class NetworkSettingsResult: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Result<Void, Error>?
+
+        func set(_ result: Result<Void, Error>) {
+            lock.lock()
+            defer { lock.unlock() }
+            self.result = result
+        }
+
+        func get() throws {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let result else {
+                throw HopTunnelError("setTunnelNetworkSettings completed without a result")
+            }
+            try result.get()
+        }
+    }
 
     /// Adapts a Swift array to libbox's pull-style network-interface iterator.
     private final class NetworkInterfaceIterator: NSObject, LibboxNetworkInterfaceIteratorProtocol {

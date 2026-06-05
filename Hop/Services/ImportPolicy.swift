@@ -128,7 +128,7 @@ enum ImportPolicy {
                     var address = sin.pointee.sin_addr
                     _ = inet_ntop(AF_INET, &address, &buffer, socklen_t(buffer.count))
                 }
-                if isPrivateOrReservedIPv4(String(cString: buffer)) {
+                if isPrivateOrReservedIPv4(string(fromNullTerminatedBuffer: buffer)) {
                     return true
                 }
             } else if current.pointee.ai_family == AF_INET6 {
@@ -136,12 +136,17 @@ enum ImportPolicy {
                     var address = sin6.pointee.sin6_addr
                     _ = inet_ntop(AF_INET6, &address, &buffer, socklen_t(buffer.count))
                 }
-                if isPrivateOrReservedIPv6(String(cString: buffer)) {
+                if isPrivateOrReservedIPv6(string(fromNullTerminatedBuffer: buffer)) {
                     return true
                 }
             }
         }
         return false
+    }
+
+    private static func string(fromNullTerminatedBuffer buffer: [CChar]) -> String {
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     /// Whether a URL-test probe URL is safe to emit into tunnel config. Callers

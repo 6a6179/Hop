@@ -2,10 +2,12 @@ import Foundation
 import NetworkExtension
 
 #if canImport(Libbox)
-    import Libbox
+    @preconcurrency import Libbox
 #endif
 
-final class PacketTunnelProvider: NEPacketTunnelProvider {
+/// The provider is handed from NetworkExtension's callback thread to a worker
+/// queue after start options are snapshotted into value types.
+final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private var logURL: URL?
 
     // Bound the shared tunnel log so a noisy/malicious proxy condition can't
@@ -20,27 +22,32 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     #endif
 
     override func startTunnel(options startOptions: [String: NSObject]?, completionHandler: @escaping @Sendable (Error?) -> Void) {
+        let request = TunnelStartRequest(
+            options: startOptions,
+            providerConfiguration: (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration,
+        )
+
         // libbox starts the engine synchronously, and during start it calls back
         // into `openTun`, which blocks on `setTunnelNetworkSettings`. Running
         // that on the NE callback thread can deadlock, so hop to a worker thread.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.startTunnelOnWorker(options: startOptions, completionHandler: completionHandler)
+            self?.startTunnelOnWorker(request: request, completionHandler: completionHandler)
         }
     }
 
-    private func startTunnelOnWorker(options startOptions: [String: NSObject]?, completionHandler: @escaping (Error?) -> Void) {
+    private func startTunnelOnWorker(request: TunnelStartRequest, completionHandler: @escaping @Sendable (Error?) -> Void) {
         do {
-            configureLogURL(options: startOptions)
+            configureLogURL(request: request)
             writeTunnelLog("PacketTunnelProvider.startTunnel invoked")
-            writeTunnelLog("Start option keys: \(visibleStartOptionKeys(startOptions).joined(separator: ", "))")
+            writeTunnelLog("Start option keys: \(request.visibleOptionKeys.joined(separator: ", "))")
 
-            let rawConfig = try loadConfig(options: startOptions)
+            let rawConfig = try loadConfig(request: request)
             // Generated config carries secret references, not credentials. Resolve
             // them from the shared Keychain here, in memory, just before starting.
             // The nonce (passed via start options, or the persisted provider
             // configuration on an iOS-initiated restart) gates which tokens are
             // resolvable, so import-supplied fields can't forge one.
-            let nonce = secretNonce(options: startOptions)
+            let nonce = request.secretNonce
             guard !nonce.isEmpty else { throw TunnelProviderError.missingSecretNonce }
             let (config, unresolvedSecrets) = SecretResolver.resolve(rawConfig, nonce: nonce)
             writeTunnelLog("Loaded tunnel settings (\(config.utf8.count) bytes)")
@@ -53,7 +60,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
             #if canImport(Libbox)
-                try startService(configContent: config, options: startOptions)
+                try startService(configContent: config, request: request)
                 writeTunnelLog("sing-box service started")
                 completionHandler(nil)
             #else
@@ -77,8 +84,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     #if canImport(Libbox)
-        private func startService(configContent: String, options: [String: NSObject]?) throws {
-            let container = appGroupContainer(options: options)
+        private func startService(configContent: String, request: TunnelStartRequest) throws {
+            let container = appGroupContainer(request: request)
             let workingPath = container.appendingPathComponent("Working", isDirectory: true)
             let tempPath = container.appendingPathComponent("Temp", isDirectory: true)
             try? FileManager.default.createDirectory(at: workingPath, withIntermediateDirectories: true)
@@ -131,34 +138,28 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     #endif
 
-    private func loadConfig(options: [String: NSObject]?) throws -> String {
-        if let configContent = options?["configContent"] as? String {
+    private func loadConfig(request: TunnelStartRequest) throws -> String {
+        if let configContent = request.optionConfigContent {
             writeTunnelLog("Using inline tunnel settings from start options")
             return configContent
         }
 
-        if let configPath = options?["configPath"] as? String {
+        if let configPath = request.optionConfigPath {
             writeTunnelLog("Reading tunnel settings from shared storage")
             return try String(contentsOfFile: configPath, encoding: .utf8)
         }
 
-        let providerConfiguration = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
-
-        if let providerConfiguration,
-           let configContent = providerConfiguration["configContent"] as? String
-        {
+        if let configContent = request.providerConfigContent {
             writeTunnelLog("Using inline tunnel settings from provider configuration")
             return configContent
         }
 
-        if let providerConfiguration,
-           let configPath = providerConfiguration["configPath"] as? String
-        {
+        if let configPath = request.providerConfigPath {
             writeTunnelLog("Reading tunnel settings from provider configuration")
             return try String(contentsOfFile: configPath, encoding: .utf8)
         }
 
-        if let appGroup = options?["appGroup"] as? String ?? providerConfiguration?["appGroup"] as? String,
+        if let appGroup = request.appGroup,
            let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
         {
             writeTunnelLog("Reading tunnel settings from App Group container")
@@ -168,22 +169,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         throw TunnelProviderError.missingConfig
     }
 
-    private func secretNonce(options: [String: NSObject]?) -> String {
-        let providerConfiguration = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
-        return (options?["secretNonce"] as? String)
-            ?? (providerConfiguration?["secretNonce"] as? String)
-            ?? ""
-    }
-
-    private func visibleStartOptionKeys(_ options: [String: NSObject]?) -> [String] {
-        let hiddenKeys: Set = ["configContent", "configPath"]
-        let keys = options?.keys.filter { !hiddenKeys.contains($0) }.sorted() ?? []
-        return keys.isEmpty ? ["none"] : keys
-    }
-
-    private func appGroupContainer(options: [String: NSObject]?) -> URL {
-        let providerConfiguration = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
-        if let appGroup = options?["appGroup"] as? String ?? providerConfiguration?["appGroup"] as? String,
+    private func appGroupContainer(request: TunnelStartRequest) -> URL {
+        if let appGroup = request.appGroup,
            let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
         {
             return container
@@ -192,17 +179,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         return FileManager.default.temporaryDirectory
     }
 
-    private func configureLogURL(options: [String: NSObject]?) {
-        let providerConfiguration = (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
-
-        if let appGroup = options?["appGroup"] as? String ?? providerConfiguration?["appGroup"] as? String,
+    private func configureLogURL(request: TunnelStartRequest) {
+        if let appGroup = request.appGroup,
            let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
         {
             logURL = container.appendingPathComponent("hop-tunnel.log")
             return
         }
 
-        if let configPath = options?["configPath"] as? String ?? providerConfiguration?["configPath"] as? String {
+        if let configPath = request.optionConfigPath ?? request.providerConfigPath {
             logURL = URL(fileURLWithPath: configPath).deletingLastPathComponent().appendingPathComponent("hop-tunnel.log")
         }
     }
@@ -265,6 +250,29 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             // If rotation fails, truncate so growth is still bounded.
             try? Data().write(to: logURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         }
+    }
+}
+
+private struct TunnelStartRequest {
+    let optionConfigContent: String?
+    let optionConfigPath: String?
+    let providerConfigContent: String?
+    let providerConfigPath: String?
+    let appGroup: String?
+    let secretNonce: String
+    let visibleOptionKeys: [String]
+
+    init(options: [String: NSObject]?, providerConfiguration: [String: Any]?) {
+        optionConfigContent = options?["configContent"] as? String
+        optionConfigPath = options?["configPath"] as? String
+        providerConfigContent = providerConfiguration?["configContent"] as? String
+        providerConfigPath = providerConfiguration?["configPath"] as? String
+        appGroup = (options?["appGroup"] as? String) ?? (providerConfiguration?["appGroup"] as? String)
+        secretNonce = (options?["secretNonce"] as? String) ?? (providerConfiguration?["secretNonce"] as? String) ?? ""
+
+        let hiddenKeys: Set = ["configContent", "configPath"]
+        let keys = options?.keys.filter { !hiddenKeys.contains($0) }.sorted() ?? []
+        visibleOptionKeys = keys.isEmpty ? ["none"] : keys
     }
 }
 
