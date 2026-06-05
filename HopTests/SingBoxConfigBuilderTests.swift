@@ -255,6 +255,56 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         try assertNoDanglingOutboundReferences(root)
     }
 
+    func testDropsInvalidConditionalRulesInsteadOfEmittingCatchAll() throws {
+        let longPattern = String(repeating: "a", count: ImportPolicy.maxRegexPatternLength + 1)
+        let rules = [
+            RoutingRule(kind: .geoSite, value: "../../evil/repo/main/payload", target: .direct),
+            RoutingRule(kind: .domainRegex, value: longPattern, target: .direct),
+            RoutingRule(kind: .port, value: "not-a-port", target: .reject),
+            RoutingRule(kind: .domainSuffix, value: "apple.com", target: .direct),
+            RoutingRule(kind: .final, value: "*", target: .reject),
+        ]
+
+        let json = try builder.build(profile: SampleData.vlessReality, routingMode: .rule, rules: rules)
+        let root = try XCTUnwrap(parse(json))
+        let route = try XCTUnwrap(root["route"] as? [String: Any])
+        let routeRules = try XCTUnwrap(route["rules"] as? [[String: Any]]).filter { $0["action"] == nil }
+
+        XCTAssertEqual(routeRules.count, 2)
+        XCTAssertEqual(routeRules[0]["domain_suffix"] as? [String], ["apple.com"])
+        XCTAssertEqual(routeRules[0]["outbound"] as? String, "direct")
+        XCTAssertEqual(Set(routeRules[1].keys), ["outbound"])
+        XCTAssertEqual(routeRules[1]["outbound"] as? String, "reject")
+        XCTAssertFalse(json.contains("../"))
+        try assertNoDanglingOutboundReferences(root)
+    }
+
+    func testNamedProxyGroupWinsOverReservedProxyAlias() throws {
+        let group = ProxyGroup(
+            name: "Proxy",
+            type: .select,
+            members: [.profile(SampleData.trojanTLS.id)],
+            defaultTarget: .profile(SampleData.trojanTLS.id),
+        )
+        let rules = [
+            RoutingRule(kind: .domainSuffix, value: "apple.com", target: .named("Proxy")),
+        ]
+
+        let json = try builder.build(
+            profiles: SampleData.profiles,
+            groups: [group],
+            selectedTarget: .profile(SampleData.vlessReality.id),
+            routingMode: .rule,
+            rules: rules,
+        )
+        let root = try XCTUnwrap(parse(json))
+        let route = try XCTUnwrap(root["route"] as? [String: Any])
+        let routeRules = try XCTUnwrap(route["rules"] as? [[String: Any]]).filter { $0["action"] == nil }
+
+        XCTAssertEqual(routeRules.first?["outbound"] as? String, groupTag(group))
+        try assertNoDanglingOutboundReferences(root)
+    }
+
     private func parse(_ json: String) throws -> [String: Any]? {
         let data = try XCTUnwrap(json.data(using: .utf8))
         return try JSONSerialization.jsonObject(with: data) as? [String: Any]

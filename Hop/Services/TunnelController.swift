@@ -100,7 +100,6 @@ final class TunnelController {
             observeStatus(for: manager.connection)
             appendLog("Starting NetworkExtension tunnel")
             try manager.connection.startVPNTunnel(options: [
-                "configContent": configContent as NSString,
                 "configPath": RuntimeEnvironment.configFileURL.path as NSString,
                 "appGroup": RuntimeEnvironment.appGroupIdentifier as NSString,
                 "secretNonce": secretNonce as NSString,

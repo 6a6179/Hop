@@ -90,7 +90,7 @@ struct SharedTunnelConfigurationStore {
     func writeConfig(_ config: String) throws {
         let url = RuntimeEnvironment.configFileURL
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        // Generated config embeds the same secrets as app state; protect at rest.
+        // Generated config carries nonce-bound secret references; protect at rest.
         try Data(config.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 }

@@ -52,6 +52,33 @@ final class LatencyTesterTests: XCTestCase {
         XCTAssertNil(NodeLatencyResult.failure("x").milliseconds)
     }
 
+    @MainActor
+    func testStoreRejectsResolvedPrivateLatencyHostsBeforeProbe() async {
+        let profile = ProxyProfile(
+            name: "Encoded Loopback",
+            endpoint: Endpoint(host: "127.1", port: 443),
+            proto: .trojan,
+            options: .trojan(TrojanOptions(password: "secret")),
+            security: .tls(TLSOptions(serverName: "example.com")),
+        )
+        let store = HopStore(
+            profiles: [profile],
+            groups: [],
+            subscriptions: [],
+            ruleConfigurations: [],
+            activeRuleConfigurationID: nil,
+            routingMode: .global,
+            selectedTarget: .profile(profile.id),
+            settings: .defaults,
+            tunnel: TunnelController(logs: []),
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()),
+        )
+
+        await store.testLatency(for: profile)
+
+        XCTAssertEqual(store.nodeLatencies[profile.id], .failure("Endpoint host is not permitted for latency testing"))
+    }
+
     // MARK: - ICMP packet construction
 
     func testICMPv4EchoRequestHasValidChecksum() {
@@ -115,6 +142,12 @@ final class LatencyTesterTests: XCTestCase {
             UInt8(sequence >> 8), UInt8(sequence & 0xFF),
         ]
         return header + icmp + Array("reply".utf8)
+    }
+
+    private func tempStateURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("hop-latency-tests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("hop-state.json")
     }
 
     private func onesComplementSum(_ bytes: [UInt8]) -> UInt16 {

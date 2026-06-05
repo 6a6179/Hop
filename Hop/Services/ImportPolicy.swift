@@ -159,7 +159,7 @@ enum ImportPolicy {
         else {
             return false
         }
-        return !isDisallowedRemoteHost(host)
+        return !isDisallowedRemoteHost(host) && !resolvedAddressesAreDisallowed(host)
     }
 
     /// Whether an import-supplied regex is bounded enough to evaluate safely.

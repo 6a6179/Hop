@@ -342,7 +342,9 @@ struct SingBoxConfigBuilder {
         }
         if case .rule = mode {
             for rule in rules {
-                ruleDicts.append(ruleDictionary(from: rule, selectedTag: selectedTag, resolver: resolver, ruleSets: &ruleSets))
+                if let rule = ruleDictionary(from: rule, selectedTag: selectedTag, resolver: resolver, ruleSets: &ruleSets) {
+                    ruleDicts.append(rule)
+                }
             }
         }
 
@@ -376,7 +378,7 @@ struct SingBoxConfigBuilder {
         ]
     }
 
-    private func ruleDictionary(from rule: RoutingRule, selectedTag: String, resolver: OutboundTagResolver, ruleSets: inout [String: [String: Any]]) -> [String: Any] {
+    private func ruleDictionary(from rule: RoutingRule, selectedTag: String, resolver: OutboundTagResolver, ruleSets: inout [String: [String: Any]]) -> [String: Any]? {
         var dictionary: [String: Any] = [
             "outbound": rule.target == .selectedProxy ? selectedTag : resolver.tag(for: rule.target) ?? selectedTag,
         ]
@@ -385,35 +387,35 @@ struct SingBoxConfigBuilder {
         case .final:
             break
         case .domain:
-            dictionary["domain"] = stringList(from: rule.value)
+            addStringList("domain", from: rule.value, to: &dictionary)
         case .domainSuffix:
-            dictionary["domain_suffix"] = stringList(from: rule.value)
+            addStringList("domain_suffix", from: rule.value, to: &dictionary)
         case .domainKeyword:
-            dictionary["domain_keyword"] = stringList(from: rule.value)
+            addStringList("domain_keyword", from: rule.value, to: &dictionary)
         case .domainRegex:
             // Drop oversized/uncompilable patterns so a malicious imported rule
             // cannot hand a catastrophic regex to the tunnel's route engine.
-            dictionary["domain_regex"] = stringList(from: rule.value).filter(ImportPolicy.isSafeRegexPattern)
+            addStringList("domain_regex", values: stringList(from: rule.value).filter(ImportPolicy.isSafeRegexPattern), to: &dictionary)
         case .ipCIDR:
-            dictionary["ip_cidr"] = stringList(from: rule.value)
+            addStringList("ip_cidr", from: rule.value, to: &dictionary)
         case .ipIsPrivate:
-            dictionary["ip_is_private"] = boolValue(from: rule.value)
+            addBool("ip_is_private", from: rule.value, to: &dictionary)
         case .sourceIPCIDR:
-            dictionary["source_ip_cidr"] = stringList(from: rule.value)
+            addStringList("source_ip_cidr", from: rule.value, to: &dictionary)
         case .sourceIPIsPrivate:
-            dictionary["source_ip_is_private"] = boolValue(from: rule.value)
+            addBool("source_ip_is_private", from: rule.value, to: &dictionary)
         case .port:
-            dictionary["port"] = intList(from: rule.value)
+            addIntList("port", from: rule.value, to: &dictionary)
         case .portRange:
-            dictionary["port_range"] = stringList(from: rule.value)
+            addStringList("port_range", from: rule.value, to: &dictionary)
         case .sourcePort:
-            dictionary["source_port"] = intList(from: rule.value)
+            addIntList("source_port", from: rule.value, to: &dictionary)
         case .sourcePortRange:
-            dictionary["source_port_range"] = stringList(from: rule.value)
+            addStringList("source_port_range", from: rule.value, to: &dictionary)
         case .network:
-            dictionary["network"] = stringList(from: rule.value)
+            addStringList("network", from: rule.value, to: &dictionary)
         case .protocolSniff:
-            dictionary["protocol"] = stringList(from: rule.value)
+            addStringList("protocol", from: rule.value, to: &dictionary)
         case .geoSite:
             // sing-box 1.12 removed the bundled geosite/geoip databases in favor
             // of rule-sets, so map geosite categories to the published remote sets.
@@ -426,17 +428,20 @@ struct SingBoxConfigBuilder {
         case .sourceGeoIP:
             dictionary.merge(geoIPConditions(from: rule.value, source: true, downloadDetour: selectedTag, into: &ruleSets)) { _, new in new }
         case .networkType:
-            dictionary["network_type"] = stringList(from: rule.value)
+            addStringList("network_type", from: rule.value, to: &dictionary)
         case .networkIsExpensive:
-            dictionary["network_is_expensive"] = boolValue(from: rule.value)
+            addBool("network_is_expensive", from: rule.value, to: &dictionary)
         case .networkIsConstrained:
-            dictionary["network_is_constrained"] = boolValue(from: rule.value)
+            addBool("network_is_constrained", from: rule.value, to: &dictionary)
         case .wifiSSID:
-            dictionary["wifi_ssid"] = stringList(from: rule.value)
+            addStringList("wifi_ssid", from: rule.value, to: &dictionary)
         case .wifiBSSID:
-            dictionary["wifi_bssid"] = stringList(from: rule.value)
+            addStringList("wifi_bssid", from: rule.value, to: &dictionary)
         }
 
+        guard rule.kind == .final || dictionary.keys.contains(where: { $0 != "outbound" }) else {
+            return nil
+        }
         return dictionary
     }
 
@@ -502,9 +507,36 @@ struct SingBoxConfigBuilder {
             .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
     }
 
-    private func boolValue(from value: String) -> Bool {
+    private func addStringList(_ key: String, from value: String, to dictionary: inout [String: Any]) {
+        addStringList(key, values: stringList(from: value), to: &dictionary)
+    }
+
+    private func addStringList(_ key: String, values: [String], to dictionary: inout [String: Any]) {
+        guard !values.isEmpty else { return }
+        dictionary[key] = values
+    }
+
+    private func addIntList(_ key: String, from value: String, to dictionary: inout [String: Any]) {
+        let values = intList(from: value)
+        guard !values.isEmpty else { return }
+        dictionary[key] = values
+    }
+
+    private func addBool(_ key: String, from value: String, to dictionary: inout [String: Any]) {
+        guard let value = boolValue(from: value) else { return }
+        dictionary[key] = value
+    }
+
+    private func boolValue(from value: String) -> Bool? {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalized == "true" || normalized == "yes" || normalized == "1"
+        switch normalized {
+        case "true", "yes", "1":
+            return true
+        case "false", "no", "0":
+            return false
+        default:
+            return nil
+        }
     }
 }
 
@@ -554,6 +586,12 @@ private struct OutboundTagResolver {
 
     private func tag(forNamed name: String) -> String? {
         let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let profile = profiles.first(where: { $0.name.lowercased() == normalized }) {
+            return tag(for: profile)
+        }
+        if let group = groups.first(where: { $0.name.lowercased() == normalized && runnableGroupIDs.contains($0.id) }) {
+            return tag(for: group)
+        }
         if normalized == "direct" {
             return "direct"
         }
@@ -562,12 +600,6 @@ private struct OutboundTagResolver {
         }
         if normalized == "proxy" {
             return defaultProxyTag
-        }
-        if let profile = profiles.first(where: { $0.name.lowercased() == normalized }) {
-            return tag(for: profile)
-        }
-        if let group = groups.first(where: { $0.name.lowercased() == normalized && runnableGroupIDs.contains($0.id) }) {
-            return tag(for: group)
         }
         return nil
     }

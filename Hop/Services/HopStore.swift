@@ -489,7 +489,9 @@ final class HopStore {
         // otherwise turn the "test latency" action into a LAN scanner. This
         // mirrors the SSRF policy applied to subscription fetches.
         let host = profile.endpoint.host
-        guard !ImportPolicy.isDisallowedRemoteHost(host) else {
+        guard !ImportPolicy.isDisallowedRemoteHost(host),
+              !ImportPolicy.resolvedAddressesAreDisallowed(host)
+        else {
             nodeLatencies[profile.id] = .failure("Endpoint host is not permitted for latency testing")
             return
         }

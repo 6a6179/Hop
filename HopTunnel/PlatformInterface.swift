@@ -80,7 +80,11 @@ import NetworkExtension
                 }
             }
             monitor.start(queue: .global())
-            semaphore.wait()
+            if semaphore.wait(timeout: .now() + .seconds(5)) == .timedOut {
+                monitor.cancel()
+                pathMonitor = nil
+                throw HopTunnelError("timed out waiting for the default network interface")
+            }
         }
 
         func closeDefaultInterfaceMonitor(_: LibboxInterfaceUpdateListenerProtocol?) throws {
@@ -200,7 +204,7 @@ import NetworkExtension
         }
 
         private static func includedIPv4Routes(_ options: LibboxTunOptionsProtocol) -> [NEIPv4Route] {
-            guard let iterator = options.getInet4RouteAddress(), iterator.hasNext() else {
+            guard let iterator = options.getInet4RouteAddress() else {
                 return [NEIPv4Route.default()]
             }
             var routes: [NEIPv4Route] = []
@@ -208,7 +212,7 @@ import NetworkExtension
                 guard let prefix = iterator.next() else { break }
                 routes.append(NEIPv4Route(destinationAddress: prefix.address(), subnetMask: prefix.mask()))
             }
-            return routes
+            return routes.isEmpty ? [NEIPv4Route.default()] : routes
         }
 
         private static func excludedIPv4Routes(_ options: LibboxTunOptionsProtocol) -> [NEIPv4Route] {
@@ -222,7 +226,7 @@ import NetworkExtension
         }
 
         private static func includedIPv6Routes(_ options: LibboxTunOptionsProtocol) -> [NEIPv6Route] {
-            guard let iterator = options.getInet6RouteAddress(), iterator.hasNext() else {
+            guard let iterator = options.getInet6RouteAddress() else {
                 return [NEIPv6Route.default()]
             }
             var routes: [NEIPv6Route] = []
@@ -230,7 +234,7 @@ import NetworkExtension
                 guard let prefix = iterator.next() else { break }
                 routes.append(NEIPv6Route(destinationAddress: prefix.address(), networkPrefixLength: NSNumber(value: prefix.prefix())))
             }
-            return routes
+            return routes.isEmpty ? [NEIPv6Route.default()] : routes
         }
 
         private static func excludedIPv6Routes(_ options: LibboxTunOptionsProtocol) -> [NEIPv6Route] {
@@ -256,7 +260,9 @@ import NetworkExtension
                 semaphore.signal()
             }
 
-            semaphore.wait()
+            if semaphore.wait(timeout: .now() + .seconds(10)) == .timedOut {
+                throw HopTunnelError("timed out applying tunnel network settings")
+            }
             try result.get()
         }
 
