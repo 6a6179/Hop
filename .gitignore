@@ -1,0 +1,9 @@
+.DS_Store
+DerivedData/
+build/
+*.xcuserstate
+xcuserdata/
+
+# sing-box engine — large GPL build artifact, rebuilt via scripts/build-libbox.sh
+Frameworks/*.xcframework
+

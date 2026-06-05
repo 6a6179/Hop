@@ -1,0 +1,76 @@
+name: Hop
+options:
+  bundleIdPrefix: cat.string
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.2"
+    IPHONEOS_DEPLOYMENT_TARGET: "26.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    DEVELOPMENT_TEAM: ""
+targets:
+  Hop:
+    type: application
+    platform: iOS
+    sources:
+      - Hop
+      - Shared
+    dependencies:
+      - target: HopTunnel
+        embed: true
+      # The app links libbox only for the lightweight command client used to
+      # subscribe to live tunnel status/connections from the extension.
+      - framework: Frameworks/Libbox.xcframework
+        embed: false
+      - sdk: libresolv.tbd
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cat.string.hop
+        INFOPLIST_FILE: Hop/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Hop/Hop.entitlements
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  HopTunnel:
+    type: app-extension
+    platform: iOS
+    sources:
+      - HopTunnel
+      - Shared
+    preBuildScripts:
+      # Fail the build if the vendored sing-box engine doesn't match the
+      # checked-in provenance checksum (scripts/verify-libbox.sh). Rebuilding
+      # the engine via scripts/build-libbox.sh refreshes the manifest.
+      - name: Verify Libbox provenance
+        script: '"$SRCROOT/scripts/verify-libbox.sh"'
+        basedOnDependencyAnalysis: false
+    dependencies:
+      # Build this first: scripts/build-libbox.sh (needs Go). gomobile emits a
+      # *static* framework, so it's linked into the .appex, not embedded.
+      - framework: Frameworks/Libbox.xcframework
+        embed: false
+      # System libs the static Go engine references: libresolv (Darwin DNS,
+      # res_9_*) and UIKit (a background-task helper inside the engine).
+      - sdk: libresolv.tbd
+      - sdk: UIKit.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cat.string.hop.tunnel
+        INFOPLIST_FILE: HopTunnel/Info.plist
+        CODE_SIGN_ENTITLEMENTS: HopTunnel/HopTunnel.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        # libbox invokes the platform interface synchronously from Go threads
+        # and traffics in non-Sendable gomobile types; Swift 5 language mode
+        # keeps the bridging code (PlatformInterface/PacketTunnelProvider) sane.
+        SWIFT_VERSION: "5.0"
+  HopTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - HopTests
+    dependencies:
+      - target: Hop
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: cat.string.hop.tests
+        GENERATE_INFOPLIST_FILE: YES

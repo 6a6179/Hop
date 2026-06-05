@@ -1,0 +1,832 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		02332333A52B2D2D774707B7 /* TunnelModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB7AC0BA8603FEDB0F77C2DE /* TunnelModels.swift */; };
+		0DA1DAA3C43AB92A5BAAF21F /* SecretReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB58A1962B36732A51D8BF8 /* SecretReference.swift */; };
+		10139CB03AE4868DF9E1AF2D /* SingBoxConfigBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F39E204D052663E8E718024B /* SingBoxConfigBuilderTests.swift */; };
+		11FA3F59B9460CDD7F4B5396 /* ProfileSecuritySummary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3533A427455D1019D363597D /* ProfileSecuritySummary.swift */; };
+		16CB63C3F7D60E0768D55D6D /* RuleConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7E46919491D8D0B6DEE8A00 /* RuleConfigurationTests.swift */; };
+		1C3ACFCC2E9F6FB7901E53AD /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5F3D56CD2BA215E54A3E5A68 /* Libbox.xcframework */; };
+		203D0B19FAE4BD253F8A6ECD /* ImportPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9CBC4636218C0A2AB8FD4E4 /* ImportPolicy.swift */; };
+		23EAD6F87194290206EBA973 /* ProxyLinkParserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6146D2EF82C372A7318EE941 /* ProxyLinkParserTests.swift */; };
+		23F98133B5991C5E7ECAAA91 /* HopApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED8696CCF094E303BC77A9D7 /* HopApp.swift */; };
+		246A575B6AE82F98644E0A73 /* RuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9305B8EEC96671033BF8DD41 /* RuntimeEnvironment.swift */; };
+		3437B5CC89B37E7FDF19387C /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45D692D5F1AD88DA8A136049 /* DashboardView.swift */; };
+		35B5CE1EEA46D54914152942 /* HopAppDataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D657EAB1CEE8F6507C6C26FD /* HopAppDataStore.swift */; };
+		3C9C99E42B220EA65FADC777 /* ProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B42744CD10EDFE8C38981CD8 /* ProfilesView.swift */; };
+		4D6C83A255F379FBA1331CAC /* ProfileSecrets.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E14B112D833A1545DDD4E1 /* ProfileSecrets.swift */; };
+		4F310B282EA4DE1AC601B351 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 79F3F8AA2AE8E9390B779188 /* Assets.xcassets */; };
+		4FAE12EDCB3999471879BD81 /* SecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1B76DFDAC1976712EA1386 /* SecretStore.swift */; };
+		554C5D540ECBA7A4CA32A7C6 /* OutboundModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E77A8D48C7370FDBDBD9776 /* OutboundModels.swift */; };
+		56698F9E52B7D46F4430BD36 /* HopStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C6F50AF2F75019D15087E3D /* HopStore.swift */; };
+		5BA2FBD9CFCD766F1DC84C64 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3C1A1195D47528F1006C545 /* PacketTunnelProvider.swift */; };
+		5DA051C21AED8EB405D12E06 /* SecurityOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C3B1EEDC81180DA191011CE /* SecurityOptions.swift */; };
+		66E7FE798EF7CF308F14BE30 /* TunnelTelemetryClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 680E9CD0B46D248970774323 /* TunnelTelemetryClient.swift */; };
+		695DC96D50ED6938F5E795E1 /* AppShellView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40BAA6499BBA221EB43E4E49 /* AppShellView.swift */; };
+		6A7F0A1566B1054980470106 /* SingBoxConfigBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77E4FA85BD8446B9A49B31FA /* SingBoxConfigBuilder.swift */; };
+		6AF29EED002D33D2B3A140F4 /* SecretReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DB58A1962B36732A51D8BF8 /* SecretReference.swift */; };
+		6BC0945EC83C53C36352759A /* ConnectionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8A0C129D627AF70557DB8E0 /* ConnectionsView.swift */; };
+		6E27502FEB4697CA1227F524 /* LatencyTester.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C525BE7E4E464399AFB088D /* LatencyTester.swift */; };
+		6F978A1E184D73FFF5EFA849 /* ImportSecurityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F6ED3750E2AE856EFF6F83C /* ImportSecurityTests.swift */; };
+		72B42A9C2CAA784C9C7DF16C /* SampleData.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB0642CF6291B59DF655FF2 /* SampleData.swift */; };
+		807DA6B6FBAD169A76D2FA93 /* SecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F32FB4AA500BEEA4F0C413E1 /* SecretStoreTests.swift */; };
+		80E1845A601E6012D5C20996 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 204BB708587D0E01566D5250 /* UIKit.framework */; };
+		85F26C5948FA94EC7DFF811F /* ProxyProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28DCC6F3C157E2984F8C31F1 /* ProxyProfile.swift */; };
+		8F307C1C80E4FF82D3E5CAA2 /* LatencyTesterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E8FAC2518BE966D47648D08 /* LatencyTesterTests.swift */; };
+		8F93B14355184EAD0FFB0458 /* RoutingModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C0F39000C684AB2876861F2 /* RoutingModels.swift */; };
+		9858F6FB19871B333349E68D /* HopAppDataStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 925A26C8EE99AC05A9A8A9FB /* HopAppDataStoreTests.swift */; };
+		9D3F5EB032DEE9DD4057E073 /* ActiveBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5FCAFB69C6699C719D4BBF9 /* ActiveBadge.swift */; };
+		9D665400C7AA86557E1617CB /* HopTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2F56D7492B7FE1C62E0D33C4 /* HopTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		9EEEB24C881C3C68E0352A2C /* TransportOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69C0C9005A0C151FA0DC2689 /* TransportOptions.swift */; };
+		9FB2271C955A485CAA0AFCFB /* ProtocolOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = F292E846B530A70604A3BCD3 /* ProtocolOptions.swift */; };
+		A1A8C1F82DA2E444C4CFBD12 /* RunBlocking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62433961BC01B95ECF8FEC02 /* RunBlocking.swift */; };
+		AAE7EED0088A0A41343A6655 /* ProxyProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D3E00168EA2AEF3116D3EC8 /* ProxyProtocol.swift */; };
+		AC74C8D9D2A6AD187A7C182D /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 63AAF67F67AFF0C9362B98CF /* libresolv.tbd */; };
+		AD240E6D07071E6DC56FB0E6 /* TunnelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */; };
+		AD5430672945FB6F2C5DF2F3 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BB6FA5218140CC9E14D3B74 /* LogsView.swift */; };
+		BC129EDCE92BCE3DD864260E /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF668543CBA3F5DEE434ADEF /* SettingsView.swift */; };
+		BC23B6D0A4235D9BEF6B9CF5 /* ProxyLinkParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = F168B262ED2CE3C6812A5D8D /* ProxyLinkParser.swift */; };
+		C3FE6096230E6A4D16C785BE /* Endpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84979FFBEFD45B93D94D5B99 /* Endpoint.swift */; };
+		C401585B7F6AC399B4DB9679 /* SecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1B76DFDAC1976712EA1386 /* SecretStore.swift */; };
+		E09B9E1A5C19BDAEF96312C8 /* InMemorySecretBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8E77E25E525EA7855367170 /* InMemorySecretBackend.swift */; };
+		E365C6ED54205DCB07318E59 /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5F3D56CD2BA215E54A3E5A68 /* Libbox.xcframework */; };
+		E85711D6F29ED59CCD026AA3 /* PlatformInterface.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC7386115F302B34587AD99B /* PlatformInterface.swift */; };
+		EE8D060ABB1FA3438FEE5E3F /* RulesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2133782FCFF25BE2983A29E /* RulesView.swift */; };
+		F9D7D969CE3344F06F1EFE2E /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 63AAF67F67AFF0C9362B98CF /* libresolv.tbd */; };
+		FD58D51E512CE9AD1C0EF6B8 /* RuleConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B49DF2D9B765059F8D7117D /* RuleConfiguration.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		115823EC866F875A96E998E6 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2FED190865A756C0695606FF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 829BE4706EBB57EE2B81F027;
+			remoteInfo = HopTunnel;
+		};
+		D20BB72D27883D050202B057 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2FED190865A756C0695606FF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1ACE8AE088B1FAB246636BF8;
+			remoteInfo = Hop;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		71DBB5222F4DFC0110B004AE /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				9D665400C7AA86557E1617CB /* HopTunnel.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		0032BEE08C6D0079328755FA /* HopTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HopTunnel.entitlements; sourceTree = "<group>"; };
+		0C6F50AF2F75019D15087E3D /* HopStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopStore.swift; sourceTree = "<group>"; };
+		1B49DF2D9B765059F8D7117D /* RuleConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleConfiguration.swift; sourceTree = "<group>"; };
+		1E1B76DFDAC1976712EA1386 /* SecretStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretStore.swift; sourceTree = "<group>"; };
+		204BB708587D0E01566D5250 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+		28DCC6F3C157E2984F8C31F1 /* ProxyProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyProfile.swift; sourceTree = "<group>"; };
+		2C0F39000C684AB2876861F2 /* RoutingModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoutingModels.swift; sourceTree = "<group>"; };
+		2C525BE7E4E464399AFB088D /* LatencyTester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyTester.swift; sourceTree = "<group>"; };
+		2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelController.swift; sourceTree = "<group>"; };
+		2F56D7492B7FE1C62E0D33C4 /* HopTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HopTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		3533A427455D1019D363597D /* ProfileSecuritySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSecuritySummary.swift; sourceTree = "<group>"; };
+		3E77A8D48C7370FDBDBD9776 /* OutboundModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboundModels.swift; sourceTree = "<group>"; };
+		3E8FAC2518BE966D47648D08 /* LatencyTesterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyTesterTests.swift; sourceTree = "<group>"; };
+		40BAA6499BBA221EB43E4E49 /* AppShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShellView.swift; sourceTree = "<group>"; };
+		41A4CF6E4FE8A01D7895AA00 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		45D692D5F1AD88DA8A136049 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		4BB6FA5218140CC9E14D3B74 /* LogsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogsView.swift; sourceTree = "<group>"; };
+		4D3E00168EA2AEF3116D3EC8 /* ProxyProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyProtocol.swift; sourceTree = "<group>"; };
+		4DB58A1962B36732A51D8BF8 /* SecretReference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretReference.swift; sourceTree = "<group>"; };
+		4F6ED3750E2AE856EFF6F83C /* ImportSecurityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportSecurityTests.swift; sourceTree = "<group>"; };
+		5C3B1EEDC81180DA191011CE /* SecurityOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecurityOptions.swift; sourceTree = "<group>"; };
+		5F3D56CD2BA215E54A3E5A68 /* Libbox.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = Libbox.xcframework; path = Frameworks/Libbox.xcframework; sourceTree = "<group>"; };
+		6146D2EF82C372A7318EE941 /* ProxyLinkParserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyLinkParserTests.swift; sourceTree = "<group>"; };
+		62433961BC01B95ECF8FEC02 /* RunBlocking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunBlocking.swift; sourceTree = "<group>"; };
+		63AAF67F67AFF0C9362B98CF /* libresolv.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libresolv.tbd; path = usr/lib/libresolv.tbd; sourceTree = SDKROOT; };
+		680E9CD0B46D248970774323 /* TunnelTelemetryClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelTelemetryClient.swift; sourceTree = "<group>"; };
+		69C0C9005A0C151FA0DC2689 /* TransportOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TransportOptions.swift; sourceTree = "<group>"; };
+		6E5C2A006DDF657377CF6E91 /* Hop.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Hop.entitlements; sourceTree = "<group>"; };
+		77E4FA85BD8446B9A49B31FA /* SingBoxConfigBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingBoxConfigBuilder.swift; sourceTree = "<group>"; };
+		79F3F8AA2AE8E9390B779188 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		84979FFBEFD45B93D94D5B99 /* Endpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Endpoint.swift; sourceTree = "<group>"; };
+		8F825207FA0FDCF8554B6650 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		925A26C8EE99AC05A9A8A9FB /* HopAppDataStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopAppDataStoreTests.swift; sourceTree = "<group>"; };
+		9305B8EEC96671033BF8DD41 /* RuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEnvironment.swift; sourceTree = "<group>"; };
+		A8E77E25E525EA7855367170 /* InMemorySecretBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InMemorySecretBackend.swift; sourceTree = "<group>"; };
+		AB7AC0BA8603FEDB0F77C2DE /* TunnelModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelModels.swift; sourceTree = "<group>"; };
+		B42744CD10EDFE8C38981CD8 /* ProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesView.swift; sourceTree = "<group>"; };
+		B5FCAFB69C6699C719D4BBF9 /* ActiveBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveBadge.swift; sourceTree = "<group>"; };
+		B76EB08FBBECCCF421DC0A7F /* Hop.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Hop.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B9CBC4636218C0A2AB8FD4E4 /* ImportPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportPolicy.swift; sourceTree = "<group>"; };
+		C3C1A1195D47528F1006C545 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		C7E46919491D8D0B6DEE8A00 /* RuleConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleConfigurationTests.swift; sourceTree = "<group>"; };
+		C8A0C129D627AF70557DB8E0 /* ConnectionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionsView.swift; sourceTree = "<group>"; };
+		D2133782FCFF25BE2983A29E /* RulesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulesView.swift; sourceTree = "<group>"; };
+		D657EAB1CEE8F6507C6C26FD /* HopAppDataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopAppDataStore.swift; sourceTree = "<group>"; };
+		DC51AD5366767DDF9D66EE64 /* HopTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HopTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		DC7386115F302B34587AD99B /* PlatformInterface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformInterface.swift; sourceTree = "<group>"; };
+		E7E14B112D833A1545DDD4E1 /* ProfileSecrets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSecrets.swift; sourceTree = "<group>"; };
+		ED8696CCF094E303BC77A9D7 /* HopApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopApp.swift; sourceTree = "<group>"; };
+		F168B262ED2CE3C6812A5D8D /* ProxyLinkParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyLinkParser.swift; sourceTree = "<group>"; };
+		F292E846B530A70604A3BCD3 /* ProtocolOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolOptions.swift; sourceTree = "<group>"; };
+		F32FB4AA500BEEA4F0C413E1 /* SecretStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretStoreTests.swift; sourceTree = "<group>"; };
+		F39E204D052663E8E718024B /* SingBoxConfigBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingBoxConfigBuilderTests.swift; sourceTree = "<group>"; };
+		FEB0642CF6291B59DF655FF2 /* SampleData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleData.swift; sourceTree = "<group>"; };
+		FF668543CBA3F5DEE434ADEF /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		08AB12EDA89B36F793EA17BE /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E365C6ED54205DCB07318E59 /* Libbox.xcframework in Frameworks */,
+				F9D7D969CE3344F06F1EFE2E /* libresolv.tbd in Frameworks */,
+				80E1845A601E6012D5C20996 /* UIKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		76E0FD92BFDB6BB407358555 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				1C3ACFCC2E9F6FB7901E53AD /* Libbox.xcframework in Frameworks */,
+				AC74C8D9D2A6AD187A7C182D /* libresolv.tbd in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		145C147B91587805BDF8D7F5 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B76EB08FBBECCCF421DC0A7F /* Hop.app */,
+				DC51AD5366767DDF9D66EE64 /* HopTests.xctest */,
+				2F56D7492B7FE1C62E0D33C4 /* HopTunnel.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		170071FBD9CCAA5C8329C421 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				5F3D56CD2BA215E54A3E5A68 /* Libbox.xcframework */,
+				63AAF67F67AFF0C9362B98CF /* libresolv.tbd */,
+				204BB708587D0E01566D5250 /* UIKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		32DF393F75975369CAF200F8 /* Services */ = {
+			isa = PBXGroup;
+			children = (
+				D657EAB1CEE8F6507C6C26FD /* HopAppDataStore.swift */,
+				0C6F50AF2F75019D15087E3D /* HopStore.swift */,
+				B9CBC4636218C0A2AB8FD4E4 /* ImportPolicy.swift */,
+				2C525BE7E4E464399AFB088D /* LatencyTester.swift */,
+				F168B262ED2CE3C6812A5D8D /* ProxyLinkParser.swift */,
+				9305B8EEC96671033BF8DD41 /* RuntimeEnvironment.swift */,
+				FEB0642CF6291B59DF655FF2 /* SampleData.swift */,
+				77E4FA85BD8446B9A49B31FA /* SingBoxConfigBuilder.swift */,
+				2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */,
+				680E9CD0B46D248970774323 /* TunnelTelemetryClient.swift */,
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		35D045E5918BDBF55902DDF4 /* Hop */ = {
+			isa = PBXGroup;
+			children = (
+				6E5C2A006DDF657377CF6E91 /* Hop.entitlements */,
+				8F825207FA0FDCF8554B6650 /* Info.plist */,
+				5AF28CEC9AAE1E6F3A333B20 /* App */,
+				D33B6D5F551F43A3C5520CC5 /* Models */,
+				E0C76790F70C8597BAFC9EDA /* Resources */,
+				32DF393F75975369CAF200F8 /* Services */,
+				94C428D6A0B567FC12A11DD6 /* Views */,
+			);
+			path = Hop;
+			sourceTree = "<group>";
+		};
+		4792D953B0252DE1BA990973 /* HopTests */ = {
+			isa = PBXGroup;
+			children = (
+				925A26C8EE99AC05A9A8A9FB /* HopAppDataStoreTests.swift */,
+				4F6ED3750E2AE856EFF6F83C /* ImportSecurityTests.swift */,
+				A8E77E25E525EA7855367170 /* InMemorySecretBackend.swift */,
+				3E8FAC2518BE966D47648D08 /* LatencyTesterTests.swift */,
+				6146D2EF82C372A7318EE941 /* ProxyLinkParserTests.swift */,
+				C7E46919491D8D0B6DEE8A00 /* RuleConfigurationTests.swift */,
+				F32FB4AA500BEEA4F0C413E1 /* SecretStoreTests.swift */,
+				F39E204D052663E8E718024B /* SingBoxConfigBuilderTests.swift */,
+			);
+			path = HopTests;
+			sourceTree = "<group>";
+		};
+		5AF28CEC9AAE1E6F3A333B20 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				40BAA6499BBA221EB43E4E49 /* AppShellView.swift */,
+				ED8696CCF094E303BC77A9D7 /* HopApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		5B830CDB949CB502E49F5DD0 = {
+			isa = PBXGroup;
+			children = (
+				35D045E5918BDBF55902DDF4 /* Hop */,
+				4792D953B0252DE1BA990973 /* HopTests */,
+				EE860EE164D8AEB90D9CBFE5 /* HopTunnel */,
+				ADA64839FA08A071D76A944A /* Shared */,
+				170071FBD9CCAA5C8329C421 /* Frameworks */,
+				145C147B91587805BDF8D7F5 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		94C428D6A0B567FC12A11DD6 /* Views */ = {
+			isa = PBXGroup;
+			children = (
+				B5FCAFB69C6699C719D4BBF9 /* ActiveBadge.swift */,
+				C8A0C129D627AF70557DB8E0 /* ConnectionsView.swift */,
+				45D692D5F1AD88DA8A136049 /* DashboardView.swift */,
+				4BB6FA5218140CC9E14D3B74 /* LogsView.swift */,
+				3533A427455D1019D363597D /* ProfileSecuritySummary.swift */,
+				B42744CD10EDFE8C38981CD8 /* ProfilesView.swift */,
+				D2133782FCFF25BE2983A29E /* RulesView.swift */,
+				FF668543CBA3F5DEE434ADEF /* SettingsView.swift */,
+			);
+			path = Views;
+			sourceTree = "<group>";
+		};
+		ADA64839FA08A071D76A944A /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				4DB58A1962B36732A51D8BF8 /* SecretReference.swift */,
+				1E1B76DFDAC1976712EA1386 /* SecretStore.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		D33B6D5F551F43A3C5520CC5 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				84979FFBEFD45B93D94D5B99 /* Endpoint.swift */,
+				3E77A8D48C7370FDBDBD9776 /* OutboundModels.swift */,
+				E7E14B112D833A1545DDD4E1 /* ProfileSecrets.swift */,
+				F292E846B530A70604A3BCD3 /* ProtocolOptions.swift */,
+				28DCC6F3C157E2984F8C31F1 /* ProxyProfile.swift */,
+				4D3E00168EA2AEF3116D3EC8 /* ProxyProtocol.swift */,
+				2C0F39000C684AB2876861F2 /* RoutingModels.swift */,
+				1B49DF2D9B765059F8D7117D /* RuleConfiguration.swift */,
+				5C3B1EEDC81180DA191011CE /* SecurityOptions.swift */,
+				69C0C9005A0C151FA0DC2689 /* TransportOptions.swift */,
+				AB7AC0BA8603FEDB0F77C2DE /* TunnelModels.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		E0C76790F70C8597BAFC9EDA /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				79F3F8AA2AE8E9390B779188 /* Assets.xcassets */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		EE860EE164D8AEB90D9CBFE5 /* HopTunnel */ = {
+			isa = PBXGroup;
+			children = (
+				0032BEE08C6D0079328755FA /* HopTunnel.entitlements */,
+				41A4CF6E4FE8A01D7895AA00 /* Info.plist */,
+				C3C1A1195D47528F1006C545 /* PacketTunnelProvider.swift */,
+				DC7386115F302B34587AD99B /* PlatformInterface.swift */,
+				62433961BC01B95ECF8FEC02 /* RunBlocking.swift */,
+			);
+			path = HopTunnel;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		1ACE8AE088B1FAB246636BF8 /* Hop */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E87FA0E44D2AEA3BE30B17D3 /* Build configuration list for PBXNativeTarget "Hop" */;
+			buildPhases = (
+				8B10FD0746211FB2DEA877E8 /* Sources */,
+				916A1BD40E726824B3AD9283 /* Resources */,
+				76E0FD92BFDB6BB407358555 /* Frameworks */,
+				71DBB5222F4DFC0110B004AE /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				635136DEC4C4E57F483E2A3F /* PBXTargetDependency */,
+			);
+			name = Hop;
+			packageProductDependencies = (
+			);
+			productName = Hop;
+			productReference = B76EB08FBBECCCF421DC0A7F /* Hop.app */;
+			productType = "com.apple.product-type.application";
+		};
+		829BE4706EBB57EE2B81F027 /* HopTunnel */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = CAB1CBD3B1EABCD2669F3EA1 /* Build configuration list for PBXNativeTarget "HopTunnel" */;
+			buildPhases = (
+				4D2F031E02E57FBBE1B7D945 /* Verify Libbox provenance */,
+				EC48C3F3DF8B58EB2F1EEBBA /* Sources */,
+				08AB12EDA89B36F793EA17BE /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = HopTunnel;
+			packageProductDependencies = (
+			);
+			productName = HopTunnel;
+			productReference = 2F56D7492B7FE1C62E0D33C4 /* HopTunnel.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		B54F497D6BB1E1850276CCBF /* HopTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 0A2086AE6B7808476288251C /* Build configuration list for PBXNativeTarget "HopTests" */;
+			buildPhases = (
+				7E101EE2B3ED47C10DF57F36 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				4E3FE92755BB913E41A465FA /* PBXTargetDependency */,
+			);
+			name = HopTests;
+			packageProductDependencies = (
+			);
+			productName = HopTests;
+			productReference = DC51AD5366767DDF9D66EE64 /* HopTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		2FED190865A756C0695606FF /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					1ACE8AE088B1FAB246636BF8 = {
+						DevelopmentTeam = "";
+					};
+					829BE4706EBB57EE2B81F027 = {
+						DevelopmentTeam = "";
+					};
+					B54F497D6BB1E1850276CCBF = {
+						DevelopmentTeam = "";
+					};
+				};
+			};
+			buildConfigurationList = 40DD2466A879C8EC5422C4BA /* Build configuration list for PBXProject "Hop" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 5B830CDB949CB502E49F5DD0;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 145C147B91587805BDF8D7F5 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				1ACE8AE088B1FAB246636BF8 /* Hop */,
+				B54F497D6BB1E1850276CCBF /* HopTests */,
+				829BE4706EBB57EE2B81F027 /* HopTunnel */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		916A1BD40E726824B3AD9283 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4F310B282EA4DE1AC601B351 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		4D2F031E02E57FBBE1B7D945 /* Verify Libbox provenance */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Verify Libbox provenance";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/scripts/verify-libbox.sh\"";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		7E101EE2B3ED47C10DF57F36 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9858F6FB19871B333349E68D /* HopAppDataStoreTests.swift in Sources */,
+				6F978A1E184D73FFF5EFA849 /* ImportSecurityTests.swift in Sources */,
+				E09B9E1A5C19BDAEF96312C8 /* InMemorySecretBackend.swift in Sources */,
+				8F307C1C80E4FF82D3E5CAA2 /* LatencyTesterTests.swift in Sources */,
+				23EAD6F87194290206EBA973 /* ProxyLinkParserTests.swift in Sources */,
+				16CB63C3F7D60E0768D55D6D /* RuleConfigurationTests.swift in Sources */,
+				807DA6B6FBAD169A76D2FA93 /* SecretStoreTests.swift in Sources */,
+				10139CB03AE4868DF9E1AF2D /* SingBoxConfigBuilderTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8B10FD0746211FB2DEA877E8 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				9D3F5EB032DEE9DD4057E073 /* ActiveBadge.swift in Sources */,
+				695DC96D50ED6938F5E795E1 /* AppShellView.swift in Sources */,
+				6BC0945EC83C53C36352759A /* ConnectionsView.swift in Sources */,
+				3437B5CC89B37E7FDF19387C /* DashboardView.swift in Sources */,
+				C3FE6096230E6A4D16C785BE /* Endpoint.swift in Sources */,
+				23F98133B5991C5E7ECAAA91 /* HopApp.swift in Sources */,
+				35B5CE1EEA46D54914152942 /* HopAppDataStore.swift in Sources */,
+				56698F9E52B7D46F4430BD36 /* HopStore.swift in Sources */,
+				203D0B19FAE4BD253F8A6ECD /* ImportPolicy.swift in Sources */,
+				6E27502FEB4697CA1227F524 /* LatencyTester.swift in Sources */,
+				AD5430672945FB6F2C5DF2F3 /* LogsView.swift in Sources */,
+				554C5D540ECBA7A4CA32A7C6 /* OutboundModels.swift in Sources */,
+				4D6C83A255F379FBA1331CAC /* ProfileSecrets.swift in Sources */,
+				11FA3F59B9460CDD7F4B5396 /* ProfileSecuritySummary.swift in Sources */,
+				3C9C99E42B220EA65FADC777 /* ProfilesView.swift in Sources */,
+				9FB2271C955A485CAA0AFCFB /* ProtocolOptions.swift in Sources */,
+				BC23B6D0A4235D9BEF6B9CF5 /* ProxyLinkParser.swift in Sources */,
+				85F26C5948FA94EC7DFF811F /* ProxyProfile.swift in Sources */,
+				AAE7EED0088A0A41343A6655 /* ProxyProtocol.swift in Sources */,
+				8F93B14355184EAD0FFB0458 /* RoutingModels.swift in Sources */,
+				FD58D51E512CE9AD1C0EF6B8 /* RuleConfiguration.swift in Sources */,
+				EE8D060ABB1FA3438FEE5E3F /* RulesView.swift in Sources */,
+				246A575B6AE82F98644E0A73 /* RuntimeEnvironment.swift in Sources */,
+				72B42A9C2CAA784C9C7DF16C /* SampleData.swift in Sources */,
+				0DA1DAA3C43AB92A5BAAF21F /* SecretReference.swift in Sources */,
+				4FAE12EDCB3999471879BD81 /* SecretStore.swift in Sources */,
+				5DA051C21AED8EB405D12E06 /* SecurityOptions.swift in Sources */,
+				BC129EDCE92BCE3DD864260E /* SettingsView.swift in Sources */,
+				6A7F0A1566B1054980470106 /* SingBoxConfigBuilder.swift in Sources */,
+				9EEEB24C881C3C68E0352A2C /* TransportOptions.swift in Sources */,
+				AD240E6D07071E6DC56FB0E6 /* TunnelController.swift in Sources */,
+				02332333A52B2D2D774707B7 /* TunnelModels.swift in Sources */,
+				66E7FE798EF7CF308F14BE30 /* TunnelTelemetryClient.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		EC48C3F3DF8B58EB2F1EEBBA /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5BA2FBD9CFCD766F1DC84C64 /* PacketTunnelProvider.swift in Sources */,
+				E85711D6F29ED59CCD026AA3 /* PlatformInterface.swift in Sources */,
+				A1A8C1F82DA2E444C4CFBD12 /* RunBlocking.swift in Sources */,
+				6AF29EED002D33D2B3A140F4 /* SecretReference.swift in Sources */,
+				C401585B7F6AC399B4DB9679 /* SecretStore.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		4E3FE92755BB913E41A465FA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1ACE8AE088B1FAB246636BF8 /* Hop */;
+			targetProxy = D20BB72D27883D050202B057 /* PBXContainerItemProxy */;
+		};
+		635136DEC4C4E57F483E2A3F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 829BE4706EBB57EE2B81F027 /* HopTunnel */;
+			targetProxy = 115823EC866F875A96E998E6 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		083629897C20501BECB25B93 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = cat.string.hop.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Hop.app/Hop";
+			};
+			name = Debug;
+		};
+		09DA4B2B02F57F5061350AE1 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Hop/Hop.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				INFOPLIST_FILE = Hop/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = cat.string.hop;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		0BCF7D2C2FC246CF55F1E342 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = HopTunnel/HopTunnel.entitlements;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				INFOPLIST_FILE = HopTunnel/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = cat.string.hop.tunnel;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		12D3F98E76B5101245C2B392 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.2;
+			};
+			name = Release;
+		};
+		2459B2BCCFB9B10A9C4C5F97 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Hop/Hop.entitlements;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				INFOPLIST_FILE = Hop/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = cat.string.hop;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		350FB2B204D34A15CAD02F4C /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_ENTITLEMENTS = HopTunnel/HopTunnel.entitlements;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\"Frameworks\"",
+				);
+				INFOPLIST_FILE = HopTunnel/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = cat.string.hop.tunnel;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		4DD3C100AFC7FF37348305E2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = cat.string.hop.tests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Hop.app/Hop";
+			};
+			name = Release;
+		};
+		EC4DD04B5B6D1DA02F85F2E8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.2;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		0A2086AE6B7808476288251C /* Build configuration list for PBXNativeTarget "HopTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				083629897C20501BECB25B93 /* Debug */,
+				4DD3C100AFC7FF37348305E2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		40DD2466A879C8EC5422C4BA /* Build configuration list for PBXProject "Hop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				EC4DD04B5B6D1DA02F85F2E8 /* Debug */,
+				12D3F98E76B5101245C2B392 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		CAB1CBD3B1EABCD2669F3EA1 /* Build configuration list for PBXNativeTarget "HopTunnel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0BCF7D2C2FC246CF55F1E342 /* Debug */,
+				350FB2B204D34A15CAD02F4C /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E87FA0E44D2AEA3BE30B17D3 /* Build configuration list for PBXNativeTarget "Hop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				09DA4B2B02F57F5061350AE1 /* Debug */,
+				2459B2BCCFB9B10A9C4C5F97 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 2FED190865A756C0695606FF /* Project object */;
+}
