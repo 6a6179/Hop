@@ -66,7 +66,7 @@ enum SampleData {
     static let rules = [
         RoutingRule(kind: .geoSite, value: "category-ads-all", target: .reject),
         RoutingRule(kind: .geoIP, value: "private", target: .direct),
-        RoutingRule(kind: .domainSuffix, value: "apple.com", target: .direct),
+    ] + RuleConfiguration.appleSystemBypassRules + [
         RoutingRule(kind: .domainSuffix, value: "youtube.com", target: .group(proxyGroup.id)),
     ]
 

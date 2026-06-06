@@ -2,10 +2,14 @@
 import XCTest
 
 final class HopAppDataStoreTests: XCTestCase {
-    func testRoundTripsProfilesGroupsSubscriptionsRulesSettingsAndLogs() throws {
-        let url = FileManager.default.temporaryDirectory
+    private func tempStateURL() -> URL {
+        FileManager.default.temporaryDirectory
             .appendingPathComponent("hop-tests-\(UUID().uuidString)")
             .appendingPathComponent("hop-state.json")
+    }
+
+    func testRoundTripsProfilesGroupsSubscriptionsRulesSettingsAndLogs() throws {
+        let url = tempStateURL()
         let store = HopAppDataStore(url: url, secretStore: .inMemory())
         let data = HopAppData(
             profiles: SampleData.profiles,
@@ -47,5 +51,22 @@ final class HopAppDataStoreTests: XCTestCase {
         XCTAssertEqual(loaded.selectedTarget, .group(SampleData.proxyGroup.id))
         XCTAssertEqual(loaded.settings, data.settings)
         XCTAssertEqual(loaded.logs, ["one", "two"])
+    }
+
+    @MainActor
+    func testStoreUpdatesSubscriptionMetadata() {
+        let subscription = SubscriptionSource(name: "Airport", url: "https://example.com/sub")
+        let store = HopStore(
+            subscriptions: [subscription],
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()),
+        )
+
+        var updated = subscription
+        updated.lastUpdatedAt = Date(timeIntervalSince1970: 1_800_000_001)
+        updated.lastImportSummary = "4 nodes"
+
+        store.updateSubscription(updated)
+
+        XCTAssertEqual(store.subscriptions.first, updated)
     }
 }

@@ -1,22 +1,17 @@
 import SwiftUI
+import VisionKit
 
 struct ProfilesView: View {
     @Environment(HopStore.self) private var store
     @State private var selectedSection: ProfilesSection = .nodes
-    @State private var importText = ""
-    @State private var importError: String?
-    @State private var importResult: ImportResult?
-    @State private var editingProfile: ProxyProfile?
-    @State private var editingGroup: ProxyGroup?
-    @State private var subscriptionName = ""
-    @State private var subscriptionURL = ""
-    @State private var isLoadingSubscription = false
+    @State private var activeSheet: ProfilesSheet?
+    @State private var importNotice: ProfileImportNotice?
+    @State private var isHandlingScannedPayload = false
+    @State private var refreshingSubscriptionIDs: Set<SubscriptionSource.ID> = []
 
     private let importService = ProxyImportService()
 
     var body: some View {
-        @Bindable var store = store
-
         List {
             Section {
                 Picker("Profile Section", selection: $selectedSection) {
@@ -27,6 +22,17 @@ struct ProfilesView: View {
                 .pickerStyle(.segmented)
             }
 
+            if isHandlingScannedPayload {
+                Section {
+                    HStack(spacing: 12) {
+                        ProgressView()
+                        Text("Importing scanned code...")
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 4)
+                }
+            }
+
             switch selectedSection {
             case .nodes:
                 nodesSection
@@ -34,8 +40,6 @@ struct ProfilesView: View {
                 groupsSection
             case .subscriptions:
                 subscriptionsSection
-            case .importText:
-                importSection
             }
         }
         .navigationTitle("Profiles")
@@ -44,45 +48,77 @@ struct ProfilesView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("Add Node", systemImage: "plus") {
-                        editingProfile = ProxyProfile(
-                            name: "New VLESS Node",
-                            endpoint: Endpoint(host: "example.com", port: 443),
-                            proto: .vless,
-                            options: .vless(VLESSOptions(uuid: "", flow: nil)),
-                            security: .tls(TLSOptions(serverName: "example.com")),
-                        )
+                    Section("Import") {
+                        Button("Scan QR Code", systemImage: "qrcode.viewfinder") {
+                            activeSheet = .scanner
+                        }
+                        Button("Paste Links or Config", systemImage: "doc.on.clipboard") {
+                            activeSheet = .importText
+                        }
+                        Button("Add Subscription URL", systemImage: "link.badge.plus") {
+                            activeSheet = .addSubscription
+                        }
                     }
-                    Button("Add Group", systemImage: "rectangle.stack.badge.plus") {
-                        editingGroup = ProxyGroup(
-                            name: "New Group",
-                            type: .select,
-                            members: store.profiles.map { .profile($0.id) },
-                            defaultTarget: store.profiles.first.map { .profile($0.id) },
-                        )
+
+                    Section("Create") {
+                        Button("New Node", systemImage: "server.rack") {
+                            activeSheet = .profile(Self.newProfile())
+                        }
+                        Button("New Group", systemImage: "rectangle.stack.badge.plus") {
+                            activeSheet = .group(Self.newGroup(profiles: store.profiles))
+                        }
                     }
                 } label: {
-                    Label("Add", systemImage: "plus")
+                    Label("Add or Import", systemImage: "plus.circle")
                 }
             }
         }
-        .sheet(item: $editingProfile) { profile in
-            ProfileEditorView(profile: profile) { updatedProfile in
-                if store.profiles.contains(where: { $0.id == updatedProfile.id }) {
-                    store.updateProfile(updatedProfile)
-                } else {
-                    store.addProfile(updatedProfile)
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case let .profile(profile):
+                ProfileEditorView(profile: profile) { updatedProfile in
+                    if store.profiles.contains(where: { $0.id == updatedProfile.id }) {
+                        store.updateProfile(updatedProfile)
+                    } else {
+                        store.addProfile(updatedProfile)
+                    }
+                    selectedSection = .nodes
+                }
+            case let .group(group):
+                ProxyGroupEditorView(group: group) { updatedGroup in
+                    if store.groups.contains(where: { $0.id == updatedGroup.id }) {
+                        store.updateGroup(updatedGroup)
+                    } else {
+                        store.addGroup(updatedGroup)
+                    }
+                    selectedSection = .groups
+                }
+            case .addSubscription:
+                AddSubscriptionSheet(importService: importService) { subscription, result in
+                    store.applyImport(result)
+                    store.addSubscription(subscription)
+                    selectedSection = .subscriptions
+                    importNotice = ProfileImportNotice(title: "Subscription Added", message: result.summary)
+                }
+            case .importText:
+                ImportTextSheet(importService: importService) { result in
+                    store.applyImport(result)
+                    selectedSection = result.profiles.isEmpty ? .groups : .nodes
+                    importNotice = ProfileImportNotice(title: "Import Complete", message: result.summary)
+                }
+            case .scanner:
+                QRCodeScannerSheet { payload in
+                    activeSheet = nil
+                    handleScannedPayload(payload)
                 }
             }
         }
-        .sheet(item: $editingGroup) { group in
-            ProxyGroupEditorView(group: group) { updatedGroup in
-                if store.groups.contains(where: { $0.id == updatedGroup.id }) {
-                    store.updateGroup(updatedGroup)
-                } else {
-                    store.addGroup(updatedGroup)
-                }
-            }
+        .alert(item: $importNotice) { notice in
+            Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("OK")),
+            )
         }
     }
 
@@ -113,7 +149,7 @@ struct ProfilesView: View {
                             }
 
                             Button {
-                                editingProfile = profile
+                                activeSheet = .profile(profile)
                             } label: {
                                 Label("Edit", systemImage: "pencil")
                             }
@@ -149,7 +185,7 @@ struct ProfilesView: View {
                             }
 
                             Button {
-                                editingGroup = group
+                                activeSheet = .group(group)
                             } label: {
                                 Label("Edit", systemImage: "pencil")
                             }
@@ -164,40 +200,48 @@ struct ProfilesView: View {
         }
     }
 
-    @ViewBuilder
     private var subscriptionsSection: some View {
-        Section {
-            ProfileTextField("Name", text: $subscriptionName, prompt: "Airport")
-            ProfileTextField("URL", text: $subscriptionURL, prompt: "https://example.com/sub")
-
-            Button(isLoadingSubscription ? "Updating..." : "Add Subscription & Import") {
-                importSubscription()
-            }
-            .disabled(isLoadingSubscription || URL(string: subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines)) == nil)
-        } header: {
-            Text("Add Subscription")
-        } footer: {
-            Text("Plain and base64 encoded subscriptions are supported.")
-        }
-
         Section("Subscriptions") {
             if store.subscriptions.isEmpty {
-                ContentUnavailableView("No Subscriptions", systemImage: "link", description: Text("Add a subscription URL to import nodes."))
+                ContentUnavailableView(
+                    "No Subscriptions",
+                    systemImage: "link",
+                    description: Text("Use + to add a subscription URL or scan a QR code."),
+                )
             } else {
                 ForEach(store.subscriptions) { subscription in
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(subscription.name)
-                            .font(.body.weight(.semibold))
-                        Text(subscription.url)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        if let summary = subscription.lastImportSummary {
-                            Text(summary)
-                                .font(.caption)
+                    let isRefreshing = refreshingSubscriptionIDs.contains(subscription.id)
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(subscription.name)
+                                .font(.body.weight(.semibold))
+                            Text(subscription.url)
+                                .font(.subheadline)
                                 .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            if let summary = subscription.lastImportSummary {
+                                Text(summary)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
+
+                        Spacer(minLength: 8)
+
+                        if isRefreshing {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        Button {
+                            refreshSubscription(subscription)
+                        } label: {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .tint(.blue)
+                        .disabled(isRefreshing)
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         Button(role: .destructive) {
@@ -205,88 +249,116 @@ struct ProfilesView: View {
                         } label: {
                             Label("Delete", systemImage: "trash")
                         }
+                        .disabled(isRefreshing)
                     }
                 }
             }
         }
     }
 
-    private var importSection: some View {
-        Section {
-            TextField("Paste links, subscription text, or Shadowrocket .conf", text: $importText, axis: .vertical)
-                .lineLimit(5 ... 12)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-
-            Button("Preview Import") {
-                previewImport()
-            }
-            .disabled(importText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-            if let importResult {
-                ImportPreviewView(result: importResult)
-                Button("Save Imported Items") {
-                    store.applyImport(importResult)
-                    self.importResult = nil
-                    importText = ""
-                    importError = nil
-                    selectedSection = .nodes
-                }
-                .disabled(importResult.isEmpty)
-            }
-
-            if let importError {
-                Text(importError)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-            }
-        } header: {
-            Text("Import")
-        } footer: {
-            Text("Accepts Shadowrocket-compatible node links, base64/plain subscriptions, and .conf files with Proxy, Proxy Group, and Rule sections.")
-        }
-    }
-
-    private func previewImport() {
-        do {
-            importResult = try importService.importText(importText)
-            importError = nil
-        } catch {
-            importResult = nil
-            importError = error.localizedDescription
-        }
-    }
-
-    private func importSubscription() {
-        guard let url = URL(string: subscriptionURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+    private func handleScannedPayload(_ payload: String) {
+        let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            importNotice = ProfileImportNotice(title: "Empty Code", message: "The scanned code did not contain importable text.")
             return
         }
-        isLoadingSubscription = true
+
+        switch ProfileImportPayloadDetector().detect(trimmed) {
+        case let .subscription(url):
+            importScannedSubscription(url)
+        case let .importText(importText):
+            importScannedText(importText)
+        case nil:
+            importNotice = ProfileImportNotice(title: "Empty Code", message: "The scanned code did not contain importable text.")
+        }
+    }
+
+    private func importScannedText(_ text: String) {
+        do {
+            let result = try importService.importText(text)
+            store.applyImport(result)
+            selectedSection = result.profiles.isEmpty ? .groups : .nodes
+            importNotice = ProfileImportNotice(title: "Scanned Node Imported", message: result.summary)
+        } catch {
+            importNotice = ProfileImportNotice(title: "Could Not Import Code", message: error.localizedDescription)
+        }
+    }
+
+    private func importScannedSubscription(_ url: URL) {
+        isHandlingScannedPayload = true
         Task {
             do {
                 let result = try await importService.importSubscription(url: url)
-                let name = subscriptionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? url.host() ?? "Subscription" : subscriptionName.trimmingCharacters(in: .whitespacesAndNewlines)
+                let subscription = SubscriptionSource(
+                    name: url.host() ?? "Subscription",
+                    url: url.absoluteString,
+                    lastUpdatedAt: .now,
+                    lastImportSummary: result.summary,
+                )
                 await MainActor.run {
                     store.applyImport(result)
-                    store.addSubscription(
-                        SubscriptionSource(
-                            name: name,
-                            url: url.absoluteString,
-                            lastUpdatedAt: .now,
-                            lastImportSummary: result.summary,
-                        ),
-                    )
-                    subscriptionName = ""
-                    subscriptionURL = ""
-                    isLoadingSubscription = false
+                    store.addSubscription(subscription)
+                    selectedSection = .subscriptions
+                    isHandlingScannedPayload = false
+                    importNotice = ProfileImportNotice(title: "Scanned Subscription Added", message: result.summary)
                 }
             } catch {
                 await MainActor.run {
-                    importError = error.localizedDescription
-                    isLoadingSubscription = false
+                    isHandlingScannedPayload = false
+                    importNotice = ProfileImportNotice(title: "Could Not Import Subscription", message: error.localizedDescription)
                 }
             }
         }
+    }
+
+    private func refreshSubscription(_ subscription: SubscriptionSource) {
+        guard !refreshingSubscriptionIDs.contains(subscription.id) else {
+            return
+        }
+        guard let url = URL(string: subscription.url) else {
+            importNotice = ProfileImportNotice(title: "Could Not Refresh Subscription", message: "The subscription URL is invalid.")
+            return
+        }
+
+        refreshingSubscriptionIDs.insert(subscription.id)
+        Task {
+            do {
+                let result = try await importService.importSubscription(url: url)
+                var refreshedSubscription = subscription
+                refreshedSubscription.lastUpdatedAt = .now
+                refreshedSubscription.lastImportSummary = result.summary
+                await MainActor.run {
+                    store.applyImport(result)
+                    store.updateSubscription(refreshedSubscription)
+                    refreshingSubscriptionIDs.remove(subscription.id)
+                    importNotice = ProfileImportNotice(title: "Subscription Refreshed", message: result.summary)
+                }
+            } catch {
+                await MainActor.run {
+                    refreshingSubscriptionIDs.remove(subscription.id)
+                    importNotice = ProfileImportNotice(title: "Could Not Refresh Subscription", message: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private static func newProfile() -> ProxyProfile {
+        ProxyProfile(
+            name: "New VLESS Node",
+            endpoint: Endpoint(host: "example.com", port: 443),
+            proto: .vless,
+            options: .vless(VLESSOptions(uuid: "", flow: nil)),
+            security: .tls(TLSOptions(serverName: "example.com")),
+        )
+    }
+
+    private static func newGroup(profiles: [ProxyProfile]) -> ProxyGroup {
+        ProxyGroup(
+            name: "New Group",
+            type: .select,
+            members: profiles.map { .profile($0.id) },
+            defaultTarget: profiles.first.map { .profile($0.id) },
+        )
     }
 }
 
@@ -294,7 +366,6 @@ private enum ProfilesSection: String, CaseIterable, Identifiable {
     case nodes
     case groups
     case subscriptions
-    case importText
 
     var id: String {
         rawValue
@@ -308,10 +379,37 @@ private enum ProfilesSection: String, CaseIterable, Identifiable {
             "Groups"
         case .subscriptions:
             "Subs"
-        case .importText:
-            "Import"
         }
     }
+}
+
+private enum ProfilesSheet: Identifiable {
+    case profile(ProxyProfile)
+    case group(ProxyGroup)
+    case addSubscription
+    case importText
+    case scanner
+
+    var id: String {
+        switch self {
+        case let .profile(profile):
+            "profile-\(profile.id.uuidString)"
+        case let .group(group):
+            "group-\(group.id.uuidString)"
+        case .addSubscription:
+            "add-subscription"
+        case .importText:
+            "import-text"
+        case .scanner:
+            "scanner"
+        }
+    }
+}
+
+private struct ProfileImportNotice: Identifiable {
+    var id = UUID()
+    var title: String
+    var message: String
 }
 
 private struct ProfileRow: View {
@@ -444,6 +542,268 @@ private struct ImportPreviewView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .lineLimit(2)
+            }
+        }
+    }
+}
+
+private struct AddSubscriptionSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var urlString = ""
+    @State private var errorMessage: String?
+    @State private var isLoading = false
+
+    var importService: ProxyImportService
+    var onSave: (SubscriptionSource, ImportResult) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    ProfileTextField("Name", text: $name, prompt: "Airport")
+                    ProfileTextField("URL", text: $urlString, prompt: "https://example.com/sub")
+                } header: {
+                    Text("Subscription")
+                } footer: {
+                    Text("HTTPS subscriptions are downloaded once now. Plain and base64 encoded payloads are supported.")
+                }
+
+                Section {
+                    Button {
+                        addSubscription()
+                    } label: {
+                        if isLoading {
+                            Label("Importing...", systemImage: "arrow.down.circle")
+                        } else {
+                            Label("Add Subscription & Import", systemImage: "link.badge.plus")
+                        }
+                    }
+                    .disabled(isLoading || subscriptionURL == nil)
+                }
+
+                if let errorMessage {
+                    Section {
+                        Text(errorMessage)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Add Subscription")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                    .disabled(isLoading)
+                }
+            }
+        }
+    }
+
+    private var subscriptionURL: URL? {
+        URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func addSubscription() {
+        guard let url = subscriptionURL else {
+            return
+        }
+        isLoading = true
+        errorMessage = nil
+        Task {
+            do {
+                let result = try await importService.importSubscription(url: url)
+                let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                let subscription = SubscriptionSource(
+                    name: trimmedName.isEmpty ? url.host() ?? "Subscription" : trimmedName,
+                    url: url.absoluteString,
+                    lastUpdatedAt: .now,
+                    lastImportSummary: result.summary,
+                )
+                await MainActor.run {
+                    onSave(subscription, result)
+                    dismiss()
+                }
+            } catch {
+                await MainActor.run {
+                    errorMessage = error.localizedDescription
+                    isLoading = false
+                }
+            }
+        }
+    }
+}
+
+private struct ImportTextSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @State private var importText = ""
+    @State private var importResult: ImportResult?
+    @State private var importError: String?
+
+    var importService: ProxyImportService
+    var onSave: (ImportResult) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Paste node links, subscription text, or Shadowrocket .conf", text: $importText, axis: .vertical)
+                        .lineLimit(6 ... 14)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                    Button("Preview Import") {
+                        previewImport()
+                    }
+                    .disabled(importText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } header: {
+                    Text("Paste Import")
+                } footer: {
+                    Text("Accepts node links, base64/plain subscriptions, and Shadowrocket .conf files.")
+                }
+
+                if let importResult {
+                    Section("Preview") {
+                        ImportPreviewView(result: importResult)
+                    }
+                }
+
+                if let importError {
+                    Section {
+                        Text(importError)
+                            .font(.footnote)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+            .navigationTitle("Import")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        guard let importResult else {
+                            return
+                        }
+                        onSave(importResult)
+                        dismiss()
+                    }
+                    .disabled(importResult?.isEmpty ?? true)
+                }
+            }
+        }
+    }
+
+    private func previewImport() {
+        do {
+            importResult = try importService.importText(importText)
+            importError = nil
+        } catch {
+            importResult = nil
+            importError = error.localizedDescription
+        }
+    }
+}
+
+private struct QRCodeScannerSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var onPayload: (String) -> Void
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if DataScannerViewController.isSupported, DataScannerViewController.isAvailable {
+                    QRCodeScannerRepresentable { payload in
+                        onPayload(payload)
+                        dismiss()
+                    }
+                } else {
+                    ContentUnavailableView(
+                        "Scanner Unavailable",
+                        systemImage: "camera.viewfinder",
+                        description: Text("Camera scanning is unavailable on this device or camera access is not allowed. Use + > Paste Links or Config instead."),
+                    )
+                    .padding()
+                }
+            }
+            .navigationTitle("Scan Code")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct QRCodeScannerRepresentable: UIViewControllerRepresentable {
+    var onPayload: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onPayload: onPayload)
+    }
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let controller = DataScannerViewController(
+            recognizedDataTypes: [.barcode(symbologies: [.qr])],
+            qualityLevel: .balanced,
+            recognizesMultipleItems: false,
+            isHighFrameRateTrackingEnabled: false,
+            isPinchToZoomEnabled: true,
+            isGuidanceEnabled: true,
+            isHighlightingEnabled: true,
+        )
+        controller.delegate = context.coordinator
+        try? controller.startScanning()
+        return controller
+    }
+
+    func updateUIViewController(_: DataScannerViewController, context _: Context) {}
+
+    static func dismantleUIViewController(_ uiViewController: DataScannerViewController, coordinator _: Coordinator) {
+        uiViewController.stopScanning()
+    }
+
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        private var didScan = false
+        private let onPayload: (String) -> Void
+
+        init(onPayload: @escaping (String) -> Void) {
+            self.onPayload = onPayload
+        }
+
+        func dataScanner(_ dataScanner: DataScannerViewController, didTapOn item: RecognizedItem) {
+            handle([item], dataScanner: dataScanner)
+        }
+
+        func dataScanner(_ dataScanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems _: [RecognizedItem]) {
+            handle(addedItems, dataScanner: dataScanner)
+        }
+
+        private func handle(_ items: [RecognizedItem], dataScanner: DataScannerViewController) {
+            guard !didScan else { return }
+            for item in items {
+                guard case let .barcode(barcode) = item,
+                      let payload = barcode.payloadStringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !payload.isEmpty
+                else {
+                    continue
+                }
+                didScan = true
+                dataScanner.stopScanning()
+                onPayload(payload)
+                return
             }
         }
     }

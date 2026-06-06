@@ -297,8 +297,9 @@ final class HopStore {
             return (explicit, explicitActiveID ?? explicit.first?.id, false)
         }
         if let configs = loaded?.ruleConfigurations, !configs.isEmpty {
+            let migrated = migrateGeneratedConfigurations(configs)
             let activeID = loaded?.activeRuleConfigurationID ?? configs.first?.id
-            return (configs, activeID, false)
+            return (migrated.configurations, activeID, migrated.didMigrate)
         }
         if let legacy = loaded?.rules, !legacy.isEmpty {
             // Upgrade pre-configurations state: keep the user's rules as "Custom"
@@ -307,6 +308,21 @@ final class HopStore {
             return ([custom, .china(), .iran()], custom.id, true)
         }
         return (SampleData.ruleConfigurations, SampleData.defaultConfiguration.id, false)
+    }
+
+    private static func migrateGeneratedConfigurations(
+        _ configurations: [RuleConfiguration],
+    ) -> (configurations: [RuleConfiguration], didMigrate: Bool) {
+        var didMigrate = false
+        let migrated = configurations.map { configuration in
+            guard ["Default", "China", "Iran"].contains(configuration.name) else {
+                return configuration
+            }
+            let updated = configuration.withAppleSystemBypassRule()
+            didMigrate = didMigrate || updated != configuration
+            return updated
+        }
+        return (migrated, didMigrate)
     }
 
     var selectedProfile: ProxyProfile? {
@@ -422,6 +438,13 @@ final class HopStore {
 
     func addSubscription(_ subscription: SubscriptionSource) {
         subscriptions.insert(subscription, at: 0)
+    }
+
+    func updateSubscription(_ subscription: SubscriptionSource) {
+        guard let index = subscriptions.firstIndex(where: { $0.id == subscription.id }) else {
+            return
+        }
+        subscriptions[index] = subscription
     }
 
     func deleteSubscription(id: SubscriptionSource.ID) {

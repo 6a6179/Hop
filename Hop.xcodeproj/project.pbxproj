@@ -20,6 +20,7 @@
 		3437B5CC89B37E7FDF19387C /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45D692D5F1AD88DA8A136049 /* DashboardView.swift */; };
 		35B5CE1EEA46D54914152942 /* HopAppDataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D657EAB1CEE8F6507C6C26FD /* HopAppDataStore.swift */; };
 		3C9C99E42B220EA65FADC777 /* ProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B42744CD10EDFE8C38981CD8 /* ProfilesView.swift */; };
+		40FD6910A95065FB5D25BEA2 /* ProfileImportPayloadDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D8ACBB15D03BF2C2E97AFD2 /* ProfileImportPayloadDetector.swift */; };
 		4D6C83A255F379FBA1331CAC /* ProfileSecrets.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E14B112D833A1545DDD4E1 /* ProfileSecrets.swift */; };
 		4F310B282EA4DE1AC601B351 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 79F3F8AA2AE8E9390B779188 /* Assets.xcassets */; };
 		4FAE12EDCB3999471879BD81 /* SecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1B76DFDAC1976712EA1386 /* SecretStore.swift */; };
@@ -45,6 +46,7 @@
 		9D665400C7AA86557E1617CB /* HopTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2F56D7492B7FE1C62E0D33C4 /* HopTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		9EEEB24C881C3C68E0352A2C /* TransportOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69C0C9005A0C151FA0DC2689 /* TransportOptions.swift */; };
 		9FB2271C955A485CAA0AFCFB /* ProtocolOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = F292E846B530A70604A3BCD3 /* ProtocolOptions.swift */; };
+		A57BC22CEDEA71F36A2FA71E /* ProfileImportPayloadDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAB96E3BCD490ABD070B250 /* ProfileImportPayloadDetectorTests.swift */; };
 		AAE7EED0088A0A41343A6655 /* ProxyProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D3E00168EA2AEF3116D3EC8 /* ProxyProtocol.swift */; };
 		AC74C8D9D2A6AD187A7C182D /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 63AAF67F67AFF0C9362B98CF /* libresolv.tbd */; };
 		AD240E6D07071E6DC56FB0E6 /* TunnelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */; };
@@ -104,6 +106,7 @@
 		2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelController.swift; sourceTree = "<group>"; };
 		2F56D7492B7FE1C62E0D33C4 /* HopTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HopTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		3533A427455D1019D363597D /* ProfileSecuritySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSecuritySummary.swift; sourceTree = "<group>"; };
+		3D8ACBB15D03BF2C2E97AFD2 /* ProfileImportPayloadDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileImportPayloadDetector.swift; sourceTree = "<group>"; };
 		3E77A8D48C7370FDBDBD9776 /* OutboundModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutboundModels.swift; sourceTree = "<group>"; };
 		3E8FAC2518BE966D47648D08 /* LatencyTesterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyTesterTests.swift; sourceTree = "<group>"; };
 		40BAA6499BBA221EB43E4E49 /* AppShellView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShellView.swift; sourceTree = "<group>"; };
@@ -126,6 +129,7 @@
 		8F825207FA0FDCF8554B6650 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		925A26C8EE99AC05A9A8A9FB /* HopAppDataStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopAppDataStoreTests.swift; sourceTree = "<group>"; };
 		9305B8EEC96671033BF8DD41 /* RuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEnvironment.swift; sourceTree = "<group>"; };
+		9BAB96E3BCD490ABD070B250 /* ProfileImportPayloadDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileImportPayloadDetectorTests.swift; sourceTree = "<group>"; };
 		A8E77E25E525EA7855367170 /* InMemorySecretBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InMemorySecretBackend.swift; sourceTree = "<group>"; };
 		AB7AC0BA8603FEDB0F77C2DE /* TunnelModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelModels.swift; sourceTree = "<group>"; };
 		B42744CD10EDFE8C38981CD8 /* ProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesView.swift; sourceTree = "<group>"; };
@@ -199,6 +203,7 @@
 				0C6F50AF2F75019D15087E3D /* HopStore.swift */,
 				B9CBC4636218C0A2AB8FD4E4 /* ImportPolicy.swift */,
 				2C525BE7E4E464399AFB088D /* LatencyTester.swift */,
+				3D8ACBB15D03BF2C2E97AFD2 /* ProfileImportPayloadDetector.swift */,
 				F168B262ED2CE3C6812A5D8D /* ProxyLinkParser.swift */,
 				9305B8EEC96671033BF8DD41 /* RuntimeEnvironment.swift */,
 				FEB0642CF6291B59DF655FF2 /* SampleData.swift */,
@@ -230,6 +235,7 @@
 				4F6ED3750E2AE856EFF6F83C /* ImportSecurityTests.swift */,
 				A8E77E25E525EA7855367170 /* InMemorySecretBackend.swift */,
 				3E8FAC2518BE966D47648D08 /* LatencyTesterTests.swift */,
+				9BAB96E3BCD490ABD070B250 /* ProfileImportPayloadDetectorTests.swift */,
 				6146D2EF82C372A7318EE941 /* ProxyLinkParserTests.swift */,
 				C7E46919491D8D0B6DEE8A00 /* RuleConfigurationTests.swift */,
 				F32FB4AA500BEEA4F0C413E1 /* SecretStoreTests.swift */,
@@ -464,6 +470,7 @@
 				6F978A1E184D73FFF5EFA849 /* ImportSecurityTests.swift in Sources */,
 				E09B9E1A5C19BDAEF96312C8 /* InMemorySecretBackend.swift in Sources */,
 				8F307C1C80E4FF82D3E5CAA2 /* LatencyTesterTests.swift in Sources */,
+				A57BC22CEDEA71F36A2FA71E /* ProfileImportPayloadDetectorTests.swift in Sources */,
 				23EAD6F87194290206EBA973 /* ProxyLinkParserTests.swift in Sources */,
 				16CB63C3F7D60E0768D55D6D /* RuleConfigurationTests.swift in Sources */,
 				807DA6B6FBAD169A76D2FA93 /* SecretStoreTests.swift in Sources */,
@@ -487,6 +494,7 @@
 				6E27502FEB4697CA1227F524 /* LatencyTester.swift in Sources */,
 				AD5430672945FB6F2C5DF2F3 /* LogsView.swift in Sources */,
 				554C5D540ECBA7A4CA32A7C6 /* OutboundModels.swift in Sources */,
+				40FD6910A95065FB5D25BEA2 /* ProfileImportPayloadDetector.swift in Sources */,
 				4D6C83A255F379FBA1331CAC /* ProfileSecrets.swift in Sources */,
 				11FA3F59B9460CDD7F4B5396 /* ProfileSecuritySummary.swift in Sources */,
 				3C9C99E42B220EA65FADC777 /* ProfilesView.swift in Sources */,
