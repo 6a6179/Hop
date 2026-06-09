@@ -14,7 +14,10 @@ on:
       - "scripts/**"
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   unsigned-ipa:
@@ -49,11 +52,16 @@ jobs:
             brew install xcodegen
           fi
 
+          if ! command -v gh >/dev/null 2>&1; then
+            brew install gh
+          fi
+
           go version
           xcodegen --version
+          gh --version
 
       - name: Cache Go build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/go-build
@@ -114,6 +122,26 @@ jobs:
           size_bytes="$(stat -f '%z' "$IPA")"
           sha256="$(shasum -a 256 "$IPA" | awk '{print $1}')"
           printf '%s  %s\n' "$sha256" "Hop-unsigned.ipa" > build/UnsignedIPA/Hop-unsigned.ipa.sha256
+          release_tag="unsigned-ipa-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          release_name="Hop unsigned IPA ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          release_notes="build/UnsignedIPA/release-notes.md"
+
+          {
+            echo "RELEASE_TAG=${release_tag}"
+            echo "RELEASE_NAME=${release_name}"
+            echo "RELEASE_NOTES=${release_notes}"
+          } >> "$GITHUB_ENV"
+
+          cat > "$release_notes" <<EOF
+          Unsigned IPA built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}.
+
+          - Branch/ref: ${GITHUB_REF_NAME}
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Size: ${size_bytes} bytes
+          - SHA-256: ${sha256}
+
+          This IPA is unsigned. It still needs signing/provisioning before installation on a physical device, especially because Hop includes a Network Extension entitlement.
+          EOF
 
           {
             echo "### Unsigned IPA"
@@ -121,6 +149,7 @@ jobs:
             echo "- File: \`Hop-unsigned.ipa\`"
             echo "- Size: \`${size_bytes} bytes\`"
             echo "- SHA-256: \`${sha256}\`"
+            echo "- Release tag: \`${release_tag}\`"
             echo
             echo "> This IPA is unsigned. It still needs signing/provisioning before installation on a physical device, especially because Hop includes a Network Extension entitlement."
           } >> "$GITHUB_STEP_SUMMARY"
@@ -140,3 +169,22 @@ jobs:
           archive: false
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh release create "$RELEASE_TAG" \
+            "build/UnsignedIPA/Hop-unsigned.ipa#Hop-unsigned.ipa" \
+            "build/UnsignedIPA/Hop-unsigned.ipa.sha256#Hop-unsigned.ipa.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_NAME" \
+            --notes-file "$RELEASE_NOTES" \
+            --prerelease \
+            --latest=false
+
+          release_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          echo "- Release: ${release_url}" >> "$GITHUB_STEP_SUMMARY"
