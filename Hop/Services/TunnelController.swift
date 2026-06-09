@@ -27,6 +27,11 @@ final class TunnelController {
     private var lastObservedStatus: NEVPNStatus?
     private var startInProgress = false
     private var loggedStartupStop = false
+    /// Whether a connections UI is currently visible. The per-connection event
+    /// stream is heavy (libbox pushes batches every interval), so it runs only
+    /// while something displays it; the always-on status stream keeps counters
+    /// and the live connection count.
+    private(set) var isMonitoringConnections = false
 
     init(logs: [String] = SampleData.logs, maximumLogEntries: Int = LogRetention.fiveHundred.rawValue) {
         self.logs = logs
@@ -329,12 +334,29 @@ final class TunnelController {
 
     private func startTelemetry() {
         telemetryClient.start()
+        if isMonitoringConnections {
+            telemetryClient.startConnections()
+        }
     }
 
     private func stopTelemetry() {
         telemetryClient.stop()
         telemetryIsConnected = false
         telemetryError = nil
+    }
+
+    /// Called when a connections UI appears/disappears; subscribes to the
+    /// per-connection event stream only while it is actually displayed.
+    func beginConnectionsMonitoring() {
+        isMonitoringConnections = true
+        if state.isConnected {
+            telemetryClient.startConnections()
+        }
+    }
+
+    func endConnectionsMonitoring() {
+        isMonitoringConnections = false
+        telemetryClient.stopConnections()
     }
 
     func closeAllConnections() {

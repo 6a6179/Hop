@@ -6,9 +6,10 @@ enum RuntimeEnvironment {
     static let stateFileName = "hop-state.json"
     static let tunnelLogFileName = "hop-tunnel.log"
 
-    static var appGroupIdentifier: String {
-        entitlementAppGroups().first(where: canOpenAppGroup) ?? fallbackAppGroup
-    }
+    /// Both identifiers are process-constant (derived from the entitlements and
+    /// the bundle) but cost a provisioning-profile regex scan / PlugIns
+    /// directory walk to compute — memoize as lazy `static let`s.
+    static let appGroupIdentifier: String = entitlementAppGroups().first(where: canOpenAppGroup) ?? fallbackAppGroup
 
     static var sharedContainerURL: URL {
         if let url = appGroupContainerURL {
@@ -37,7 +38,7 @@ enum RuntimeEnvironment {
         sharedContainerURL.appendingPathComponent(tunnelLogFileName)
     }
 
-    static var tunnelProviderBundleIdentifier: String {
+    static let tunnelProviderBundleIdentifier: String = {
         if let plugInsURL = Bundle.main.builtInPlugInsURL,
            let enumerator = FileManager.default.enumerator(at: plugInsURL, includingPropertiesForKeys: nil)
         {
@@ -54,7 +55,7 @@ enum RuntimeEnvironment {
         }
 
         return [Bundle.main.bundleIdentifier, "tunnel"].compactMap(\.self).joined(separator: ".")
-    }
+    }()
 
     private static func entitlementAppGroups() -> [String] {
         Array(Set(embeddedProvisioningProfileGroups() + [fallbackAppGroup]))

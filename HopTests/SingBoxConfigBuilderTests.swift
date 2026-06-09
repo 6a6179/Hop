@@ -341,6 +341,26 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         try assertNoDanglingOutboundReferences(root)
     }
 
+    func testCredentiallessHTTPOutboundOmitsUsernameAndPassword() throws {
+        // Optional-through-subscript assignment must drop nil credentials from
+        // the outbound dictionary entirely (a wrapped Optional would fail
+        // JSONSerialization, an empty string would change auth semantics).
+        let profile = ProxyProfile(
+            name: "Plain HTTP",
+            endpoint: Endpoint(host: "proxy.example.net", port: 8080),
+            proto: .http,
+            options: .http(HTTPOptions(username: nil, password: nil)),
+            security: .none,
+        )
+
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let outbound = try firstOutbound(XCTUnwrap(parse(json)))
+
+        XCTAssertEqual(outbound["type"] as? String, "http")
+        XCTAssertNil(outbound["username"])
+        XCTAssertNil(outbound["password"])
+    }
+
     private func parse(_ json: String) throws -> [String: Any]? {
         let data = try XCTUnwrap(json.data(using: .utf8))
         return try JSONSerialization.jsonObject(with: data) as? [String: Any]

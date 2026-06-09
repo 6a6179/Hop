@@ -8,6 +8,10 @@ final class InMemorySecretBackend: SecretBackend, @unchecked Sendable {
     private var storage: [String: String] = [:]
     private let lock = NSLock()
 
+    /// Number of `removeAll` calls. `HopAppDataStore.save` rewrites the secret
+    /// set exactly once per persist, so this counts state persists in tests.
+    private(set) var removeAllCount = 0
+
     func value(forKey key: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
@@ -30,6 +34,7 @@ final class InMemorySecretBackend: SecretBackend, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         storage.removeAll()
+        removeAllCount += 1
     }
 }
 

@@ -199,6 +199,37 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(encoded.profiles.map(\.name), ["One", "Two"])
     }
 
+    func testParsesWrappedAndUnpaddedBase64Subscriptions() throws {
+        // Byte count chosen so the base64 form needs padding ("==") — that is
+        // the case the padding computation must get right.
+        let subscription = """
+        trojan://secret@one.example.net:443?security=tls#One
+        hysteria2://secret@two.example.net:443?security=tls#Two2
+        """
+        XCTAssertEqual(subscription.utf8.count % 3, 1, "fixture must exercise base64 padding")
+
+        // Some panels emit RFC 2045-style base64 (wrapped at 76 columns) and/or
+        // strip the trailing padding; both forms must still decode.
+        let wrapped = Data(subscription.utf8).base64EncodedString(options: [.lineLength76Characters, .endLineWithLineFeed])
+        let unpaddedWrapped = wrapped.replacingOccurrences(of: "=", with: "")
+        XCTAssertNotEqual(wrapped, unpaddedWrapped, "fixture must exercise base64 padding")
+
+        XCTAssertEqual(try importService.importText(wrapped).profiles.map(\.name), ["One", "Two2"])
+        XCTAssertEqual(try importService.importText(unpaddedWrapped).profiles.map(\.name), ["One", "Two2"])
+    }
+
+    func testLinkPortsOutsideValidRangeAreRejected() {
+        // URLComponents happily parses ports like 99999; the endpoint builder
+        // must range-check them like the VMess JSON and Shadowrocket paths do.
+        for badLink in [
+            "vless://11111111-1111-4111-8111-111111111111@edge.example.net:0?security=tls#Zero",
+            "trojan://secret@de.example.net:65536?security=tls#TooBig",
+            "hysteria2://secret@nyc.example.net:99999#WayTooBig",
+        ] {
+            XCTAssertThrowsError(try parser.parse(badLink), "\(badLink) must be rejected")
+        }
+    }
+
     func testParsesShadowrocketConfWithGroupsRulesAndWarnings() throws {
         let conf = """
         [Proxy]
