@@ -9,11 +9,23 @@ import NetworkExtension
 /// queue after start options are snapshotted into value types.
 final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private var logURL: URL?
+    /// Serializes log appends: lines arrive from the start worker, NE
+    /// callbacks, and libbox Go threads, and concurrent seek-to-end + write
+    /// pairs on separate file handles would interleave mid-line.
+    private let tunnelLogLock = NSLock()
 
     // Bound the shared tunnel log so a noisy/malicious proxy condition can't
     // grow it without limit and later exhaust disk or freeze the log UI.
     private static let maxTunnelLogBytes = 1_048_576 // 1 MB
     private static let tunnelLogTrimBytes = 262_144 // keep ~256 KB tail on rotation
+
+    // Costly to construct, so one per provider instead of one per log line;
+    // only touched under `tunnelLogLock`.
+    private let tunnelLogDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 
     #if canImport(Libbox)
         private lazy var platformInterface = HopPlatformInterface(provider: self)
@@ -249,16 +261,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             return
         }
 
+        tunnelLogLock.lock()
+        defer { tunnelLogLock.unlock() }
+
         do {
             try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             rotateTunnelLogIfNeeded(at: logURL)
 
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let line = "[\(formatter.string(from: Date()))] \(message)\n"
-            guard let data = line.data(using: .utf8) else {
-                return
-            }
+            let line = "[\(tunnelLogDateFormatter.string(from: Date()))] \(message)\n"
+            let data = Data(line.utf8)
 
             if FileManager.default.fileExists(atPath: logURL.path) {
                 let handle = try FileHandle(forWritingTo: logURL)

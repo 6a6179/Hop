@@ -269,7 +269,10 @@ struct SingBoxConfigBuilder {
             outbound["transport"] = transport
         }
 
-        return outbound.compactMapValues { $0 }
+        // No `compactMapValues` needed: assigning an optional through the
+        // subscript (e.g. `outbound["username"] = options.username`) removes
+        // the key when nil, so the dictionary never holds wrapped optionals.
+        return outbound
     }
 
     private func tlsDictionary(from security: ProxySecurity) throws -> [String: Any]? {
