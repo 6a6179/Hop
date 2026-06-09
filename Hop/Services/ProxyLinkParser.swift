@@ -49,27 +49,11 @@ struct ProxyLinkParser {
     }
 }
 
-/// Re-applies `ImportPolicy.validateSubscriptionURL` to every redirect target so
-/// a subscription server cannot bounce the fetch to a cleartext or
-/// private/loopback destination. Refusing a redirect (`completionHandler(nil)`)
-/// lets the task complete with the 3xx response, which then fails the 2xx check.
-private final class SubscriptionRedirectValidator: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
-    func urlSession(
-        _: URLSession,
-        task _: URLSessionTask,
-        willPerformHTTPRedirection _: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping (URLRequest?) -> Void,
-    ) {
-        guard let url = request.url, (try? ImportPolicy.validateSubscriptionURL(url)) != nil else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(request)
-    }
-}
-
 struct ProxyImportService {
+    /// Session configuration for subscription fetches; tests substitute one
+    /// with a stub `URLProtocol` to exercise the transfer policy offline.
+    var subscriptionSessionConfiguration: URLSessionConfiguration = .ephemeral
+
     func importText(_ rawValue: String) throws -> ImportResult {
         guard rawValue.utf8.count <= ImportPolicy.maxPayloadBytes else {
             throw ProxyLinkParseError.payloadTooLarge
@@ -130,30 +114,11 @@ struct ProxyImportService {
         request.timeoutInterval = ImportPolicy.subscriptionRequestTimeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
 
-        // A dedicated session with a redirect validator. `URLSession.shared`
-        // follows 3xx automatically, which would let a benign-looking HTTPS URL
-        // bounce to http:// or to a private/loopback/metadata host, bypassing the
-        // up-front `validateSubscriptionURL` check (SSRF, CWE-918).
-        let session = URLSession(configuration: .ephemeral, delegate: SubscriptionRedirectValidator(), delegateQueue: nil)
-        defer { session.finishTasksAndInvalidate() }
-        // Stream the body with a hard byte cap rather than buffering it whole.
-        // `session.data(for:)` materializes the entire response in memory before
-        // any size check, letting a malicious subscription server force a large
-        // allocation; capping mid-stream bounds peak memory to maxPayloadBytes.
-        let (bytes, response) = try await session.bytes(for: request)
-        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
-            throw ProxyLinkParseError.subscriptionUnavailable
-        }
-        if response.expectedContentLength > Int64(ImportPolicy.maxPayloadBytes) {
-            throw ProxyLinkParseError.payloadTooLarge
-        }
-        var data = Data()
-        for try await byte in bytes {
-            data.append(byte)
-            if data.count > ImportPolicy.maxPayloadBytes {
-                throw ProxyLinkParseError.payloadTooLarge
-            }
-        }
+        // A dedicated fetcher rather than `URLSession.shared`: it re-validates
+        // every redirect target (which would otherwise bypass the up-front
+        // `validateSubscriptionURL` check) and enforces the payload cap
+        // mid-stream so peak memory stays bounded. See `SubscriptionFetcher`.
+        let data = try await SubscriptionFetcher.fetch(request, configuration: subscriptionSessionConfiguration)
         guard let text = String(data: data, encoding: .utf8) else {
             throw ProxyLinkParseError.invalidURL
         }
