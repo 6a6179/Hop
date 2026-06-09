@@ -354,7 +354,7 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         )
 
         let json = try builder.build(profile: profile, routingMode: .global, rules: [])
-        let outbound = try firstOutbound(try XCTUnwrap(parse(json)))
+        let outbound = try firstOutbound(XCTUnwrap(parse(json)))
 
         XCTAssertEqual(outbound["type"] as? String, "http")
         XCTAssertNil(outbound["username"])

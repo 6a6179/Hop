@@ -19,8 +19,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private static let maxTunnelLogBytes = 1_048_576 // 1 MB
     private static let tunnelLogTrimBytes = 262_144 // keep ~256 KB tail on rotation
 
-    // Costly to construct, so one per provider instead of one per log line;
-    // only touched under `tunnelLogLock`.
+    /// Costly to construct, so one per provider instead of one per log line;
+    /// only touched under `tunnelLogLock`.
     private let tunnelLogDateFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

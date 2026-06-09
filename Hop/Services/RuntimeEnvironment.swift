@@ -6,9 +6,9 @@ enum RuntimeEnvironment {
     static let stateFileName = "hop-state.json"
     static let tunnelLogFileName = "hop-tunnel.log"
 
-    // Both identifiers are process-constant (derived from the entitlements and
-    // the bundle) but cost a provisioning-profile regex scan / PlugIns
-    // directory walk to compute — memoize as lazy `static let`s.
+    /// Both identifiers are process-constant (derived from the entitlements and
+    /// the bundle) but cost a provisioning-profile regex scan / PlugIns
+    /// directory walk to compute — memoize as lazy `static let`s.
     static let appGroupIdentifier: String = entitlementAppGroups().first(where: canOpenAppGroup) ?? fallbackAppGroup
 
     static var sharedContainerURL: URL {

@@ -19,12 +19,6 @@ struct SubscriptionRefreshMerger {
     private(set) var groups: [ProxyGroup]
     private(set) var selectedTarget: OutboundTarget?
 
-    init(profiles: [ProxyProfile], groups: [ProxyGroup], selectedTarget: OutboundTarget?) {
-        self.profiles = profiles
-        self.groups = groups
-        self.selectedTarget = selectedTarget
-    }
-
     mutating func merge(_ result: ImportResult) {
         let profileIDMap = mergeProfiles(result.profiles)
         mergeGroups(result.groups, importedProfileIDMap: profileIDMap)
