@@ -63,6 +63,33 @@ import XCTest
             XCTAssertFalse(closed.isActive)
         }
 
+        func testStatusMessageMapsToTrafficCounters() {
+            let message = LibboxStatusMessage()
+            message.uplinkTotal = 1234
+            message.downlinkTotal = 5678
+            message.uplink = 100
+            message.downlink = 200
+            message.trafficAvailable = true
+            message.connectionsIn = 7
+            message.connectionsOut = 3
+
+            let counters = TunnelTelemetryClient.counters(from: message)
+            XCTAssertEqual(counters.uplinkBytes, 1234)
+            XCTAssertEqual(counters.downlinkBytes, 5678)
+            XCTAssertEqual(counters.uplinkBytesPerSecond, 100)
+            XCTAssertEqual(counters.downlinkBytesPerSecond, 200)
+            XCTAssertEqual(counters.activeConnections, 7, "the inbound count is the user-visible one")
+
+            // Rates are meaningless when the engine flags traffic unavailable,
+            // and negative bridge values must clamp to zero.
+            message.trafficAvailable = false
+            message.connectionsIn = -2
+            let unavailable = TunnelTelemetryClient.counters(from: message)
+            XCTAssertEqual(unavailable.uplinkBytesPerSecond, 0)
+            XCTAssertEqual(unavailable.downlinkBytesPerSecond, 0)
+            XCTAssertEqual(unavailable.activeConnections, 0)
+        }
+
         private func makeConnection() -> LibboxConnection {
             let connection = LibboxConnection()
             // gomobile quirk in the vendored binding: the `id_` property's

@@ -40,6 +40,7 @@
 		6BC0945EC83C53C36352759A /* ConnectionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C8A0C129D627AF70557DB8E0 /* ConnectionsView.swift */; };
 		6E27502FEB4697CA1227F524 /* LatencyTester.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C525BE7E4E464399AFB088D /* LatencyTester.swift */; };
 		6F978A1E184D73FFF5EFA849 /* ImportSecurityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F6ED3750E2AE856EFF6F83C /* ImportSecurityTests.swift */; };
+		703C88CB926BE3481B883A14 /* TunnelTelemetryLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 180C52AFE7120A86EB329D58 /* TunnelTelemetryLifecycleTests.swift */; };
 		72B42A9C2CAA784C9C7DF16C /* SampleData.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEB0642CF6291B59DF655FF2 /* SampleData.swift */; };
 		75552CE712EF9D8972A450CF /* ShadowrocketConfParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCF9A63829549D641B43595 /* ShadowrocketConfParser.swift */; };
 		807DA6B6FBAD169A76D2FA93 /* SecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F32FB4AA500BEEA4F0C413E1 /* SecretStoreTests.swift */; };
@@ -106,6 +107,7 @@
 /* Begin PBXFileReference section */
 		0032BEE08C6D0079328755FA /* HopTunnel.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = HopTunnel.entitlements; sourceTree = "<group>"; };
 		0C6F50AF2F75019D15087E3D /* HopStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopStore.swift; sourceTree = "<group>"; };
+		180C52AFE7120A86EB329D58 /* TunnelTelemetryLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelTelemetryLifecycleTests.swift; sourceTree = "<group>"; };
 		1B49DF2D9B765059F8D7117D /* RuleConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleConfiguration.swift; sourceTree = "<group>"; };
 		1E1B76DFDAC1976712EA1386 /* SecretStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretStore.swift; sourceTree = "<group>"; };
 		204BB708587D0E01566D5250 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
@@ -263,6 +265,7 @@
 				F39E204D052663E8E718024B /* SingBoxConfigBuilderTests.swift */,
 				AF50E194D1028E221D66587F /* SubscriptionFetcherTests.swift */,
 				5F076B1CE9978B7369D54C8D /* SubscriptionRefreshMergerTests.swift */,
+				180C52AFE7120A86EB329D58 /* TunnelTelemetryLifecycleTests.swift */,
 				A9924DFBE2B62E2988CDD3D0 /* TunnelTelemetrySnapshotTests.swift */,
 			);
 			path = HopTests;
@@ -504,6 +507,7 @@
 				10139CB03AE4868DF9E1AF2D /* SingBoxConfigBuilderTests.swift in Sources */,
 				0A1B76CFD761695587A2FC53 /* SubscriptionFetcherTests.swift in Sources */,
 				3FA31228BE6AE2BD7B9DB0A0 /* SubscriptionRefreshMergerTests.swift in Sources */,
+				703C88CB926BE3481B883A14 /* TunnelTelemetryLifecycleTests.swift in Sources */,
 				50252BBDB93C2AF347BE32EE /* TunnelTelemetrySnapshotTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

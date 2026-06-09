@@ -140,9 +140,9 @@ struct DashboardView: View {
     }
 
     private var connectionsSummary: String {
-        let active = store.tunnel.connections.filter(\.isActive).count
-        let total = store.tunnel.connections.count
-        return "\(active) active · \(total) total"
+        // From the always-on status stream, not the connection list — the
+        // per-connection event stream only runs while ConnectionsView is open.
+        "\(store.tunnel.counters.activeConnections) active"
     }
 }
 

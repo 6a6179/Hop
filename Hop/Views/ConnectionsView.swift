@@ -54,6 +54,15 @@ struct ConnectionsView: View {
         }
         .navigationTitle("Connections")
         .navigationBarTitleDisplayMode(.inline)
+        // The per-connection event stream is subscribed only while this view
+        // is on screen; the initial batch after subscribing carries the full
+        // current state, so the list repopulates on re-entry.
+        .onAppear {
+            store.tunnel.beginConnectionsMonitoring()
+        }
+        .onDisappear {
+            store.tunnel.endConnectionsMonitoring()
+        }
         .searchable(text: $searchText, prompt: "Search host, rule, outbound")
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {

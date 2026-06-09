@@ -32,6 +32,10 @@ struct TrafficCounters: Equatable {
     var downlinkBytes: Int64
     var uplinkBytesPerSecond: Int64 = 0
     var downlinkBytesPerSecond: Int64 = 0
+    /// Live inbound-connection count from the engine's status message. Carried
+    /// here (not derived from the connection list) so it stays accurate while
+    /// the heavier per-connection event stream is not subscribed.
+    var activeConnections: Int = 0
 
     static let zero = TrafficCounters(uplinkBytes: 0, downlinkBytes: 0)
 }
