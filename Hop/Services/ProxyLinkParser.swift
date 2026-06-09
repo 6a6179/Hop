@@ -785,7 +785,9 @@ struct ProxyImportService {
         guard let host = components.host?.removingPercentEncoding, !host.isEmpty else {
             throw ProxyLinkParseError.missingHost
         }
-        guard let port = components.port else {
+        // URLComponents accepts ports like 0 or 99999; reject them here so the
+        // generated config never carries an invalid server_port.
+        guard let port = components.port, (1 ... 65535).contains(port) else {
             throw ProxyLinkParseError.missingPort
         }
         return Endpoint(host: host, port: port)
@@ -840,8 +842,11 @@ struct ProxyImportService {
     }
 
     private func decodeBase64String(_ value: String) -> String? {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalized = trimmed
+        // Strip all whitespace (not just leading/trailing) before computing
+        // padding: RFC 2045-style wrapped base64 carries internal newlines that
+        // would otherwise inflate the count and mis-pad unpadded payloads.
+        let compacted = value.filter { !$0.isWhitespace }
+        let normalized = compacted
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
         let padded = normalized.padding(toLength: ((normalized.count + 3) / 4) * 4, withPad: "=", startingAt: 0)
