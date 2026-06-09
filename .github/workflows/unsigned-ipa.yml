@@ -1,0 +1,142 @@
+name: Build Unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/unsigned-ipa.yml"
+      - "Frameworks/Libbox.xcframework.sha256"
+      - "Hop/**"
+      - "Hop.xcodeproj/**"
+      - "HopTunnel/**"
+      - "Shared/**"
+      - "project.yml"
+      - "scripts/**"
+
+permissions:
+  contents: read
+
+jobs:
+  unsigned-ipa:
+    name: Build unsigned IPA
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Show Xcode and SDK versions
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+
+          if ! command -v go >/dev/null 2>&1; then
+            brew install go
+          fi
+
+          go_version="$(go env GOVERSION 2>/dev/null || true)"
+          go_minor="$(printf '%s' "$go_version" | sed -E 's/^go1\.([0-9]+).*/\1/')"
+          if [[ -z "$go_minor" || "$go_minor" -lt 23 ]]; then
+            brew install go
+          fi
+
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+          go version
+          xcodegen --version
+
+      - name: Cache Go build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-libbox-${{ hashFiles('scripts/build-libbox.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-go-libbox-
+
+      - name: Build pinned libbox engine
+        run: scripts/build-libbox.sh
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned app
+        run: |
+          set -euo pipefail
+
+          rm -rf build/UnsignedIPA
+          mkdir -p build/UnsignedIPA
+
+          xcodebuild \
+            -project Hop.xcodeproj \
+            -scheme Hop \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/UnsignedIPA/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+
+          APP="build/UnsignedIPA/DerivedData/Build/Products/Release-iphoneos/Hop.app"
+          STAGE="build/UnsignedIPA/staging"
+
+          test -d "$APP"
+          rm -rf "$STAGE" build/UnsignedIPA/Hop-unsigned.ipa
+          mkdir -p "$STAGE/Payload"
+          ditto "$APP" "$STAGE/Payload/Hop.app"
+          find "$STAGE/Payload/Hop.app" \( -name _CodeSignature -o -name embedded.mobileprovision \) -print -exec rm -rf {} +
+          xattr -cr "$STAGE/Payload/Hop.app" || true
+          (cd "$STAGE" && ditto -c -k --sequesterRsrc --keepParent Payload ../Hop-unsigned.ipa)
+
+      - name: Summarize artifact
+        run: |
+          set -euo pipefail
+
+          IPA="build/UnsignedIPA/Hop-unsigned.ipa"
+          test -f "$IPA"
+
+          size_bytes="$(stat -f '%z' "$IPA")"
+          sha256="$(shasum -a 256 "$IPA" | awk '{print $1}')"
+          printf '%s  %s\n' "$sha256" "Hop-unsigned.ipa" > build/UnsignedIPA/Hop-unsigned.ipa.sha256
+
+          {
+            echo "### Unsigned IPA"
+            echo
+            echo "- File: \`Hop-unsigned.ipa\`"
+            echo "- Size: \`${size_bytes} bytes\`"
+            echo "- SHA-256: \`${sha256}\`"
+            echo
+            echo "> This IPA is unsigned. It still needs signing/provisioning before installation on a physical device, especially because Hop includes a Network Extension entitlement."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: build/UnsignedIPA/Hop-unsigned.ipa
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: build/UnsignedIPA/Hop-unsigned.ipa.sha256
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
