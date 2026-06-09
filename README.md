@@ -48,7 +48,7 @@ Run tests:
 xcodebuild test -project Hop.xcodeproj -scheme Hop -destination 'platform=iOS Simulator,id=<booted-simulator-udid>' CODE_SIGNING_ALLOWED=NO
 ```
 
-Real device VPN execution requires the sideload signer to preserve App Group and `packet-tunnel-provider` Network Extension entitlements for both the app and the embedded tunnel extension, and to keep `HopTunnel.appex` (the sing-box engine is statically linked into it) enabled and re-signed.
+Real device VPN execution requires the sideload signer to preserve the App Group and keychain-access-group entitlements on **both** the app and the tunnel extension, the `packet-tunnel-provider` Network Extension entitlement on the **`HopTunnel.appex` extension** (the containing app does not need it), and to keep `HopTunnel.appex` (the sing-box engine is statically linked into it) enabled and re-signed.
 
 ## Security
 

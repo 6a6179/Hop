@@ -18,8 +18,16 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     #if canImport(Libbox)
         private lazy var platformInterface = HopPlatformInterface(provider: self)
         private var commandServer: LibboxCommandServer?
-        private var lastConfigContent: String?
+        // Retain only the tokenized (secret-free) config + nonce so a later
+        // reload can re-resolve credentials in memory; the fully-resolved
+        // config is never stored on the provider.
+        private var lastRawConfig: String?
+        private var configSecretNonce: String?
     #endif
+
+    /// iOS kill-switch setting threaded from the app. When true, the engine is
+    /// told to include all networks so the OS drops traffic if the tunnel dies.
+    private(set) var includeAllNetworksSetting = false
 
     override func startTunnel(options startOptions: [String: NSObject]?, completionHandler: @escaping @Sendable (Error?) -> Void) {
         let request = TunnelStartRequest(
@@ -41,26 +49,18 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             writeTunnelLog("PacketTunnelProvider.startTunnel invoked")
             writeTunnelLog("Start option keys: \(request.visibleOptionKeys.joined(separator: ", "))")
 
+            includeAllNetworksSetting = request.includeAllNetworks
+
             let rawConfig = try loadConfig(request: request)
-            // Generated config carries secret references, not credentials. Resolve
-            // them from the shared Keychain here, in memory, just before starting.
-            // The nonce (passed via start options, or the persisted provider
+            // The generated config carries secret *references*, not credentials.
+            // The nonce (from start options, or the persisted provider
             // configuration on an iOS-initiated restart) gates which tokens are
             // resolvable, so import-supplied fields can't forge one.
             let nonce = request.secretNonce
             guard !nonce.isEmpty else { throw TunnelProviderError.missingSecretNonce }
-            let (config, unresolvedSecrets) = SecretResolver.resolve(rawConfig, nonce: nonce)
-            writeTunnelLog("Loaded tunnel settings (\(config.utf8.count) bytes)")
-            // Fail closed: every emitted token has a matching Keychain item, so a
-            // non-zero count means the shared Keychain is unreachable (e.g. the
-            // keychain-access-groups entitlement was dropped during signing).
-            // Starting anyway would run the tunnel with blank credentials.
-            if unresolvedSecrets > 0 {
-                throw TunnelProviderError.unresolvedSecrets(unresolvedSecrets)
-            }
 
             #if canImport(Libbox)
-                try startService(configContent: config, request: request)
+                try startService(rawConfig: rawConfig, nonce: nonce, request: request)
                 writeTunnelLog("sing-box service started")
                 completionHandler(nil)
             #else
@@ -84,7 +84,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     }
 
     #if canImport(Libbox)
-        private func startService(configContent: String, request: TunnelStartRequest) throws {
+        private func startService(rawConfig: String, nonce: String, request: TunnelStartRequest) throws {
+            // Resolve secrets up front so we fail closed before touching the
+            // engine. `resolved` stays a local — handed to libbox and then
+            // released — so credentials don't linger on the provider for the
+            // tunnel's lifetime.
+            let resolved = try resolveConfig(rawConfig: rawConfig, nonce: nonce)
+            writeTunnelLog("Loaded tunnel settings (\(resolved.utf8.count) bytes)")
+
             let container = appGroupContainer(request: request)
             let workingPath = container.appendingPathComponent("Working", isDirectory: true)
             let tempPath = container.appendingPathComponent("Temp", isDirectory: true)
@@ -96,6 +103,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             setup.workingPath = workingPath.path
             setup.tempPath = tempPath.path
             setup.logMaxLines = 3000
+            // Require this token on every command-socket call. The app's
+            // telemetry client reads the same shared-Keychain value, so a
+            // process with only App Group container access (enough to reach the
+            // unix socket) still can't drive the tunnel without it.
+            setup.commandServerSecret = SecretStore.runtime.commandServerSecret()
 
             var setupError: NSError?
             LibboxSetup(setup, &setupError)
@@ -117,8 +129,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             try server.start()
             commandServer = server
 
-            lastConfigContent = configContent
-            try server.startOrReloadService(configContent, options: LibboxOverrideOptions())
+            // Retain only the secret-free config + nonce for any later reload.
+            lastRawConfig = rawConfig
+            configSecretNonce = nonce
+            try server.startOrReloadService(resolved, options: LibboxOverrideOptions())
+        }
+
+        /// Resolves secret tokens from the shared Keychain in memory and fails
+        /// closed if any nonce-matching token is unresolvable — that means the
+        /// shared Keychain is unreachable (e.g. the keychain-access-groups
+        /// entitlement was dropped during signing), and starting anyway would
+        /// run the tunnel with blank credentials.
+        private func resolveConfig(rawConfig: String, nonce: String) throws -> String {
+            let (config, unresolvedSecrets) = SecretResolver.resolve(rawConfig, nonce: nonce)
+            if unresolvedSecrets > 0 {
+                throw TunnelProviderError.unresolvedSecrets(unresolvedSecrets)
+            }
+            return config
         }
 
         func stopService() {
@@ -131,10 +158,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         }
 
         func reloadService() throws {
-            guard let commandServer, let lastConfigContent else { return }
+            guard let commandServer, let lastRawConfig, let configSecretNonce else { return }
             reasserting = true
             defer { reasserting = false }
-            try commandServer.startOrReloadService(lastConfigContent, options: LibboxOverrideOptions())
+            // Re-resolve from the tokenized config so secrets live in memory only
+            // for the duration of the reload, not for the tunnel's lifetime.
+            let resolved = try resolveConfig(rawConfig: lastRawConfig, nonce: configSecretNonce)
+            try commandServer.startOrReloadService(resolved, options: LibboxOverrideOptions())
         }
     #endif
 
@@ -145,6 +175,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         }
 
         if let configPath = request.optionConfigPath {
+            guard isWithinAppGroupContainer(configPath, request: request) else {
+                throw TunnelProviderError.configPathOutsideContainer
+            }
             writeTunnelLog("Reading tunnel settings from shared storage")
             return try String(contentsOfFile: configPath, encoding: .utf8)
         }
@@ -155,6 +188,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         }
 
         if let configPath = request.providerConfigPath {
+            guard isWithinAppGroupContainer(configPath, request: request) else {
+                throw TunnelProviderError.configPathOutsideContainer
+            }
             writeTunnelLog("Reading tunnel settings from provider configuration")
             return try String(contentsOfFile: configPath, encoding: .utf8)
         }
@@ -177,6 +213,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         }
         // Engine still runs; shared state/logs just won't reach the app.
         return FileManager.default.temporaryDirectory
+    }
+
+    /// Confirms a config path handed to us via start options / provider
+    /// configuration resolves inside the App Group container before we read it,
+    /// so a tampered app-side state can't point the extension at an arbitrary
+    /// file (path traversal). The legitimate path is always
+    /// `RuntimeEnvironment.configFileURL`, which lives in this container.
+    private func isWithinAppGroupContainer(_ path: String, request: TunnelStartRequest) -> Bool {
+        guard let appGroup = request.appGroup,
+              let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
+        else {
+            return false
+        }
+        let resolved = URL(fileURLWithPath: path).standardizedFileURL.path
+        let base = container.standardizedFileURL.path
+        return resolved == base || resolved.hasPrefix(base + "/")
     }
 
     private func configureLogURL(request: TunnelStartRequest) {
@@ -260,6 +312,7 @@ private struct TunnelStartRequest {
     let providerConfigPath: String?
     let appGroup: String?
     let secretNonce: String
+    let includeAllNetworks: Bool
     let visibleOptionKeys: [String]
 
     init(options: [String: NSObject]?, providerConfiguration: [String: Any]?) {
@@ -269,6 +322,7 @@ private struct TunnelStartRequest {
         providerConfigPath = providerConfiguration?["configPath"] as? String
         appGroup = (options?["appGroup"] as? String) ?? (providerConfiguration?["appGroup"] as? String)
         secretNonce = (options?["secretNonce"] as? String) ?? (providerConfiguration?["secretNonce"] as? String) ?? ""
+        includeAllNetworks = ((options?["includeAllNetworks"] as? String) ?? (providerConfiguration?["includeAllNetworks"] as? String)) == "true"
 
         let hiddenKeys: Set = ["configContent", "configPath"]
         let keys = options?.keys.filter { !hiddenKeys.contains($0) }.sorted() ?? []
@@ -279,6 +333,7 @@ private struct TunnelStartRequest {
 private enum TunnelProviderError: LocalizedError {
     case missingConfig
     case missingSecretNonce
+    case configPathOutsideContainer
     case unresolvedSecrets(Int)
     case libboxUnavailable
 
@@ -288,6 +343,8 @@ private enum TunnelProviderError: LocalizedError {
             "The Hop tunnel extension could not find the tunnel settings."
         case .missingSecretNonce:
             "The Hop tunnel extension received no secret nonce, so credentials cannot be resolved safely. Reconnect from the app."
+        case .configPathOutsideContainer:
+            "The Hop tunnel extension was handed a config path outside the shared App Group container and refused to read it."
         case let .unresolvedSecrets(count):
             "\(count) credential reference(s) could not be resolved from the shared Keychain. Verify the keychain-access-groups entitlement is present on both the app and the tunnel extension."
         case .libboxUnavailable:

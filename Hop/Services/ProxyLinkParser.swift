@@ -99,6 +99,7 @@ struct ProxyImportService {
             do {
                 let profile = try parseProfileLink(line)
                 result.profiles.append(profile)
+                appendRuntimeWarnings(for: profile, label: ImportPolicy.redactForLog(line), to: &result)
                 if profile.security.tls?.allowInsecure == true {
                     result.warnings.append(ImportWarning(
                         message: "\(ImportPolicy.redactForLog(line)) disables TLS certificate verification (allow-insecure).",
@@ -135,12 +136,23 @@ struct ProxyImportService {
         // up-front `validateSubscriptionURL` check (SSRF, CWE-918).
         let session = URLSession(configuration: .ephemeral, delegate: SubscriptionRedirectValidator(), delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
-        let (data, response) = try await session.data(for: request)
+        // Stream the body with a hard byte cap rather than buffering it whole.
+        // `session.data(for:)` materializes the entire response in memory before
+        // any size check, letting a malicious subscription server force a large
+        // allocation; capping mid-stream bounds peak memory to maxPayloadBytes.
+        let (bytes, response) = try await session.bytes(for: request)
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw ProxyLinkParseError.subscriptionUnavailable
         }
-        guard data.count <= ImportPolicy.maxPayloadBytes else {
+        if response.expectedContentLength > Int64(ImportPolicy.maxPayloadBytes) {
             throw ProxyLinkParseError.payloadTooLarge
+        }
+        var data = Data()
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count > ImportPolicy.maxPayloadBytes {
+                throw ProxyLinkParseError.payloadTooLarge
+            }
         }
         guard let text = String(data: data, encoding: .utf8) else {
             throw ProxyLinkParseError.invalidURL
@@ -188,7 +200,7 @@ struct ProxyImportService {
             name: displayName(from: components, fallback: "VLESS \(endpoint.host)"),
             endpoint: endpoint,
             proto: .vless,
-            options: .vless(VLESSOptions(uuid: uuid, flow: query["flow"])),
+            options: .vless(VLESSOptions(uuid: uuid, flow: query["flow"], encryption: query["encryption"])),
             security: security,
             transport: parseTransport(query: query),
         )
@@ -326,11 +338,20 @@ struct ProxyImportService {
         {
             let host = try stringValue(object["add"], error: .missingHost)
             let port = try intValue(object["port"], error: .missingPort)
+            // Match the port validation every other parser applies; an
+            // out-of-range port would otherwise reach the generated config as
+            // `server_port: 0`, failing the tunnel with no useful diagnostic.
+            guard (1 ... 65535).contains(port) else { throw ProxyLinkParseError.missingPort }
             let uuid = try stringValue(object["id"], error: .missingCredentials)
             let network = (object["net"] as? String) ?? "tcp"
             let tlsValue = ((object["tls"] as? String) ?? "").lowercased()
             let sni = (object["sni"] as? String) ?? (object["host"] as? String)
-            let security: ProxySecurity = tlsValue == "tls" ? .tls(TLSOptions(serverName: sni ?? host)) : .none
+            let security: ProxySecurity = tlsValue == "tls" ? .tls(TLSOptions(
+                serverName: sni ?? host,
+                alpn: alpnValues(from: object["alpn"] as? String),
+                allowInsecure: boolValue(from: object["allowInsecure"]) ?? boolValue(from: object["skip-cert-verify"]) ?? false,
+                utlsFingerprint: (object["fp"] as? String) ?? (object["fingerprint"] as? String) ?? "chrome",
+            )) : .none
             let transport = transportFromVMess(network: network, path: object["path"] as? String, host: object["host"] as? String)
 
             return ProxyProfile(
@@ -358,7 +379,7 @@ struct ProxyImportService {
             options: .vmess(
                 VMessOptions(
                     uuid: requiredUser(components),
-                    security: query["security"] ?? "auto",
+                    security: query.first("encryption", "scy", "method") ?? "auto",
                     alterID: Int(query["alterId"] ?? query["alter_id"] ?? "0") ?? 0,
                 ),
             ),
@@ -446,15 +467,7 @@ struct ProxyImportService {
         }
 
         let host = values[0].trimmingCharacters(in: .whitespacesAndNewlines)
-        let tls = boolOption(keyed["tls"]) || type == "https" || type == "socks5-tls"
-        let security = tls ? ProxySecurity.tls(
-            TLSOptions(
-                serverName: keyed["peer"] ?? keyed["sni"] ?? host,
-                alpn: keyed["alpn"]?.split(separator: ",").map(String.init) ?? [],
-                allowInsecure: boolOption(keyed["allowinsecure"]) || boolOption(keyed["skip-common-name-verify"]),
-                utlsFingerprint: keyed["fingerprint"] ?? keyed["fp"] ?? "chrome",
-            ),
-        ) : .none
+        let security = shadowrocketSecurity(keyed: keyed, host: host, type: type)
 
         let profile: ProxyProfile?
         switch type {
@@ -477,7 +490,7 @@ struct ProxyImportService {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): VLESS requires password UUID."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .vless, options: .vless(VLESSOptions(uuid: password, flow: keyed["flow"])), security: security, transport: shadowrocketTransport(keyed: keyed))
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .vless, options: .vless(VLESSOptions(uuid: password, flow: keyed["flow"], encryption: keyed["encryption"])), security: security, transport: shadowrocketTransport(keyed: keyed))
         case "trojan":
             guard let password = keyed["password"] ?? values[safe: 2] else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Trojan requires password."))
@@ -489,7 +502,7 @@ struct ProxyImportService {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Hysteria2 requires auth/password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .hysteria2, options: .hysteria2(Hysteria2Options(password: auth, obfs: keyed["obfs"], obfsPassword: keyed["obfsparam"])), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .hysteria2, options: .hysteria2(Hysteria2Options(password: auth, obfs: keyed["obfs"], obfsPassword: keyedValue(keyed, "obfsparam", "obfs-param", "obfs_password", "obfs-password"))), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
         case "tuic":
             guard let password = keyed["password"] ?? values[safe: 3],
                   let user = keyed["user"] ?? keyed["uuid"] ?? values[safe: 2]
@@ -497,7 +510,7 @@ struct ProxyImportService {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): TUIC requires user and password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .tuic, options: .tuic(TUICOptions(uuid: user, password: password, congestionControl: keyed["congestion-control"])), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .tuic, options: .tuic(TUICOptions(uuid: user, password: password, congestionControl: keyedValue(keyed, "congestion-control", "congestion_control", "congestioncontrol"))), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
         case "http", "https":
             profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .http, options: .http(HTTPOptions(username: values[safe: 2], password: values[safe: 3])), security: security)
         case "socks5", "socks5-tls":
@@ -509,9 +522,16 @@ struct ProxyImportService {
 
         if let profile {
             result.profiles.append(profile)
+            appendRuntimeWarnings(for: profile, label: name, to: &result)
             if profile.security.tls?.allowInsecure == true {
                 result.warnings.append(ImportWarning(message: "\(name) disables TLS certificate verification (allow-insecure)."))
             }
+        }
+    }
+
+    private func appendRuntimeWarnings(for profile: ProxyProfile, label: String, to result: inout ImportResult) {
+        for warning in profile.importRuntimeWarnings {
+            result.warnings.append(ImportWarning(message: "\(label): \(warning)"))
         }
     }
 
@@ -637,17 +657,27 @@ struct ProxyImportService {
     }
 
     private func parseSecurity(query: Query, fallbackServerName: String) -> ProxySecurity {
-        let security = (query["security"] ?? query["tls"] ?? "").lowercased()
-        let serverName = query["sni"] ?? query["serverName"] ?? query["peer"] ?? fallbackServerName
-        let fingerprint = query["fp"] ?? query["fingerprint"] ?? "chrome"
+        let security = (query.first("security", "tls") ?? "").lowercased()
+        let serverName = query.first("sni", "serverName", "server_name", "server-name", "peer") ?? fallbackServerName
+        let alpn = alpnValues(from: query.first("alpn"))
+        let fingerprint = query.first("fp", "fingerprint", "utlsFingerprint", "utls_fingerprint", "utls-fingerprint", "clientFingerprint", "client_fingerprint", "client-fingerprint") ?? "chrome"
+        let allowInsecure = boolOption(query.first("allowInsecure", "allow_insecure", "allow-insecure", "insecure", "skipCertVerify", "skip_cert_verify", "skip-cert-verify"))
 
         if security == "reality" {
-            return .reality(
-                RealityOptions(
-                    publicKey: query["pbk"] ?? query["publicKey"] ?? query["public_key"] ?? "",
-                    shortID: query["sid"] ?? query["short_id"],
+            return ProxySecurity(
+                layer: .reality,
+                tls: TLSOptions(
                     serverName: serverName,
-                    spiderX: query["spx"] ?? query["spiderX"],
+                    alpn: alpn,
+                    allowInsecure: false,
+                    utlsFingerprint: fingerprint,
+                ),
+                reality: RealityOptions(
+                    publicKey: query.first("pbk", "publicKey", "public_key", "public-key", "password") ?? "",
+                    shortID: query.first("sid", "shortId", "short_id", "short-id"),
+                    serverName: serverName,
+                    spiderX: query.first("spx", "spiderX", "spider_x", "spider-x", "spider"),
+                    mldsa65Verify: query.first("pqv", "mldsa65Verify", "mldsa65_verify", "mldsa65-verify"),
                     utlsFingerprint: fingerprint,
                 ),
             )
@@ -657,8 +687,8 @@ struct ProxyImportService {
             return .tls(
                 TLSOptions(
                     serverName: serverName,
-                    alpn: query["alpn"]?.split(separator: ",").map(String.init) ?? [],
-                    allowInsecure: boolOption(query["allowInsecure"]) || boolOption(query["insecure"]),
+                    alpn: alpn,
+                    allowInsecure: allowInsecure,
                     utlsFingerprint: fingerprint,
                 ),
             )
@@ -682,12 +712,55 @@ struct ProxyImportService {
         }
     }
 
+    private func shadowrocketSecurity(keyed: [String: String], host: String, type: String) -> ProxySecurity {
+        let security = (keyedValue(keyed, "security", "tls") ?? "").lowercased()
+        let serverName = keyedValue(keyed, "peer", "sni", "servername", "server_name", "server-name") ?? host
+        let alpn = alpnValues(from: keyedValue(keyed, "alpn"))
+        let fingerprint = keyedValue(keyed, "fingerprint", "fp", "utlsfingerprint", "utls_fingerprint", "utls-fingerprint", "clientfingerprint", "client_fingerprint", "client-fingerprint") ?? "chrome"
+        let hasRealityFields = keyedValue(keyed, "pbk", "publickey", "public_key", "public-key", "sid", "shortid", "short_id", "short-id", "spx", "spiderx", "spider_x", "spider-x", "pqv", "mldsa65verify", "mldsa65_verify", "mldsa65-verify") != nil
+        let isReality = type == "vless" && (security == "reality" || boolOption(keyedValue(keyed, "reality")) || hasRealityFields)
+
+        if isReality {
+            return ProxySecurity(
+                layer: .reality,
+                tls: TLSOptions(
+                    serverName: serverName,
+                    alpn: alpn,
+                    allowInsecure: false,
+                    utlsFingerprint: fingerprint,
+                ),
+                reality: RealityOptions(
+                    publicKey: keyedValue(keyed, "pbk", "publickey", "public_key", "public-key", "password") ?? "",
+                    shortID: keyedValue(keyed, "sid", "shortid", "short_id", "short-id"),
+                    serverName: serverName,
+                    spiderX: keyedValue(keyed, "spx", "spiderx", "spider_x", "spider-x", "spider"),
+                    mldsa65Verify: keyedValue(keyed, "pqv", "mldsa65verify", "mldsa65_verify", "mldsa65-verify"),
+                    utlsFingerprint: fingerprint,
+                ),
+            )
+        }
+
+        let isTLS = security == "tls" || boolOption(keyedValue(keyed, "tls")) || type == "https" || type == "socks5-tls"
+        guard isTLS else {
+            return .none
+        }
+
+        return .tls(
+            TLSOptions(
+                serverName: serverName,
+                alpn: alpn,
+                allowInsecure: boolOption(keyedValue(keyed, "allowinsecure", "allow_insecure", "allow-insecure", "skip-common-name-verify", "skipcertverify", "skip_cert_verify", "skip-cert-verify")),
+                utlsFingerprint: fingerprint,
+            ),
+        )
+    }
+
     private func shadowrocketTransport(keyed: [String: String]) -> TransportOptions {
         switch (keyed["obfs"] ?? keyed["type"] ?? "").lowercased() {
         case "websocket", "ws":
             TransportOptions(type: .websocket, path: keyed["path"] ?? keyed["obfs-uri"], host: keyed["host"] ?? keyed["obfs-host"], serviceName: nil)
         case "grpc":
-            TransportOptions(type: .grpc, serviceName: keyed["service-name"] ?? keyed["servicename"])
+            TransportOptions(type: .grpc, serviceName: keyedValue(keyed, "service-name", "service_name", "servicename", "grpc-service-name", "grpc_service_name"))
         case "http", "httpupgrade", "http-upgrade":
             TransportOptions(type: .httpUpgrade, path: keyed["path"], host: keyed["host"], serviceName: nil)
         default:
@@ -860,6 +933,49 @@ struct ProxyImportService {
         }
     }
 
+    private func boolValue(from value: String?) -> Bool? {
+        guard let value else {
+            return nil
+        }
+        return switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "true", "yes", "1", "tls":
+            true
+        case "false", "no", "0", "none":
+            false
+        default:
+            nil
+        }
+    }
+
+    private func boolValue(from value: Any?) -> Bool? {
+        if let value = value as? Bool {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.boolValue
+        }
+        return boolValue(from: value as? String)
+    }
+
+    private func alpnValues(from value: String?) -> [String] {
+        guard let value else {
+            return []
+        }
+        return value
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private func keyedValue(_ values: [String: String], _ keys: String...) -> String? {
+        for key in keys {
+            if let value = values[key.lowercased()] {
+                return value
+            }
+        }
+        return nil
+    }
+
     private func stringValue(_ value: Any?, error: ProxyLinkParseError) throws -> String {
         if let value = value as? String, !value.isEmpty {
             return value
@@ -903,6 +1019,15 @@ private struct Query {
 
     subscript(_ key: String) -> String? {
         values[key] ?? values[key.lowercased()]
+    }
+
+    func first(_ keys: String...) -> String? {
+        for key in keys {
+            if let value = self[key] {
+                return value
+            }
+        }
+        return nil
     }
 }
 

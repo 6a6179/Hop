@@ -16,6 +16,12 @@ final class ProfileImportPayloadDetectorTests: XCTestCase {
         XCTAssertEqual(detector.detect(link), .importText(link))
     }
 
+    func testLeavesCredentialedHTTPSProxyURLWithPathAsImportText() {
+        let link = "https://user:pass@proxy.example.com:443/proxy#HTTPS"
+
+        XCTAssertEqual(detector.detect(link), .importText(link))
+    }
+
     func testLeavesPortOnlyHTTPSProxyURLAsImportText() {
         let link = "https://proxy.example.com:443#HTTPS"
 

@@ -1,3 +1,5 @@
+import Foundation
+
 enum ProtocolOptions: Hashable, Codable {
     case vless(VLESSOptions)
     case trojan(TrojanOptions)
@@ -14,6 +16,63 @@ enum ProtocolOptions: Hashable, Codable {
 struct VLESSOptions: Hashable, Codable {
     var uuid: String
     var flow: String?
+    var encryption: String? = nil
+}
+
+extension VLESSOptions {
+    var normalizedEncryption: String? {
+        guard let encryption else { return nil }
+        let trimmed = encryption.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.lowercased() != "none" else {
+            return nil
+        }
+        return trimmed
+    }
+
+    var encryptionAuthLabel: String {
+        guard let normalizedEncryption else {
+            return "None"
+        }
+
+        if normalizedEncryption.lowercased().hasPrefix("mlkem768x25519plus.") {
+            switch lastRawBase64URLBlockByteCount(in: normalizedEncryption) {
+            case 1184:
+                return "ML-KEM-768 auth"
+            case 32:
+                return "X25519 auth"
+            default:
+                return "ML-KEM/X25519 auth"
+            }
+        }
+
+        return "Custom VLESS Encryption"
+    }
+
+    var shouldRewriteEncryptionSecret: Bool {
+        guard let encryption else { return false }
+        return encryption.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "none"
+    }
+
+    private func lastRawBase64URLBlockByteCount(in value: String) -> Int? {
+        value
+            .split(separator: ".")
+            .reversed()
+            .lazy
+            .compactMap { rawBase64URLDecodedByteCount(String($0)) }
+            .first
+    }
+
+    private func rawBase64URLDecodedByteCount(_ value: String) -> Int? {
+        guard !value.isEmpty else { return nil }
+        var base64 = value
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padding = (4 - base64.count % 4) % 4
+        if padding < 4 {
+            base64.append(String(repeating: "=", count: padding))
+        }
+        return Data(base64Encoded: base64)?.count
+    }
 }
 
 struct TrojanOptions: Hashable, Codable {

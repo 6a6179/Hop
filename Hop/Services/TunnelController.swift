@@ -84,6 +84,10 @@ final class TunnelController {
             for item in profiles.flatMap(\.keychainSecretItems) {
                 secretStore.setValue(item.value, forKey: item.key)
             }
+            // Ensure the command-server auth token exists before the extension
+            // starts; the extension and telemetry client read the same shared
+            // Keychain value to gate/authenticate the command socket.
+            SecretStore.runtime.ensureCommandServerSecret()
             let secretNonce = UUID().uuidString
             let configContent = try configBuilder.build(
                 profiles: profiles.map { $0.tokenizingSecrets(nonce: secretNonce) },
@@ -96,13 +100,14 @@ final class TunnelController {
             )
             try sharedConfigStore.writeConfig(configContent)
 
-            let manager = try await configuredManager(secretNonce: secretNonce)
+            let manager = try await configuredManager(secretNonce: secretNonce, killSwitch: settings.killSwitch)
             observeStatus(for: manager.connection)
             appendLog("Starting NetworkExtension tunnel")
             try manager.connection.startVPNTunnel(options: [
                 "configPath": RuntimeEnvironment.configFileURL.path as NSString,
                 "appGroup": RuntimeEnvironment.appGroupIdentifier as NSString,
                 "secretNonce": secretNonce as NSString,
+                "includeAllNetworks": (settings.killSwitch ? "true" : "false") as NSString,
             ])
             appendLog("startVPNTunnel returned; current status is \(manager.connection.status.displayName)")
             syncExtensionLogs()
@@ -173,7 +178,7 @@ final class TunnelController {
         }
     }
 
-    private func configuredManager(secretNonce: String) async throws -> NETunnelProviderManager {
+    private func configuredManager(secretNonce: String, killSwitch: Bool) async throws -> NETunnelProviderManager {
         let manager = try await loadManager()
         let tunnelProtocol = NETunnelProviderProtocol()
         tunnelProtocol.providerBundleIdentifier = RuntimeEnvironment.tunnelProviderBundleIdentifier
@@ -181,12 +186,24 @@ final class TunnelController {
         // `secretNonce` lets an iOS-initiated restart (start options absent)
         // still resolve the tokens written to the shared config file. It is not
         // a secret — only unpredictable to import data — so persisting it in the
-        // provider configuration alongside the non-secret paths is fine.
+        // provider configuration alongside the non-secret paths is fine. The
+        // kill-switch flag is mirrored here so an OS-initiated restart preserves
+        // it without the app's start options.
         tunnelProtocol.providerConfiguration = [
             "configPath": RuntimeEnvironment.configFileURL.path,
             "appGroup": RuntimeEnvironment.appGroupIdentifier,
             "secretNonce": secretNonce,
+            "includeAllNetworks": killSwitch ? "true" : "false",
         ]
+        // Kill switch: when on, iOS forces every flow through the tunnel and
+        // drops traffic if the extension dies (fail-closed) instead of leaking
+        // to the default interface. Only diverge from system defaults when it's
+        // enabled so the off state matches prior behavior exactly; pairing it
+        // with excludeLocalNetworks keeps LAN/captive portals reachable.
+        tunnelProtocol.includeAllNetworks = killSwitch
+        if killSwitch {
+            tunnelProtocol.excludeLocalNetworks = true
+        }
 
         manager.localizedDescription = "Hop"
         manager.protocolConfiguration = tunnelProtocol

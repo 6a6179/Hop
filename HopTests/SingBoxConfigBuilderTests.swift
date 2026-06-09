@@ -19,6 +19,42 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         XCTAssertEqual(utls["fingerprint"] as? String, "chrome")
     }
 
+    func testVLESSEncryptionAuthFailsClosedForSingBoxRuntime() throws {
+        let profile = ProxyProfile(
+            name: "PQC VLESS",
+            endpoint: Endpoint(host: "edge.example.net", port: 443),
+            proto: .vless,
+            options: .vless(VLESSOptions(
+                uuid: "11111111-1111-4111-8111-111111111111",
+                flow: "xtls-rprx-vision",
+                encryption: "mlkem768x25519plus.native.0rtt..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )),
+            security: .reality(RealityOptions(publicKey: "PUBLICKEY", shortID: "abcd")),
+        )
+
+        XCTAssertThrowsError(try builder.build(profile: profile, routingMode: .global, rules: [])) { error in
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("X25519 auth"))
+            XCTAssertTrue(message.contains("sing-box/libbox"))
+            XCTAssertTrue(message.contains("cannot run encrypted VLESS"))
+        }
+    }
+
+    func testRealityMLDSA65VerifyFailsClosedForSingBoxRuntime() throws {
+        var profile = SampleData.vlessReality
+        if var reality = profile.security.reality {
+            reality.mldsa65Verify = "MLDSA65VERIFY"
+            profile.security.reality = reality
+        }
+
+        XCTAssertThrowsError(try builder.build(profile: profile, routingMode: .global, rules: [])) { error in
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("ML-DSA-65"))
+            XCTAssertTrue(message.contains("sing-box/libbox"))
+            XCTAssertTrue(message.contains("cannot enforce"))
+        }
+    }
+
     func testTrojanTLSConfigContainsTLSOptions() throws {
         let json = try builder.build(profile: SampleData.trojanTLS, routingMode: .global, rules: [])
         let root = try XCTUnwrap(parse(json))

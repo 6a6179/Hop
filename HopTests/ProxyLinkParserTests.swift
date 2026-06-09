@@ -4,20 +4,57 @@ import XCTest
 final class ProxyLinkParserTests: XCTestCase {
     private let parser = ProxyLinkParser()
     private let importService = ProxyImportService()
+    private let x25519Encryption = "mlkem768x25519plus.native.0rtt..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    private let mlkem768Encryption = "mlkem768x25519plus.native.0rtt..\(String(repeating: "A", count: 1579))"
 
     func testParsesVLESSRealityLink() throws {
-        let profile = try parser.parse("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&sni=www.cloudflare.com&fp=chrome&pbk=PUBLICKEY&sid=abcd&type=tcp&flow=xtls-rprx-vision#Tokyo")
+        let profile = try parser.parse("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&sni=www.cloudflare.com&fp=chrome&pbk=PUBLICKEY&sid=abcd&spx=%2F&type=tcp&flow=xtls-rprx-vision#Tokyo")
 
         XCTAssertEqual(profile.proto, .vless)
         XCTAssertEqual(profile.endpoint.host, "edge.example.net")
         XCTAssertEqual(profile.security.layer, .reality)
         XCTAssertEqual(profile.security.reality?.publicKey, "PUBLICKEY")
         XCTAssertEqual(profile.security.reality?.shortID, "abcd")
+        XCTAssertEqual(profile.security.reality?.spiderX, "/")
         if case let .vless(options) = profile.options {
             XCTAssertEqual(options.flow, "xtls-rprx-vision")
         } else {
             XCTFail("Expected VLESS options")
         }
+    }
+
+    func testParsesVLESSRealityAliasFieldsAndALPN() throws {
+        let link = "vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&server-name=www.microsoft.com&fingerprint=firefox&public-key=PUBLICKEY&short-id=abcd&spider_x=%2Falias%3Fed%3D204&pqv=MLDSA65VERIFY&alpn=h2,http/1.1&type=tcp#Alias"
+        let profile = try parser.parse(link)
+
+        XCTAssertEqual(profile.security.layer, .reality)
+        XCTAssertEqual(profile.security.tls?.serverName, "www.microsoft.com")
+        XCTAssertEqual(profile.security.tls?.alpn, ["h2", "http/1.1"])
+        XCTAssertEqual(profile.security.tls?.utlsFingerprint, "firefox")
+        XCTAssertEqual(profile.security.reality?.publicKey, "PUBLICKEY")
+        XCTAssertEqual(profile.security.reality?.shortID, "abcd")
+        XCTAssertEqual(profile.security.reality?.spiderX, "/alias?ed=204")
+        XCTAssertEqual(profile.security.reality?.mldsa65Verify, "MLDSA65VERIFY")
+    }
+
+    func testParsesVLESSEncryptionAuthLink() throws {
+        let profile = try parser.parse("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&encryption=\(x25519Encryption)#Tokyo")
+
+        if case let .vless(options) = profile.options {
+            XCTAssertEqual(options.encryption, x25519Encryption)
+            XCTAssertEqual(options.encryptionAuthLabel, "X25519 auth")
+        } else {
+            XCTFail("Expected VLESS options")
+        }
+    }
+
+    func testImportWarnsForVLESSEncryptionAuthLink() throws {
+        let result = try importService.importText("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?encryption=\(mlkem768Encryption)#Tokyo")
+
+        XCTAssertEqual(result.profiles.count, 1)
+        XCTAssertTrue(result.warnings.contains { warning in
+            warning.message.contains("ML-KEM-768 auth") && warning.message.contains("cannot run Xray VLESS Encryption/Auth yet")
+        })
     }
 
     func testParsesTrojanTLSLink() throws {
@@ -106,6 +143,34 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(profile.transport.host, "cdn.example.net")
     }
 
+    func testVMessJSONWithOutOfRangePortIsRejected() {
+        for badPort in ["0", "-1", "99999", "65536"] {
+            let vmessJSON = """
+            {"ps":"Bad","add":"vmess.example.net","port":\(badPort),"id":"33333333-3333-4333-8333-333333333333","net":"tcp"}
+            """
+            XCTAssertThrowsError(
+                try parser.parse("vmess://\(vmessJSON.base64Encoded())"),
+                "VMess port \(badPort) must be rejected",
+            )
+        }
+    }
+
+    func testParsesVMessURLSecurityAsTLSAndEncryptionAsCipher() throws {
+        let profile = try parser.parse("vmess://33333333-3333-4333-8333-333333333333@vmess.example.net:443?security=tls&encryption=chacha20-poly1305&sni=vmess.example.net&alpn=h2,http/1.1&type=ws&path=%2Fws&host=cdn.example.net#VMess")
+
+        XCTAssertEqual(profile.security.layer, .tls)
+        XCTAssertEqual(profile.security.tls?.serverName, "vmess.example.net")
+        XCTAssertEqual(profile.security.tls?.alpn, ["h2", "http/1.1"])
+        if case let .vmess(options) = profile.options {
+            XCTAssertEqual(options.security, "chacha20-poly1305")
+        } else {
+            XCTFail("Expected VMess options")
+        }
+        XCTAssertEqual(profile.transport.type, .websocket)
+        XCTAssertEqual(profile.transport.path, "/ws")
+        XCTAssertEqual(profile.transport.host, "cdn.example.net")
+    }
+
     func testParsesHTTPAndSOCKSLinks() throws {
         let result = try importService.importText(
             """
@@ -137,7 +202,7 @@ final class ProxyLinkParserTests: XCTestCase {
     func testParsesShadowrocketConfWithGroupsRulesAndWarnings() throws {
         let conf = """
         [Proxy]
-        Tokyo = vless, edge.example.net, 443, 11111111-1111-4111-8111-111111111111, tls=true, flow=xtls-rprx-vision
+        Tokyo = vless, edge.example.net, 443, 11111111-1111-4111-8111-111111111111, tls=true, security=reality, sni=www.microsoft.com, fp=chrome, pbk=PUBLICKEY, sid=abcd, spx=/shadow, pqv=MLDSA65VERIFY, alpn="h2,http/1.1", flow=xtls-rprx-vision, encryption=\(x25519Encryption)
         Frankfurt = trojan, de.example.net, 443, replace-me, tls=true, sni=de.example.net
         SS = ss, ss.example.net, 8388, aes-128-gcm, ss-pass
         OldSnell = snell, old.example.net, 443, password=skip
@@ -167,6 +232,20 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(result.rules.last?.kind, .final)
         XCTAssertEqual(result.rules.last?.target, .named("Auto"))
         XCTAssertGreaterThanOrEqual(result.warnings.count, 2)
+        XCTAssertTrue(result.warnings.contains { $0.message.contains("X25519 auth") })
+        XCTAssertTrue(result.warnings.contains { $0.message.contains("ML-DSA-65") })
+        if case let .vless(options) = result.profiles.first?.options {
+            XCTAssertEqual(options.encryption, x25519Encryption)
+        } else {
+            XCTFail("Expected VLESS options")
+        }
+        XCTAssertEqual(result.profiles.first?.security.layer, .reality)
+        XCTAssertEqual(result.profiles.first?.security.tls?.serverName, "www.microsoft.com")
+        XCTAssertEqual(result.profiles.first?.security.tls?.alpn, ["h2", "http/1.1"])
+        XCTAssertEqual(result.profiles.first?.security.reality?.publicKey, "PUBLICKEY")
+        XCTAssertEqual(result.profiles.first?.security.reality?.shortID, "abcd")
+        XCTAssertEqual(result.profiles.first?.security.reality?.spiderX, "/shadow")
+        XCTAssertEqual(result.profiles.first?.security.reality?.mldsa65Verify, "MLDSA65VERIFY")
     }
 }
 

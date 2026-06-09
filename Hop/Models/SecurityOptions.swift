@@ -43,6 +43,7 @@ struct RealityOptions: Hashable, Codable {
     var shortID: String?
     var serverName: String?
     var spiderX: String?
+    var mldsa65Verify: String?
     var utlsFingerprint: String
 
     init(
@@ -50,12 +51,14 @@ struct RealityOptions: Hashable, Codable {
         shortID: String? = nil,
         serverName: String? = nil,
         spiderX: String? = nil,
+        mldsa65Verify: String? = nil,
         utlsFingerprint: String = "chrome",
     ) {
         self.publicKey = publicKey
         self.shortID = shortID
         self.serverName = serverName
         self.spiderX = spiderX
+        self.mldsa65Verify = mldsa65Verify
         self.utlsFingerprint = utlsFingerprint
     }
 }
@@ -72,10 +75,15 @@ struct ProxySecurity: Hashable, Codable {
     }
 
     static func reality(_ options: RealityOptions) -> ProxySecurity {
+        reality(options, alpn: [])
+    }
+
+    static func reality(_ options: RealityOptions, alpn: [String]) -> ProxySecurity {
         ProxySecurity(
             layer: .reality,
             tls: TLSOptions(
                 serverName: options.serverName,
+                alpn: alpn,
                 allowInsecure: false,
                 utlsFingerprint: options.utlsFingerprint,
             ),

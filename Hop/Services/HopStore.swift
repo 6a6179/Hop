@@ -155,6 +155,9 @@ struct AppSettings: Hashable, Codable {
     var proxyDNS: Bool = true
     var sniffTraffic: Bool = true
     var strictRoute: Bool = true
+    /// Kill switch. When on, iOS forces all traffic through the tunnel and drops
+    /// it if the extension dies, instead of failing open to the default network.
+    var killSwitch: Bool = false
     var logRetention: LogRetention = .fiveHundred
     var latencyTestMethod: LatencyTestMethod = .tcp
 
@@ -175,6 +178,7 @@ extension AppSettings {
         proxyDNS = try container.decodeIfPresent(Bool.self, forKey: .proxyDNS) ?? defaults.proxyDNS
         sniffTraffic = try container.decodeIfPresent(Bool.self, forKey: .sniffTraffic) ?? defaults.sniffTraffic
         strictRoute = try container.decodeIfPresent(Bool.self, forKey: .strictRoute) ?? defaults.strictRoute
+        killSwitch = try container.decodeIfPresent(Bool.self, forKey: .killSwitch) ?? defaults.killSwitch
         logRetention = try container.decodeIfPresent(LogRetention.self, forKey: .logRetention) ?? defaults.logRetention
         latencyTestMethod = try container.decodeIfPresent(LatencyTestMethod.self, forKey: .latencyTestMethod) ?? defaults.latencyTestMethod
     }
@@ -489,21 +493,246 @@ final class HopStore {
 
         profiles.insert(contentsOf: result.profiles, at: 0)
         groups.insert(contentsOf: result.groups, at: 0)
-        if !result.rules.isEmpty {
-            if let index = ruleConfigurations.firstIndex(where: { $0.id == activeRuleConfigurationID }) {
-                ruleConfigurations[index].rules.insert(contentsOf: result.rules, at: 0)
-            } else {
-                let imported = RuleConfiguration(name: "Imported", rules: result.rules)
-                ruleConfigurations.insert(imported, at: 0)
-                activeRuleConfigurationID = imported.id
-            }
-        }
+        applyImportedRules(result.rules, deduplicate: false)
         selectedTarget = result.groups.first(where: \.isEnabled).map { .group($0.id) } ?? result.profiles.first.map { .profile($0.id) } ?? selectedTarget
         normalizeSelectedTarget()
         tunnel.appendLog("Imported \(result.summary)")
         for warning in result.warnings.prefix(5) {
             tunnel.appendLog("Import warning: \(warning.message)")
         }
+    }
+
+    func applySubscriptionRefresh(_ result: ImportResult) {
+        guard !result.isEmpty else {
+            tunnel.appendLog("Subscription refresh skipped: no runnable items found")
+            return
+        }
+
+        var importedProfileIDMap: [ProxyProfile.ID: ProxyProfile.ID] = [:]
+        var replacedProfileIDMap: [ProxyProfile.ID: ProxyProfile.ID] = [:]
+
+        for importedProfile in result.profiles {
+            let exactMatches = profileIndices(matchingIdentityOf: importedProfile)
+            let matchingIndices = exactMatches.isEmpty ? profileIndices(matchingNameAndProtocolOf: importedProfile) : exactMatches
+
+            if let profileIndex = preferredProfileIndex(from: matchingIndices) {
+                var updatedProfile = importedProfile
+                updatedProfile.id = profiles[profileIndex].id
+                profiles[profileIndex] = updatedProfile
+                importedProfileIDMap[importedProfile.id] = updatedProfile.id
+
+                if !exactMatches.isEmpty {
+                    for duplicateIndex in matchingIndices where duplicateIndex != profileIndex {
+                        replacedProfileIDMap[profiles[duplicateIndex].id] = updatedProfile.id
+                    }
+                }
+            } else {
+                profiles.insert(importedProfile, at: 0)
+                importedProfileIDMap[importedProfile.id] = importedProfile.id
+            }
+        }
+
+        if !replacedProfileIDMap.isEmpty {
+            let removedIDs = Set(replacedProfileIDMap.keys)
+            profiles.removeAll { removedIDs.contains($0.id) }
+            replaceTargetReferences(profileIDMap: replacedProfileIDMap)
+        }
+
+        var importedGroupIDMap: [ProxyGroup.ID: ProxyGroup.ID] = [:]
+        var replacedGroupIDMap: [ProxyGroup.ID: ProxyGroup.ID] = [:]
+
+        for importedGroup in result.groups.map({ remappedGroup($0, profileIDMap: importedProfileIDMap, groupIDMap: [:]) }) {
+            let matchingIndices = groupIndices(matchingRefreshIdentityOf: importedGroup)
+
+            if let groupIndex = preferredGroupIndex(from: matchingIndices) {
+                var updatedGroup = importedGroup
+                updatedGroup.id = groups[groupIndex].id
+                groups[groupIndex] = updatedGroup
+                importedGroupIDMap[importedGroup.id] = updatedGroup.id
+
+                for duplicateIndex in matchingIndices where duplicateIndex != groupIndex {
+                    replacedGroupIDMap[groups[duplicateIndex].id] = updatedGroup.id
+                }
+            } else {
+                groups.insert(importedGroup, at: 0)
+                importedGroupIDMap[importedGroup.id] = importedGroup.id
+            }
+        }
+
+        if !replacedGroupIDMap.isEmpty {
+            let removedIDs = Set(replacedGroupIDMap.keys)
+            groups.removeAll { removedIDs.contains($0.id) }
+        }
+        if !importedGroupIDMap.isEmpty || !replacedGroupIDMap.isEmpty {
+            replaceTargetReferences(groupIDMap: importedGroupIDMap.merging(replacedGroupIDMap) { current, _ in current })
+        }
+
+        applyImportedRules(result.rules, deduplicate: true)
+        normalizeSelectedTarget()
+        tunnel.appendLog("Refreshed subscription: \(result.summary)")
+        for warning in result.warnings.prefix(5) {
+            tunnel.appendLog("Import warning: \(warning.message)")
+        }
+    }
+
+    private func applyImportedRules(_ importedRules: [RoutingRule], deduplicate: Bool) {
+        guard !importedRules.isEmpty else {
+            return
+        }
+
+        let rulesToInsert: [RoutingRule]
+        if deduplicate, let index = ruleConfigurations.firstIndex(where: { $0.id == activeRuleConfigurationID }) {
+            let existingRules = Set(ruleConfigurations[index].rules)
+            rulesToInsert = importedRules.filter { !existingRules.contains($0) }
+        } else {
+            rulesToInsert = importedRules
+        }
+
+        guard !rulesToInsert.isEmpty else {
+            return
+        }
+
+        if let index = ruleConfigurations.firstIndex(where: { $0.id == activeRuleConfigurationID }) {
+            ruleConfigurations[index].rules.insert(contentsOf: rulesToInsert, at: 0)
+        } else {
+            let imported = RuleConfiguration(name: "Imported", rules: rulesToInsert)
+            ruleConfigurations.insert(imported, at: 0)
+            activeRuleConfigurationID = imported.id
+        }
+    }
+
+    private func profileIndices(matchingIdentityOf profile: ProxyProfile) -> [Int] {
+        let identity = SubscriptionProfileRefreshIdentity(profile)
+        return profiles.indices.filter {
+            SubscriptionProfileRefreshIdentity(profiles[$0]) == identity
+        }
+    }
+
+    private func profileIndices(matchingNameAndProtocolOf profile: ProxyProfile) -> [Int] {
+        let normalizedName = normalizedImportName(profile.name)
+        return profiles.indices.filter {
+            normalizedImportName(profiles[$0].name) == normalizedName && profiles[$0].proto == profile.proto
+        }
+    }
+
+    private func preferredProfileIndex(from indices: [Int]) -> Int? {
+        guard !indices.isEmpty else {
+            return nil
+        }
+        if case let .profile(selectedID) = selectedTarget,
+           let selectedIndex = indices.first(where: { profiles[$0].id == selectedID })
+        {
+            return selectedIndex
+        }
+
+        let referencedProfileIDs = Set(groups.flatMap { group in
+            group.members.compactMap { target in
+                if case let .profile(id) = target {
+                    return id
+                }
+                return nil
+            }
+        })
+        if let referencedIndex = indices.first(where: { referencedProfileIDs.contains(profiles[$0].id) }) {
+            return referencedIndex
+        }
+
+        return indices.first
+    }
+
+    private func groupIndices(matchingRefreshIdentityOf group: ProxyGroup) -> [Int] {
+        guard let importedType = group.importedType else {
+            return []
+        }
+        let normalizedName = normalizedImportName(group.name)
+        return groups.indices.filter {
+            normalizedImportName(groups[$0].name) == normalizedName && groups[$0].importedType == importedType
+        }
+    }
+
+    private func preferredGroupIndex(from indices: [Int]) -> Int? {
+        guard !indices.isEmpty else {
+            return nil
+        }
+        if case let .group(selectedID) = selectedTarget,
+           let selectedIndex = indices.first(where: { groups[$0].id == selectedID })
+        {
+            return selectedIndex
+        }
+
+        let referencedGroupIDs = Set(groups.flatMap { group in
+            group.members.compactMap { target in
+                if case let .group(id) = target {
+                    return id
+                }
+                return nil
+            }
+        })
+        if let referencedIndex = indices.first(where: { referencedGroupIDs.contains(groups[$0].id) }) {
+            return referencedIndex
+        }
+
+        return indices.first
+    }
+
+    private func remappedGroup(
+        _ group: ProxyGroup,
+        profileIDMap: [ProxyProfile.ID: ProxyProfile.ID],
+        groupIDMap: [ProxyGroup.ID: ProxyGroup.ID],
+    ) -> ProxyGroup {
+        var group = group
+        group.members = uniquedTargets(group.members.map { remappedTarget($0, profileIDMap: profileIDMap, groupIDMap: groupIDMap) })
+        group.defaultTarget = group.defaultTarget.map { remappedTarget($0, profileIDMap: profileIDMap, groupIDMap: groupIDMap) }
+        if let defaultTarget = group.defaultTarget, !group.members.contains(defaultTarget) {
+            group.defaultTarget = group.members.first
+        }
+        return group
+    }
+
+    private func replaceTargetReferences(
+        profileIDMap: [ProxyProfile.ID: ProxyProfile.ID] = [:],
+        groupIDMap: [ProxyGroup.ID: ProxyGroup.ID] = [:],
+    ) {
+        guard !profileIDMap.isEmpty || !groupIDMap.isEmpty else {
+            return
+        }
+
+        groups = groups.map {
+            remappedGroup($0, profileIDMap: profileIDMap, groupIDMap: groupIDMap)
+        }
+        selectedTarget = selectedTarget.map {
+            remappedTarget($0, profileIDMap: profileIDMap, groupIDMap: groupIDMap)
+        }
+    }
+
+    private func remappedTarget(
+        _ target: OutboundTarget,
+        profileIDMap: [ProxyProfile.ID: ProxyProfile.ID],
+        groupIDMap: [ProxyGroup.ID: ProxyGroup.ID],
+    ) -> OutboundTarget {
+        switch target {
+        case let .profile(id):
+            profileIDMap[id].map(OutboundTarget.profile) ?? target
+        case let .group(id):
+            groupIDMap[id].map(OutboundTarget.group) ?? target
+        case .selectedProxy, .direct, .reject, .named:
+            target
+        }
+    }
+
+    private func uniquedTargets(_ targets: [OutboundTarget]) -> [OutboundTarget] {
+        var seen: Set<OutboundTarget> = []
+        return targets.filter { target in
+            guard !seen.contains(target) else {
+                return false
+            }
+            seen.insert(target)
+            return true
+        }
+    }
+
+    private func normalizedImportName(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     func testLatency(for profile: ProxyProfile) async {
@@ -615,4 +844,24 @@ final class HopStore {
         tunnel: TunnelController(),
         dataStore: HopAppDataStore(url: URL(fileURLWithPath: "/tmp/hop-preview.json")),
     )
+}
+
+private struct SubscriptionProfileRefreshIdentity: Hashable {
+    var name: String
+    var host: String
+    var port: Int
+    var proto: ProxyProtocol
+    var options: ProtocolOptions
+    var security: ProxySecurity
+    var transport: TransportOptions
+
+    init(_ profile: ProxyProfile) {
+        name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        host = profile.endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        port = profile.endpoint.port
+        proto = profile.proto
+        options = profile.options
+        security = profile.security
+        transport = profile.transport
+    }
 }

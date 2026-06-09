@@ -4,11 +4,13 @@ import Foundation
 /// rather than in the on-disk JSON / generated config.
 enum ProfileSecretField: String, CaseIterable {
     case uuid
+    case vlessEncryption
     case password
     case obfsPassword
     case privateKey
     case realityPublicKey
     case realityShortID
+    case realityMLDSA65Verify
 }
 
 extension ProxyProfile {
@@ -18,6 +20,7 @@ extension ProxyProfile {
         switch options {
         case let .vless(options):
             values[.uuid] = options.uuid
+            values[.vlessEncryption] = options.normalizedEncryption
         case let .trojan(options):
             values[.password] = options.password
         case let .hysteria2(options):
@@ -42,6 +45,7 @@ extension ProxyProfile {
         if let reality = security.reality {
             values[.realityPublicKey] = reality.publicKey
             values[.realityShortID] = reality.shortID
+            values[.realityMLDSA65Verify] = reality.mldsa65Verify
         }
         return values.filter { !$0.value.isEmpty }
     }
@@ -83,7 +87,11 @@ extension ProxyProfile {
 
         switch options {
         case let .vless(options):
-            copy.options = .vless(VLESSOptions(uuid: transform(.uuid, options.uuid), flow: options.flow))
+            copy.options = .vless(VLESSOptions(
+                uuid: transform(.uuid, options.uuid),
+                flow: options.flow,
+                encryption: options.shouldRewriteEncryptionSecret ? transform(.vlessEncryption, options.encryption ?? "") : options.encryption,
+            ))
         case let .trojan(options):
             copy.options = .trojan(TrojanOptions(password: transform(.password, options.password)))
         case let .hysteria2(options):
@@ -119,6 +127,7 @@ extension ProxyProfile {
         if var reality = copy.security.reality {
             reality.publicKey = transform(.realityPublicKey, reality.publicKey)
             reality.shortID = reality.shortID.map { transform(.realityShortID, $0) }
+            reality.mldsa65Verify = reality.mldsa65Verify.map { transform(.realityMLDSA65Verify, $0) }
             copy.security.reality = reality
         }
 
