@@ -21,6 +21,7 @@
 		246A575B6AE82F98644E0A73 /* RuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9305B8EEC96671033BF8DD41 /* RuntimeEnvironment.swift */; };
 		3437B5CC89B37E7FDF19387C /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45D692D5F1AD88DA8A136049 /* DashboardView.swift */; };
 		35B5CE1EEA46D54914152942 /* HopAppDataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D657EAB1CEE8F6507C6C26FD /* HopAppDataStore.swift */; };
+		3A545F364919EC50AF422E75 /* ProxyGroupEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C2883F65204BE56CD826328 /* ProxyGroupEditorView.swift */; };
 		3C9C99E42B220EA65FADC777 /* ProfilesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B42744CD10EDFE8C38981CD8 /* ProfilesView.swift */; };
 		3FA31228BE6AE2BD7B9DB0A0 /* SubscriptionRefreshMergerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5F076B1CE9978B7369D54C8D /* SubscriptionRefreshMergerTests.swift */; };
 		40FD6910A95065FB5D25BEA2 /* ProfileImportPayloadDetector.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D8ACBB15D03BF2C2E97AFD2 /* ProfileImportPayloadDetector.swift */; };
@@ -43,6 +44,7 @@
 		807DA6B6FBAD169A76D2FA93 /* SecretStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F32FB4AA500BEEA4F0C413E1 /* SecretStoreTests.swift */; };
 		80E1845A601E6012D5C20996 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 204BB708587D0E01566D5250 /* UIKit.framework */; };
 		85F26C5948FA94EC7DFF811F /* ProxyProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28DCC6F3C157E2984F8C31F1 /* ProxyProfile.swift */; };
+		8B26331FE2D2653E20AF6E1B /* ProfileImportSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D3431DCA1FC3D93BF44071E /* ProfileImportSheets.swift */; };
 		8F307C1C80E4FF82D3E5CAA2 /* LatencyTesterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E8FAC2518BE966D47648D08 /* LatencyTesterTests.swift */; };
 		8F93B14355184EAD0FFB0458 /* RoutingModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C0F39000C684AB2876861F2 /* RoutingModels.swift */; };
 		9858F6FB19871B333349E68D /* HopAppDataStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 925A26C8EE99AC05A9A8A9FB /* HopAppDataStoreTests.swift */; };
@@ -61,6 +63,7 @@
 		C3FE6096230E6A4D16C785BE /* Endpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84979FFBEFD45B93D94D5B99 /* Endpoint.swift */; };
 		C401585B7F6AC399B4DB9679 /* SecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1B76DFDAC1976712EA1386 /* SecretStore.swift */; };
 		E09B9E1A5C19BDAEF96312C8 /* InMemorySecretBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8E77E25E525EA7855367170 /* InMemorySecretBackend.swift */; };
+		E136F89B9DE3A5BEA701A236 /* ProfileEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFEFF3D097E0B02744924A0C /* ProfileEditorView.swift */; };
 		E365C6ED54205DCB07318E59 /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5F3D56CD2BA215E54A3E5A68 /* Libbox.xcframework */; };
 		E85711D6F29ED59CCD026AA3 /* PlatformInterface.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC7386115F302B34587AD99B /* PlatformInterface.swift */; };
 		EE8D060ABB1FA3438FEE5E3F /* RulesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2133782FCFF25BE2983A29E /* RulesView.swift */; };
@@ -131,7 +134,9 @@
 		6E5C2A006DDF657377CF6E91 /* Hop.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Hop.entitlements; sourceTree = "<group>"; };
 		77E4FA85BD8446B9A49B31FA /* SingBoxConfigBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingBoxConfigBuilder.swift; sourceTree = "<group>"; };
 		79F3F8AA2AE8E9390B779188 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		7C2883F65204BE56CD826328 /* ProxyGroupEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyGroupEditorView.swift; sourceTree = "<group>"; };
 		7CEBE6F620AB4023B70C52DE /* SubscriptionFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionFetcher.swift; sourceTree = "<group>"; };
+		7D3431DCA1FC3D93BF44071E /* ProfileImportSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileImportSheets.swift; sourceTree = "<group>"; };
 		84979FFBEFD45B93D94D5B99 /* Endpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Endpoint.swift; sourceTree = "<group>"; };
 		86A346D2391DE82BBC35BDEB /* SubscriptionRefreshMerger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionRefreshMerger.swift; sourceTree = "<group>"; };
 		8F825207FA0FDCF8554B6650 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
@@ -161,6 +166,7 @@
 		F39E204D052663E8E718024B /* SingBoxConfigBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SingBoxConfigBuilderTests.swift; sourceTree = "<group>"; };
 		FEB0642CF6291B59DF655FF2 /* SampleData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleData.swift; sourceTree = "<group>"; };
 		FF668543CBA3F5DEE434ADEF /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		FFEFF3D097E0B02744924A0C /* ProfileEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileEditorView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -287,8 +293,11 @@
 				C8A0C129D627AF70557DB8E0 /* ConnectionsView.swift */,
 				45D692D5F1AD88DA8A136049 /* DashboardView.swift */,
 				4BB6FA5218140CC9E14D3B74 /* LogsView.swift */,
+				FFEFF3D097E0B02744924A0C /* ProfileEditorView.swift */,
+				7D3431DCA1FC3D93BF44071E /* ProfileImportSheets.swift */,
 				3533A427455D1019D363597D /* ProfileSecuritySummary.swift */,
 				B42744CD10EDFE8C38981CD8 /* ProfilesView.swift */,
+				7C2883F65204BE56CD826328 /* ProxyGroupEditorView.swift */,
 				D2133782FCFF25BE2983A29E /* RulesView.swift */,
 				FF668543CBA3F5DEE434ADEF /* SettingsView.swift */,
 			);
@@ -512,11 +521,14 @@
 				6E27502FEB4697CA1227F524 /* LatencyTester.swift in Sources */,
 				AD5430672945FB6F2C5DF2F3 /* LogsView.swift in Sources */,
 				554C5D540ECBA7A4CA32A7C6 /* OutboundModels.swift in Sources */,
+				E136F89B9DE3A5BEA701A236 /* ProfileEditorView.swift in Sources */,
 				40FD6910A95065FB5D25BEA2 /* ProfileImportPayloadDetector.swift in Sources */,
+				8B26331FE2D2653E20AF6E1B /* ProfileImportSheets.swift in Sources */,
 				4D6C83A255F379FBA1331CAC /* ProfileSecrets.swift in Sources */,
 				11FA3F59B9460CDD7F4B5396 /* ProfileSecuritySummary.swift in Sources */,
 				3C9C99E42B220EA65FADC777 /* ProfilesView.swift in Sources */,
 				9FB2271C955A485CAA0AFCFB /* ProtocolOptions.swift in Sources */,
+				3A545F364919EC50AF422E75 /* ProxyGroupEditorView.swift in Sources */,
 				BC23B6D0A4235D9BEF6B9CF5 /* ProxyLinkParser.swift in Sources */,
 				85F26C5948FA94EC7DFF811F /* ProxyProfile.swift in Sources */,
 				AAE7EED0088A0A41343A6655 /* ProxyProtocol.swift in Sources */,
