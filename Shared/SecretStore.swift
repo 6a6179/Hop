@@ -17,6 +17,12 @@ protocol SecretBackend: Sendable {
 struct SecretStore {
     static let defaultService = "cat.string.hop.secrets"
 
+    /// Separate Keychain service for runtime/inter-process secrets (e.g. the
+    /// libbox command-server token). Kept apart from `defaultService` so a
+    /// profile save's `replaceAll` — which atomically rewrites the *profile*
+    /// secret set — never evicts these.
+    static let runtimeService = "cat.string.hop.runtime"
+
     /// Group suffix; the team/app-identifier prefix is prepended at runtime to
     /// match the `$(AppIdentifierPrefix)cat.string.hop` entitlement entry.
     static let sharedAccessGroupSuffix = "cat.string.hop"
@@ -32,6 +38,10 @@ struct SecretStore {
     }
 
     static let shared = SecretStore()
+
+    /// Shared store for runtime secrets that must outlive profile-secret
+    /// rewrites (see `runtimeService`). Used for the command-server token.
+    static let runtime = SecretStore(service: runtimeService)
 
     func value(forKey key: String) -> String? {
         backend.value(forKey: key)
@@ -56,6 +66,37 @@ struct SecretStore {
         for item in items {
             backend.setValue(item.value, forKey: item.key)
         }
+    }
+
+    // MARK: - Command-server secret
+
+    /// Keychain account for the libbox command-server auth token, stored in the
+    /// `runtime` service so it survives profile-secret rewrites.
+    static let commandServerSecretKey = "command-server-secret"
+
+    /// The shared command-server secret, or `""` if none has been stored yet.
+    /// Read by the tunnel extension (command *server*) and the app's telemetry
+    /// client (command *client*); both hand it to `LibboxSetup` so the unix
+    /// command socket rejects callers that can't present it. Empty on both
+    /// sides degrades to the prior unauthenticated behavior (no regression).
+    func commandServerSecret() -> String {
+        value(forKey: Self.commandServerSecretKey) ?? ""
+    }
+
+    /// Returns the command-server secret, generating and persisting a random
+    /// one on first use. The app calls this before starting the tunnel so the
+    /// value exists in the shared Keychain for the extension and telemetry
+    /// client to read. Storing it in the Keychain (not the App Group container)
+    /// means a process with only container access — enough to reach the command
+    /// socket — still can't read the token without the keychain-access-group.
+    @discardableResult
+    func ensureCommandServerSecret() -> String {
+        if let existing = value(forKey: Self.commandServerSecretKey), !existing.isEmpty {
+            return existing
+        }
+        let secret = UUID().uuidString + UUID().uuidString
+        setValue(secret, forKey: Self.commandServerSecretKey)
+        return secret
     }
 
     // MARK: - Access-group resolution
@@ -83,6 +124,15 @@ struct KeychainSecretBackend: SecretBackend {
     let service: String
     let accessGroup: String?
 
+    /// Emitted once (lazily, the first time it's referenced) when a Keychain
+    /// operation falls back to the process-local keychain because the shared
+    /// access-group entitlement is missing. Turns a silent misconfiguration —
+    /// where the app writes secrets the tunnel extension can never read — into
+    /// a diagnosable one, without logging per item.
+    private static let didLogEntitlementFallback: Void = {
+        NSLog("Hop: keychain-access-groups entitlement unavailable; using a process-local keychain. App↔tunnel secret sharing requires the shared access group on both targets.")
+    }()
+
     func value(forKey key: String) -> String? {
         read(account: key, includeGroup: accessGroup != nil)
     }
@@ -107,6 +157,7 @@ struct KeychainSecretBackend: SecretBackend {
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         if status == errSecMissingEntitlement, includeGroup {
+            _ = Self.didLogEntitlementFallback
             return read(account: account, includeGroup: false)
         }
         guard status == errSecSuccess, let data = item as? Data else {
@@ -133,6 +184,7 @@ struct KeychainSecretBackend: SecretBackend {
         }
 
         if status == errSecMissingEntitlement, includeGroup {
+            _ = Self.didLogEntitlementFallback
             write(account: account, data: data, includeGroup: false)
         }
     }
@@ -141,6 +193,7 @@ struct KeychainSecretBackend: SecretBackend {
         let query = baseQuery(account: account, includeGroup: includeGroup)
         let status = SecItemDelete(query as CFDictionary)
         if status == errSecMissingEntitlement, includeGroup {
+            _ = Self.didLogEntitlementFallback
             delete(account: account, includeGroup: false)
         }
     }

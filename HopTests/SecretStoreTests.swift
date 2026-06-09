@@ -48,6 +48,32 @@ final class SecretStoreTests: XCTestCase {
         XCTAssertEqual(store.value(forKey: "weird"), messy)
     }
 
+    // MARK: - Command-server secret
+
+    func testCommandServerSecretIsEmptyUntilGenerated() {
+        let store = makeStore()
+        defer { store.removeAll() }
+
+        XCTAssertTrue(store.commandServerSecret().isEmpty, "no secret should exist before first use")
+    }
+
+    func testEnsureCommandServerSecretGeneratesAndIsStable() {
+        let store = makeStore()
+        defer { store.removeAll() }
+
+        let created = store.ensureCommandServerSecret()
+        XCTAssertFalse(created.isEmpty, "a secret must be generated on first use")
+        XCTAssertEqual(store.ensureCommandServerSecret(), created, "the secret must be stable across calls")
+        XCTAssertEqual(store.commandServerSecret(), created, "a read must return the generated secret")
+    }
+
+    /// The command-server secret must live in its own Keychain service so a
+    /// profile save's `replaceAll` (which rewrites the *profile* secret set)
+    /// never evicts it. This guards the wiring that keeps the two stores apart.
+    func testRuntimeServiceIsSeparateFromProfileSecrets() {
+        XCTAssertNotEqual(SecretStore.runtimeService, SecretStore.defaultService)
+    }
+
     // MARK: - Profile redaction / hydration
 
     func testProfileRedactionRemovesSecretsAndHydrationRestores() {
@@ -59,6 +85,56 @@ final class SecretStoreTests: XCTestCase {
 
         let redacted = profile.redactingSecrets()
         XCTAssertTrue(redacted.secretFieldValues.isEmpty, "redacted profile must expose no secrets")
+
+        for item in profile.keychainSecretItems {
+            store.setValue(item.value, forKey: item.key)
+        }
+        let hydrated = redacted.hydratingSecrets(from: store)
+        XCTAssertEqual(hydrated, profile)
+    }
+
+    func testRealityMLDSA65VerifyIsRedactedAndHydrated() {
+        let store = makeStore()
+        defer { store.removeAll() }
+
+        let verifyKey = "MLDSA65VERIFY"
+        var profile = SampleData.vlessReality
+        if var reality = profile.security.reality {
+            reality.mldsa65Verify = verifyKey
+            profile.security.reality = reality
+        }
+
+        let redacted = profile.redactingSecrets()
+        XCTAssertFalse(redacted.secretFieldValues.values.contains(verifyKey))
+        XCTAssertFalse(redacted.keychainSecretItems.contains { $0.value == verifyKey })
+
+        for item in profile.keychainSecretItems {
+            store.setValue(item.value, forKey: item.key)
+        }
+        let hydrated = redacted.hydratingSecrets(from: store)
+        XCTAssertEqual(hydrated, profile)
+    }
+
+    func testVLESSEncryptionIsRedactedAndHydrated() {
+        let store = makeStore()
+        defer { store.removeAll() }
+
+        let encryption = "mlkem768x25519plus.native.0rtt..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        let profile = ProxyProfile(
+            name: "Encrypted VLESS",
+            endpoint: Endpoint(host: "edge.example.net", port: 443),
+            proto: .vless,
+            options: .vless(VLESSOptions(
+                uuid: "11111111-1111-4111-8111-111111111111",
+                flow: "xtls-rprx-vision",
+                encryption: encryption,
+            )),
+            security: .reality(RealityOptions(publicKey: "PUBLICKEY", shortID: "abcd")),
+        )
+
+        let redacted = profile.redactingSecrets()
+        XCTAssertFalse(redacted.secretFieldValues.values.contains(encryption))
+        XCTAssertFalse(redacted.keychainSecretItems.contains { $0.value == encryption })
 
         for item in profile.keychainSecretItems {
             store.setValue(item.value, forKey: item.key)

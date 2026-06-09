@@ -37,4 +37,32 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
             "REALITY"
         }
     }
+
+    var vlessOptions: VLESSOptions? {
+        guard case let .vless(options) = options else {
+            return nil
+        }
+        return options
+    }
+
+    var vlessEncryptionRuntimeWarning: String? {
+        guard proto == .vless,
+              let options = vlessOptions,
+              options.normalizedEncryption != nil
+        else {
+            return nil
+        }
+        return "\(options.encryptionAuthLabel) is preserved, but the bundled sing-box/libbox engine cannot run Xray VLESS Encryption/Auth yet."
+    }
+
+    var realityMLDSA65RuntimeWarning: String? {
+        guard security.reality?.mldsa65Verify?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+            return nil
+        }
+        return "REALITY ML-DSA-65 verification is preserved, but the bundled sing-box/libbox engine cannot enforce pqv yet."
+    }
+
+    var importRuntimeWarnings: [String] {
+        [vlessEncryptionRuntimeWarning, realityMLDSA65RuntimeWarning].compactMap(\.self)
+    }
 }

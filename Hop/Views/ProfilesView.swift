@@ -36,7 +36,6 @@ struct ProfilesView: View {
             switch selectedSection {
             case .nodes:
                 nodesSection
-            case .groups:
                 groupsSection
             case .subscriptions:
                 subscriptionsSection
@@ -69,7 +68,7 @@ struct ProfilesView: View {
                         }
                     }
                 } label: {
-                    Label("Add or Import", systemImage: "plus.circle")
+                    Label("Add", systemImage: "plus.circle")
                 }
             }
         }
@@ -91,20 +90,22 @@ struct ProfilesView: View {
                     } else {
                         store.addGroup(updatedGroup)
                     }
-                    selectedSection = .groups
+                    selectedSection = .nodes
                 }
             case .addSubscription:
                 AddSubscriptionSheet(importService: importService) { subscription, result in
-                    store.applyImport(result)
-                    store.addSubscription(subscription)
-                    selectedSection = .subscriptions
-                    importNotice = ProfileImportNotice(title: "Subscription Added", message: result.summary)
+                    saveImportedSubscription(subscription, result: result, addedTitle: "Subscription Added")
                 }
             case .importText:
-                ImportTextSheet(importService: importService) { result in
-                    store.applyImport(result)
-                    selectedSection = result.profiles.isEmpty ? .groups : .nodes
-                    importNotice = ProfileImportNotice(title: "Import Complete", message: result.summary)
+                ImportTextSheet(importService: importService) { saveResult in
+                    switch saveResult {
+                    case let .importText(result):
+                        store.applyImport(result)
+                        selectedSection = .nodes
+                        importNotice = ProfileImportNotice(title: "Import Complete", message: result.summary)
+                    case let .subscription(subscription, result):
+                        saveImportedSubscription(subscription, result: result, addedTitle: "Subscription URL Imported")
+                    }
                 }
             case .scanner:
                 QRCodeScannerSheet { payload in
@@ -160,7 +161,7 @@ struct ProfilesView: View {
         } header: {
             Text("Nodes")
         } footer: {
-            Text("Supports VLESS+REALITY, Trojan+TLS, Hysteria2+TLS, TUIC+TLS, Shadowsocks, VMess, HTTP, and SOCKS where sing-box supports them.")
+            Text("Existing nodes live here. Use Import/Add for new nodes or subscriptions.")
         }
     }
 
@@ -196,12 +197,12 @@ struct ProfilesView: View {
         } header: {
             Text("Proxy Groups")
         } footer: {
-            Text("Manual groups generate sing-box selectors. URL Test groups generate sing-box urltest outbounds.")
+            Text("Existing groups live with nodes because both can be selected as active proxy targets.")
         }
     }
 
     private var subscriptionsSection: some View {
-        Section("Subscriptions") {
+        Section {
             if store.subscriptions.isEmpty {
                 ContentUnavailableView(
                     "No Subscriptions",
@@ -232,8 +233,18 @@ struct ProfilesView: View {
                         if isRefreshing {
                             ProgressView()
                                 .controlSize(.small)
+                        } else {
+                            Button {
+                                refreshSubscription(subscription)
+                            } label: {
+                                Label("Refresh", systemImage: "arrow.clockwise")
+                                    .labelStyle(.iconOnly)
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Refresh \(subscription.name)")
                         }
                     }
+                    .disabled(isRefreshing)
                     .swipeActions(edge: .leading, allowsFullSwipe: true) {
                         Button {
                             refreshSubscription(subscription)
@@ -253,6 +264,10 @@ struct ProfilesView: View {
                     }
                 }
             }
+        } header: {
+            Text("Subscriptions")
+        } footer: {
+            Text("Refresh downloads the subscription again and updates matching nodes/groups in place instead of appending duplicates.")
         }
     }
 
@@ -277,8 +292,8 @@ struct ProfilesView: View {
         do {
             let result = try importService.importText(text)
             store.applyImport(result)
-            selectedSection = result.profiles.isEmpty ? .groups : .nodes
-            importNotice = ProfileImportNotice(title: "Scanned Node Imported", message: result.summary)
+            selectedSection = .nodes
+            importNotice = ProfileImportNotice(title: "Scanned Import Complete", message: result.summary)
         } catch {
             importNotice = ProfileImportNotice(title: "Could Not Import Code", message: error.localizedDescription)
         }
@@ -296,11 +311,8 @@ struct ProfilesView: View {
                     lastImportSummary: result.summary,
                 )
                 await MainActor.run {
-                    store.applyImport(result)
-                    store.addSubscription(subscription)
-                    selectedSection = .subscriptions
+                    saveImportedSubscription(subscription, result: result, addedTitle: "Scanned Subscription Added")
                     isHandlingScannedPayload = false
-                    importNotice = ProfileImportNotice(title: "Scanned Subscription Added", message: result.summary)
                 }
             } catch {
                 await MainActor.run {
@@ -309,6 +321,45 @@ struct ProfilesView: View {
                 }
             }
         }
+    }
+
+    private func saveImportedSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
+        if let existing = store.subscriptions.first(where: { normalizedSubscriptionURL($0.url) == normalizedSubscriptionURL(subscription.url) }) {
+            var refreshedSubscription = subscription
+            refreshedSubscription.id = existing.id
+            if isDefaultSubscriptionName(subscription.name, for: subscription.url) {
+                refreshedSubscription.name = existing.name
+            }
+            store.applySubscriptionRefresh(result)
+            store.updateSubscription(refreshedSubscription)
+            selectedSection = .subscriptions
+            importNotice = ProfileImportNotice(
+                title: "Subscription Updated",
+                message: "\(result.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
+            )
+        } else {
+            store.applyImport(result)
+            store.addSubscription(subscription)
+            selectedSection = .subscriptions
+            importNotice = ProfileImportNotice(title: addedTitle, message: result.summary)
+        }
+    }
+
+    private func normalizedSubscriptionURL(_ value: String) -> String {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed) else {
+            return trimmed
+        }
+        components.scheme = components.scheme?.lowercased()
+        components.host = components.host?.lowercased()
+        return components.url?.absoluteString ?? trimmed
+    }
+
+    private func isDefaultSubscriptionName(_ name: String, for urlString: String) -> Bool {
+        guard let url = URL(string: urlString) else {
+            return name == "Subscription"
+        }
+        return name == (url.host() ?? "Subscription")
     }
 
     private func refreshSubscription(_ subscription: SubscriptionSource) {
@@ -328,7 +379,7 @@ struct ProfilesView: View {
                 refreshedSubscription.lastUpdatedAt = .now
                 refreshedSubscription.lastImportSummary = result.summary
                 await MainActor.run {
-                    store.applyImport(result)
+                    store.applySubscriptionRefresh(result)
                     store.updateSubscription(refreshedSubscription)
                     refreshingSubscriptionIDs.remove(subscription.id)
                     importNotice = ProfileImportNotice(title: "Subscription Refreshed", message: result.summary)
@@ -364,7 +415,6 @@ struct ProfilesView: View {
 
 private enum ProfilesSection: String, CaseIterable, Identifiable {
     case nodes
-    case groups
     case subscriptions
 
     var id: String {
@@ -375,10 +425,8 @@ private enum ProfilesSection: String, CaseIterable, Identifiable {
         switch self {
         case .nodes:
             "Nodes"
-        case .groups:
-            "Groups"
         case .subscriptions:
-            "Subs"
+            "Subscriptions"
         }
     }
 }
@@ -433,6 +481,13 @@ private struct ProfileRow: View {
                 }
             }
             ProfileSecuritySummary(profile: profile)
+            ForEach(profile.importRuntimeWarnings, id: \.self) { warning in
+                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(.vertical, 2)
         .animation(.snappy, value: isSelected)
@@ -547,6 +602,11 @@ private struct ImportPreviewView: View {
     }
 }
 
+private enum ImportTextSaveResult {
+    case importText(ImportResult)
+    case subscription(SubscriptionSource, ImportResult)
+}
+
 private struct AddSubscriptionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
@@ -642,9 +702,11 @@ private struct ImportTextSheet: View {
     @State private var importText = ""
     @State private var importResult: ImportResult?
     @State private var importError: String?
+    @State private var detectedSubscriptionURL: URL?
+    @State private var isLoading = false
 
     var importService: ProxyImportService
-    var onSave: (ImportResult) -> Void
+    var onSave: (ImportTextSaveResult) -> Void
 
     var body: some View {
         NavigationStack {
@@ -655,18 +717,31 @@ private struct ImportTextSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
 
-                    Button("Preview Import") {
+                    Button {
                         previewImport()
+                    } label: {
+                        if isLoading {
+                            Label("Previewing...", systemImage: "arrow.down.circle")
+                        } else {
+                            Label("Preview Import", systemImage: "eye")
+                        }
                     }
-                    .disabled(importText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(isLoading || importText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 } header: {
                     Text("Paste Import")
                 } footer: {
-                    Text("Accepts node links, base64/plain subscriptions, and Shadowrocket .conf files.")
+                    Text("Subscription URLs are detected and saved as subscriptions. Proxy share links and base64/plain payloads are imported as nodes, groups, or rules.")
                 }
 
                 if let importResult {
-                    Section("Preview") {
+                    Section(detectedSubscriptionURL == nil ? "Import Preview" : "Subscription Preview") {
+                        if let detectedSubscriptionURL {
+                            LabeledContent("URL") {
+                                Text(detectedSubscriptionURL.absoluteString)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
                         ImportPreviewView(result: importResult)
                     }
                 }
@@ -686,28 +761,71 @@ private struct ImportTextSheet: View {
                     Button("Cancel") {
                         dismiss()
                     }
+                    .disabled(isLoading)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         guard let importResult else {
                             return
                         }
-                        onSave(importResult)
+                        if let detectedSubscriptionURL {
+                            onSave(.subscription(
+                                SubscriptionSource(
+                                    name: detectedSubscriptionURL.host() ?? "Subscription",
+                                    url: detectedSubscriptionURL.absoluteString,
+                                    lastUpdatedAt: .now,
+                                    lastImportSummary: importResult.summary,
+                                ),
+                                importResult,
+                            ))
+                        } else {
+                            onSave(.importText(importResult))
+                        }
                         dismiss()
                     }
-                    .disabled(importResult?.isEmpty ?? true)
+                    .disabled(isLoading || (importResult?.isEmpty ?? true))
                 }
             }
         }
     }
 
     private func previewImport() {
-        do {
-            importResult = try importService.importText(importText)
-            importError = nil
-        } catch {
+        let trimmed = importText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let payload = ProfileImportPayloadDetector().detect(trimmed) else {
             importResult = nil
-            importError = error.localizedDescription
+            detectedSubscriptionURL = nil
+            importError = ProxyLinkParseError.invalidURL.localizedDescription
+            return
+        }
+
+        importError = nil
+        importResult = nil
+        detectedSubscriptionURL = nil
+
+        switch payload {
+        case let .subscription(url):
+            isLoading = true
+            Task {
+                do {
+                    let result = try await importService.importSubscription(url: url)
+                    await MainActor.run {
+                        detectedSubscriptionURL = url
+                        importResult = result
+                        isLoading = false
+                    }
+                } catch {
+                    await MainActor.run {
+                        importError = error.localizedDescription
+                        isLoading = false
+                    }
+                }
+            }
+        case let .importText(text):
+            do {
+                importResult = try importService.importText(text)
+            } catch {
+                importError = error.localizedDescription
+            }
         }
     }
 }
@@ -977,6 +1095,16 @@ private struct ProfileEditorView: View {
             case .vless:
                 ProfileTextField("UUID", text: $draft.vlessUUID)
                 ProfileTextField("Flow", text: $draft.vlessFlow, prompt: "xtls-rprx-vision")
+                ProfileTextField("Encryption/Auth", text: $draft.vlessEncryption, prompt: "none")
+                if draft.hasVLESSEncryption {
+                    Label("\(draft.vlessEncryptionAuthLabel) is saved for compatibility, but Hop's current sing-box/libbox engine cannot run non-none VLESS Encryption/Auth yet.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                } else {
+                    Text("Paste a full Xray VLESS encryption string here if your node uses X25519 or ML-KEM-768 auth.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             case .trojan:
                 ProfileTextField("Password", text: $draft.trojanPassword)
             case .hysteria2:
@@ -1036,7 +1164,20 @@ private struct ProfileEditorView: View {
                 ProfileTextField("Public Key", text: $draft.realityPublicKey)
                 ProfileTextField("Short ID", text: $draft.realityShortID)
                 ProfileTextField("Server Name / SNI", text: $draft.realityServerName)
-                ProfileTextField("Spider X", text: $draft.realitySpiderX, prompt: "/")
+                ProfileTextField("SpiderX (spx)", text: $draft.realitySpiderX, prompt: "/")
+                Text("SpiderX is the REALITY crawler path from share links. Leave blank only if your server expects the default.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                ProfileTextField("ML-DSA-65 Verify", text: $draft.realityMLDSA65Verify)
+                if draft.hasRealityMLDSA65Verify {
+                    Label("pqv / ML-DSA-65 is preserved in this profile, but Hop's bundled sing-box/libbox engine cannot enforce it yet.", systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
+                MultiSelectMenu("ALPN", options: ProfileEditorChoices.alpn, selection: $draft.tlsALPN)
+                Text("ALPN is a Hop profile setting emitted to sing-box. 3X-UI may not expose REALITY ALPN; configure the server separately if it needs ALPN.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 UTLSFingerprintPicker(selection: $draft.realityFingerprint)
             }
         }
@@ -1205,6 +1346,7 @@ private struct ProfileEditorDraft {
 
     var vlessUUID = ""
     var vlessFlow = ""
+    var vlessEncryption = ""
     var trojanPassword = ""
     var hysteriaPassword = ""
     var hysteriaObfs = ""
@@ -1235,6 +1377,7 @@ private struct ProfileEditorDraft {
     var realityShortID = ""
     var realityServerName = ""
     var realitySpiderX = ""
+    var realityMLDSA65Verify = ""
     var realityFingerprint = "chrome"
 
     var transportType: TransportType
@@ -1255,6 +1398,7 @@ private struct ProfileEditorDraft {
         case let .vless(options):
             vlessUUID = options.uuid
             vlessFlow = options.flow ?? ""
+            vlessEncryption = options.encryption ?? ""
         case let .trojan(options):
             trojanPassword = options.password
         case let .hysteria2(options):
@@ -1298,6 +1442,7 @@ private struct ProfileEditorDraft {
             realityShortID = reality.shortID ?? ""
             realityServerName = reality.serverName ?? ""
             realitySpiderX = reality.spiderX ?? ""
+            realityMLDSA65Verify = reality.mldsa65Verify ?? ""
             realityFingerprint = reality.utlsFingerprint
         }
 
@@ -1369,7 +1514,7 @@ private struct ProfileEditorDraft {
     private var protocolOptions: ProtocolOptions {
         switch proto {
         case .vless:
-            .vless(VLESSOptions(uuid: trimmed(vlessUUID), flow: optional(vlessFlow)))
+            .vless(VLESSOptions(uuid: trimmed(vlessUUID), flow: optional(vlessFlow), encryption: optional(vlessEncryption)))
         case .trojan:
             .trojan(TrojanOptions(password: trimmed(trojanPassword)))
         case .hysteria2:
@@ -1404,8 +1549,10 @@ private struct ProfileEditorDraft {
                     shortID: optional(realityShortID),
                     serverName: optional(realityServerName),
                     spiderX: optional(realitySpiderX),
+                    mldsa65Verify: optional(realityMLDSA65Verify),
                     utlsFingerprint: optional(realityFingerprint) ?? "chrome",
                 ),
+                alpn: selectedALPN,
             )
         }
     }
@@ -1426,6 +1573,18 @@ private struct ProfileEditorDraft {
     private func optional(_ value: String) -> String? {
         let value = trimmed(value)
         return value.isEmpty ? nil : value
+    }
+
+    var hasVLESSEncryption: Bool {
+        VLESSOptions(uuid: "", flow: nil, encryption: vlessEncryption).normalizedEncryption != nil
+    }
+
+    var vlessEncryptionAuthLabel: String {
+        VLESSOptions(uuid: "", flow: nil, encryption: vlessEncryption).encryptionAuthLabel
+    }
+
+    var hasRealityMLDSA65Verify: Bool {
+        !trimmed(realityMLDSA65Verify).isEmpty
     }
 
     private func list(from value: String) -> [String] {
@@ -1488,7 +1647,10 @@ private struct ProxyGroupEditorDraft {
             members: members,
             defaultTarget: defaultTarget,
             testOptions: ProxyGroupTestOptions(
-                url: trimmedURL.isEmpty ? ProxyGroupTestOptions.defaultURL : trimmedURL,
+                // Keep the editor in agreement with the import path and config
+                // builder: a disallowed/empty probe URL falls back to the default
+                // so the persisted state never holds an SSRF-style probe target.
+                url: ImportPolicy.isAllowedProbeURL(trimmedURL) ? trimmedURL : ProxyGroupTestOptions.defaultURL,
                 intervalSeconds: ImportPolicy.clampURLTestInterval(interval),
                 toleranceMilliseconds: ImportPolicy.clampURLTestTolerance(tolerance),
             ),

@@ -20,10 +20,11 @@ struct SettingsView: View {
             Section {
                 Toggle("Protocol Sniffing", isOn: $store.settings.sniffTraffic)
                 Toggle("Strict Route", isOn: $store.settings.strictRoute)
+                Toggle("Kill Switch", isOn: $store.settings.killSwitch)
             } header: {
                 Text("Tunnel")
             } footer: {
-                Text("Applied the next time you connect. Sniffing enables protocol and SNI based rules; strict route reduces traffic falling outside the tunnel route.")
+                Text("Applied the next time you connect. Sniffing enables protocol and SNI based rules; strict route reduces traffic falling outside the tunnel route. Kill switch forces all traffic through the tunnel and blocks it if the tunnel drops — this can interrupt connectivity on captive-portal networks.")
             }
 
             Section {

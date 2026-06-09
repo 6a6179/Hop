@@ -143,7 +143,7 @@ import NetworkExtension
         }
 
         func includeAllNetworks() -> Bool {
-            false
+            provider?.includeAllNetworksSetting ?? false
         }
 
         func readWIFIState() -> LibboxWIFIState? {

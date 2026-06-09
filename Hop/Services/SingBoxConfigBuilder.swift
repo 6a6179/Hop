@@ -197,6 +197,11 @@ struct SingBoxConfigBuilder {
         switch profile.options {
         case let .vless(options):
             guard profile.proto == .vless else { throw SingBoxConfigError.unsupportedProfile("Mismatched VLESS profile.") }
+            if options.normalizedEncryption != nil {
+                throw SingBoxConfigError.unsupportedProfile(
+                    "\(options.encryptionAuthLabel) requires Xray VLESS Encryption/Auth; the bundled sing-box/libbox engine cannot run encrypted VLESS profiles yet.",
+                )
+            }
             outbound["type"] = "vless"
             outbound["uuid"] = options.uuid
             if let flow = options.flow, !flow.isEmpty {
@@ -257,7 +262,7 @@ struct SingBoxConfigBuilder {
             outbound["password"] = options.password
         }
 
-        if let tls = tlsDictionary(from: profile.security) {
+        if let tls = try tlsDictionary(from: profile.security) {
             outbound["tls"] = tls
         }
         if let transport = transportDictionary(from: profile.transport) {
@@ -267,7 +272,7 @@ struct SingBoxConfigBuilder {
         return outbound.compactMapValues { $0 }
     }
 
-    private func tlsDictionary(from security: ProxySecurity) -> [String: Any]? {
+    private func tlsDictionary(from security: ProxySecurity) throws -> [String: Any]? {
         switch security.layer {
         case .none:
             return nil
@@ -291,6 +296,11 @@ struct SingBoxConfigBuilder {
                 ]
             }
             if security.layer == .reality, let reality = security.reality {
+                if reality.mldsa65Verify?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+                    throw SingBoxConfigError.unsupportedProfile(
+                        "REALITY ML-DSA-65 verification requires Xray mldsa65Verify/pqv support; the bundled sing-box/libbox engine cannot enforce it yet.",
+                    )
+                }
                 var realityDictionary: [String: Any] = [
                     "enabled": true,
                     "public_key": reality.publicKey,

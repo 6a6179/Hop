@@ -305,6 +305,9 @@ import Foundation
             setup.workingPath = workingPath.path
             setup.tempPath = tempPath.path
             setup.logMaxLines = 3000
+            // Present the same shared-Keychain token the extension's command
+            // server requires, so the live status/connections feed authenticates.
+            setup.commandServerSecret = SecretStore.runtime.commandServerSecret()
 
             var setupError: NSError?
             LibboxSetup(setup, &setupError)
