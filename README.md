@@ -1,6 +1,6 @@
 # Hop
 
-Hop is an original iOS proxy/VPN client inspired by the workflow of apps like Shadowrocket, but with its own UI, branding, code, and architecture.
+Hop is an original iOS proxy/VPN client.
 
 The first implementation focuses on:
 
