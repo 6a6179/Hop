@@ -12,6 +12,13 @@ import Foundation
         private var isConnecting = false
         private var activeToken: UInt64 = 0
         private var connectionsStore: LibboxConnections?
+        // Guarded by `connectionsLock` together with `connectionsStore`: the
+        // cache avoids re-extracting unchanged connections (each extraction is
+        // ~15 gomobile FFI calls and string allocations, repeated every status
+        // interval), and the published array lets idle intervals skip the
+        // main-thread dispatch entirely.
+        private var connectionSnapshotCache: [String: TunnelConnectionSnapshot] = [:]
+        private var publishedConnectionSnapshots: [TunnelConnectionSnapshot]?
         private let connectionsLock = NSLock()
         private let libboxRuntime = LibboxCommandRuntime()
 
@@ -63,14 +70,20 @@ import Foundation
                 try? commandClient.disconnect()
             }
             commandClient = nil
-            connectionsLock.lock()
-            connectionsStore = nil
-            connectionsLock.unlock()
+            resetConnectionsState()
             onConnectionStateChanged?(false, nil)
             if resetValues {
                 onStatus?(.zero)
                 onConnections?([])
             }
+        }
+
+        private func resetConnectionsState() {
+            connectionsLock.lock()
+            connectionsStore = nil
+            connectionSnapshotCache = [:]
+            publishedConnectionSnapshots = nil
+            connectionsLock.unlock()
         }
 
         func closeAllConnections() {
@@ -127,9 +140,7 @@ import Foundation
                     return
                 }
                 commandClient = nil
-                connectionsLock.lock()
-                connectionsStore = nil
-                connectionsLock.unlock()
+                resetConnectionsState()
                 onConnectionStateChanged?(false, message)
             }
         }
@@ -158,7 +169,10 @@ import Foundation
                 return
             }
 
-            let snapshots: [TunnelConnectionSnapshot] = {
+            // `nil` means the rebuilt list is identical to the last published
+            // one — skip the main-thread hop so an idle tunnel doesn't trigger
+            // observation/SwiftUI work every status interval.
+            let snapshots: [TunnelConnectionSnapshot]? = {
                 connectionsLock.lock()
                 defer {
                     connectionsLock.unlock()
@@ -171,8 +185,17 @@ import Foundation
                 }
                 connectionsStore.apply(events)
                 connectionsStore.sortByDate()
-                return Self.snapshots(from: connectionsStore)
+                let rebuilt = Self.snapshots(from: connectionsStore, reusing: &connectionSnapshotCache)
+                guard rebuilt != publishedConnectionSnapshots else {
+                    return nil
+                }
+                publishedConnectionSnapshots = rebuilt
+                return rebuilt
             }()
+
+            guard let snapshots else {
+                return
+            }
 
             DispatchQueue.main.async { [weak self] in
                 guard let self, token == activeToken else {
@@ -182,24 +205,50 @@ import Foundation
             }
         }
 
-        private static func snapshots(from store: LibboxConnections) -> [TunnelConnectionSnapshot] {
+        private static func snapshots(
+            from store: LibboxConnections,
+            reusing cache: inout [String: TunnelConnectionSnapshot],
+        ) -> [TunnelConnectionSnapshot] {
             guard let iterator = store.iterator() else {
+                cache = [:]
                 return []
             }
 
             var snapshots: [TunnelConnectionSnapshot] = []
+            var rebuiltCache: [String: TunnelConnectionSnapshot] = [:]
+            rebuiltCache.reserveCapacity(cache.count)
             while iterator.hasNext() {
                 guard let connection = iterator.next(), connection.outboundType != "dns" else {
                     continue
                 }
-                snapshots.append(snapshot(from: connection))
+                let snapshot = snapshot(from: connection, cache: cache)
+                rebuiltCache[snapshot.id] = snapshot
+                snapshots.append(snapshot)
             }
+            cache = rebuiltCache // entries for vanished connections drop out here
             return snapshots
         }
 
-        private static func snapshot(from connection: LibboxConnection) -> TunnelConnectionSnapshot {
-            TunnelConnectionSnapshot(
-                id: connection.id_,
+        /// Reuses the cached snapshot when none of the connection's mutable
+        /// numeric fields moved. Traffic rates/totals and `closedAt` are the
+        /// only fields libbox updates after creation without traffic flowing;
+        /// anything else (sniffed domain/protocol, routing rule, chain) is
+        /// settled while handshake bytes move the totals, which forces a fresh
+        /// extraction anyway.
+        static func snapshot(from connection: LibboxConnection, cache: [String: TunnelConnectionSnapshot]) -> TunnelConnectionSnapshot {
+            let id = connection.id_
+            if let cached = cache[id],
+               cached.closedAt == date(millisecondsSince1970: connection.closedAt),
+               cached.uplinkBytesPerSecond == max(0, connection.uplink),
+               cached.downlinkBytesPerSecond == max(0, connection.downlink),
+               cached.uplinkTotalBytes == max(0, connection.uplinkTotal),
+               cached.downlinkTotalBytes == max(0, connection.downlinkTotal)
+            {
+                return cached
+            }
+
+            return TunnelConnectionSnapshot(
+                id: id,
                 network: connection.network,
                 source: connection.source,
                 destination: connection.destination,

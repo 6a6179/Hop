@@ -27,6 +27,7 @@
 		4D6C83A255F379FBA1331CAC /* ProfileSecrets.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7E14B112D833A1545DDD4E1 /* ProfileSecrets.swift */; };
 		4F310B282EA4DE1AC601B351 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 79F3F8AA2AE8E9390B779188 /* Assets.xcassets */; };
 		4FAE12EDCB3999471879BD81 /* SecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1B76DFDAC1976712EA1386 /* SecretStore.swift */; };
+		50252BBDB93C2AF347BE32EE /* TunnelTelemetrySnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9924DFBE2B62E2988CDD3D0 /* TunnelTelemetrySnapshotTests.swift */; };
 		554C5D540ECBA7A4CA32A7C6 /* OutboundModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E77A8D48C7370FDBDBD9776 /* OutboundModels.swift */; };
 		56698F9E52B7D46F4430BD36 /* HopStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C6F50AF2F75019D15087E3D /* HopStore.swift */; };
 		5BA2FBD9CFCD766F1DC84C64 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3C1A1195D47528F1006C545 /* PacketTunnelProvider.swift */; };
@@ -138,6 +139,7 @@
 		9305B8EEC96671033BF8DD41 /* RuntimeEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEnvironment.swift; sourceTree = "<group>"; };
 		9BAB96E3BCD490ABD070B250 /* ProfileImportPayloadDetectorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileImportPayloadDetectorTests.swift; sourceTree = "<group>"; };
 		A8E77E25E525EA7855367170 /* InMemorySecretBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InMemorySecretBackend.swift; sourceTree = "<group>"; };
+		A9924DFBE2B62E2988CDD3D0 /* TunnelTelemetrySnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelTelemetrySnapshotTests.swift; sourceTree = "<group>"; };
 		AB7AC0BA8603FEDB0F77C2DE /* TunnelModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelModels.swift; sourceTree = "<group>"; };
 		AF50E194D1028E221D66587F /* SubscriptionFetcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionFetcherTests.swift; sourceTree = "<group>"; };
 		B42744CD10EDFE8C38981CD8 /* ProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesView.swift; sourceTree = "<group>"; };
@@ -252,6 +254,7 @@
 				F39E204D052663E8E718024B /* SingBoxConfigBuilderTests.swift */,
 				AF50E194D1028E221D66587F /* SubscriptionFetcherTests.swift */,
 				5F076B1CE9978B7369D54C8D /* SubscriptionRefreshMergerTests.swift */,
+				A9924DFBE2B62E2988CDD3D0 /* TunnelTelemetrySnapshotTests.swift */,
 			);
 			path = HopTests;
 			sourceTree = "<group>";
@@ -489,6 +492,7 @@
 				10139CB03AE4868DF9E1AF2D /* SingBoxConfigBuilderTests.swift in Sources */,
 				0A1B76CFD761695587A2FC53 /* SubscriptionFetcherTests.swift in Sources */,
 				3FA31228BE6AE2BD7B9DB0A0 /* SubscriptionRefreshMergerTests.swift in Sources */,
+				50252BBDB93C2AF347BE32EE /* TunnelTelemetrySnapshotTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
