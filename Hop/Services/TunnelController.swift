@@ -70,8 +70,29 @@ final class TunnelController {
         telemetryError = nil
         appendLog("Connect requested for \(target.id)")
         appendLog("Resolved App Group: \(RuntimeEnvironment.appGroupIdentifier)")
+        appendLog(RuntimeEnvironment.appGroupResolutionDiagnostic)
         appendLog("Shared container: \(RuntimeEnvironment.sharedContainerURL.path)")
         appendLog("Tunnel extension bundle ID: \(RuntimeEnvironment.tunnelProviderBundleIdentifier)")
+        if !RuntimeEnvironment.tunnelExtensionIsEmbedded {
+            appendLog("No .appex bundle exists inside Hop.app/PlugIns — the installer or signer stripped the tunnel extension, so iOS has nothing to launch. Reinstall with app extensions included.")
+        }
+
+        let useInlineResolvedConfig = RuntimeEnvironment.usesInlineResolvedTunnelConfiguration
+        if useInlineResolvedConfig {
+            appendLog("Shared App Group with HopTunnel.appex is not confirmed; using one-shot inline tunnel config. If startup still disconnects immediately, re-sign Hop.app and HopTunnel.appex with the Packet Tunnel entitlement.")
+        } else {
+            do {
+                try RuntimeEnvironment.requireAppGroupAccess()
+            } catch {
+                state = .failed
+                startInProgress = false
+                appendLog("Tunnel preflight failed: \(error.diagnosticDescription)")
+                if let diagnosticHint = error.networkExtensionDiagnosticHint {
+                    appendLog("Diagnostic: \(diagnosticHint)")
+                }
+                return
+            }
+        }
 
         do {
             try sharedLogStore.clear()
@@ -82,10 +103,10 @@ final class TunnelController {
 
         do {
             appendLog("Preparing tunnel with \(profiles.count) nodes, \(groups.count) groups, \(rules.count) rules")
-            // Ensure secrets are in the shared Keychain, then build a config that
-            // references them by token so no credentials are written to disk or
-            // passed through IPC/provider configuration. The per-start nonce
-            // makes the tokens unforgeable from untrusted import data.
+            // Ensure secrets are in the shared Keychain for the normal tokenized
+            // config path. If signing does not expose a verifiable shared App
+            // Group, startup falls back to an inline one-shot resolved config so
+            // the extension does not need to read shared storage.
             for item in profiles.flatMap(\.keychainSecretItems) {
                 secretStore.setValue(item.value, forKey: item.key)
             }
@@ -103,20 +124,44 @@ final class TunnelController {
                 settings: settings,
                 logOutputPath: RuntimeEnvironment.tunnelLogFileURL.path,
             )
+            let inlineConfigContent: String? = if useInlineResolvedConfig {
+                try configBuilder.build(
+                    profiles: profiles,
+                    groups: groups,
+                    selectedTarget: target,
+                    routingMode: routingMode,
+                    rules: rules,
+                    settings: settings,
+                )
+            } else {
+                nil
+            }
             try sharedConfigStore.writeConfig(configContent)
 
             let manager = try await configuredManager(secretNonce: secretNonce, killSwitch: settings.killSwitch)
             observeStatus(for: manager.connection)
-            appendLog("Starting NetworkExtension tunnel")
-            try manager.connection.startVPNTunnel(options: [
-                "configPath": RuntimeEnvironment.configFileURL.path as NSString,
+            appendLog("Starting NetworkExtension tunnel with sing-box engine")
+            var startOptions: [String: NSObject] = [
                 "appGroup": RuntimeEnvironment.appGroupIdentifier as NSString,
                 "secretNonce": secretNonce as NSString,
                 "includeAllNetworks": (settings.killSwitch ? "true" : "false") as NSString,
-            ])
+            ]
+            if let inlineConfigContent {
+                startOptions["configContent"] = inlineConfigContent as NSString
+                startOptions["configSecrets"] = "resolved" as NSString
+            } else {
+                startOptions["configPath"] = RuntimeEnvironment.configFileURL.path as NSString
+            }
+            try manager.connection.startVPNTunnel(options: startOptions)
             appendLog("startVPNTunnel returned; current status is \(manager.connection.status.displayName)")
             syncExtensionLogs()
-            updateState(from: manager.connection.status, source: "startVPNTunnel return")
+            // The synchronous status read here is almost always still
+            // `disconnected` — the connecting transition arrives via the status
+            // notification. Feeding it into `updateState` would misreport a
+            // startup failure before the extension was even launched.
+            if manager.connection.status != .disconnected, manager.connection.status != .invalid {
+                updateState(from: manager.connection.status, source: "startVPNTunnel return")
+            }
             if state == .connecting {
                 appendLog("VPN start requested. Waiting for NetworkExtension status.")
             }
@@ -315,10 +360,12 @@ final class TunnelController {
         case .disconnected, .invalid:
             if startInProgress || state == .connecting {
                 state = .failed
+                startInProgress = false
                 if !loggedStartupStop {
                     loggedStartupStop = true
                     appendLog("Tunnel stopped before connecting. If this happened immediately, the packet tunnel extension failed during startup.")
-                    appendLog("If no Extension lines appear here, iOS did not launch the tunnel extension; check Network Extension/App Group entitlements and the embedded .appex.")
+                    appendLog("If no Extension lines appear here, iOS rejected or killed HopTunnel.appex before PacketTunnelProvider could write logs. Check the App Group diagnostic above and that the embedded .appex was re-signed with Hop.app.")
+                    logLastDisconnectError()
                 }
                 syncExtensionLogs()
             } else {
@@ -329,6 +376,34 @@ final class TunnelController {
             state = .failed
             stopTelemetry()
             appendLog("NetworkExtension reported an unknown status")
+        }
+    }
+
+    /// iOS records why the tunnel last went down — including the error the
+    /// provider handed its start completion handler and system-side launch
+    /// failures (rejected/killed .appex) that the app can't observe any other
+    /// way. Without a shared App Group this is the only channel that carries
+    /// the extension's failure reason back to the app.
+    private func logLastDisconnectError() {
+        guard let connection = manager?.connection else {
+            return
+        }
+        connection.fetchLastDisconnectError { [weak self] error in
+            let message = error.map { "Last disconnect error: \($0.diagnosticDescription)" }
+            let hint = error?.networkExtensionDiagnosticHint
+            Task { @MainActor in
+                guard let self else {
+                    return
+                }
+                guard let message else {
+                    self.appendLog("iOS reported no disconnect error for the last tunnel stop.")
+                    return
+                }
+                self.appendLog(message)
+                if let hint {
+                    self.appendLog("Diagnostic: \(hint)")
+                }
+            }
         }
     }
 
@@ -399,6 +474,21 @@ private extension Error {
 
     var networkExtensionDiagnosticHint: String? {
         let nsError = self as NSError
+        if nsError.domain == "Hop.RuntimeEnvironmentError" || self is RuntimeEnvironmentError {
+            return "Hop.app and HopTunnel.appex must share the selected App Group and keychain access group, and HopTunnel.appex must keep the Packet Tunnel entitlement. Re-sign both bundles with the same groups, then reinstall."
+        }
+        if nsError.domain == NEVPNConnectionErrorDomain {
+            return switch NEVPNConnectionError(rawValue: nsError.code) {
+            case .pluginFailed:
+                "iOS launched HopTunnel.appex but it exited during startup — usually a thrown provider error or a crash. Any Extension lines above carry the provider's own reason."
+            case .pluginDisabled:
+                "iOS refused to launch HopTunnel.appex. The re-signed .appex is missing the Packet Tunnel entitlement or a provisioning profile that allows it; re-sign with app extensions enabled."
+            case .configurationFailed, .configurationNotFound:
+                "The saved VPN configuration is invalid or gone. Toggle the Hop VPN profile in Settings > VPN, or reconnect to rebuild it."
+            default:
+                nil
+            }
+        }
         guard nsError.domain == "NEVPNErrorDomain" else {
             return nil
         }

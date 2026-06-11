@@ -69,6 +69,7 @@
 		E365C6ED54205DCB07318E59 /* Libbox.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5F3D56CD2BA215E54A3E5A68 /* Libbox.xcframework */; };
 		E85711D6F29ED59CCD026AA3 /* PlatformInterface.swift in Sources */ = {isa = PBXBuildFile; fileRef = DC7386115F302B34587AD99B /* PlatformInterface.swift */; };
 		EE8D060ABB1FA3438FEE5E3F /* RulesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2133782FCFF25BE2983A29E /* RulesView.swift */; };
+		F38E14796D043FB818CE5729 /* RuntimeEnvironmentTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7B745A188A0B6D79ADBBCB9 /* RuntimeEnvironmentTests.swift */; };
 		F9D7D969CE3344F06F1EFE2E /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 63AAF67F67AFF0C9362B98CF /* libresolv.tbd */; };
 		FD58D51E512CE9AD1C0EF6B8 /* RuleConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B49DF2D9B765059F8D7117D /* RuleConfiguration.swift */; };
 /* End PBXBuildFile section */
@@ -162,6 +163,7 @@
 		D657EAB1CEE8F6507C6C26FD /* HopAppDataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopAppDataStore.swift; sourceTree = "<group>"; };
 		DC51AD5366767DDF9D66EE64 /* HopTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = HopTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		DC7386115F302B34587AD99B /* PlatformInterface.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformInterface.swift; sourceTree = "<group>"; };
+		E7B745A188A0B6D79ADBBCB9 /* RuntimeEnvironmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEnvironmentTests.swift; sourceTree = "<group>"; };
 		E7E14B112D833A1545DDD4E1 /* ProfileSecrets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSecrets.swift; sourceTree = "<group>"; };
 		ED8696CCF094E303BC77A9D7 /* HopApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopApp.swift; sourceTree = "<group>"; };
 		F168B262ED2CE3C6812A5D8D /* ProxyLinkParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyLinkParser.swift; sourceTree = "<group>"; };
@@ -261,6 +263,7 @@
 				9BAB96E3BCD490ABD070B250 /* ProfileImportPayloadDetectorTests.swift */,
 				6146D2EF82C372A7318EE941 /* ProxyLinkParserTests.swift */,
 				C7E46919491D8D0B6DEE8A00 /* RuleConfigurationTests.swift */,
+				E7B745A188A0B6D79ADBBCB9 /* RuntimeEnvironmentTests.swift */,
 				F32FB4AA500BEEA4F0C413E1 /* SecretStoreTests.swift */,
 				F39E204D052663E8E718024B /* SingBoxConfigBuilderTests.swift */,
 				AF50E194D1028E221D66587F /* SubscriptionFetcherTests.swift */,
@@ -503,6 +506,7 @@
 				A57BC22CEDEA71F36A2FA71E /* ProfileImportPayloadDetectorTests.swift in Sources */,
 				23EAD6F87194290206EBA973 /* ProxyLinkParserTests.swift in Sources */,
 				16CB63C3F7D60E0768D55D6D /* RuleConfigurationTests.swift in Sources */,
+				F38E14796D043FB818CE5729 /* RuntimeEnvironmentTests.swift in Sources */,
 				807DA6B6FBAD169A76D2FA93 /* SecretStoreTests.swift in Sources */,
 				10139CB03AE4868DF9E1AF2D /* SingBoxConfigBuilderTests.swift in Sources */,
 				0A1B76CFD761695587A2FC53 /* SubscriptionFetcherTests.swift in Sources */,

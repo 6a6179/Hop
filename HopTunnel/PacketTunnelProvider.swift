@@ -30,11 +30,13 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     #if canImport(Libbox)
         private lazy var platformInterface = HopPlatformInterface(provider: self)
         private var commandServer: LibboxCommandServer?
-        // Retain only the tokenized (secret-free) config + nonce so a later
-        // reload can re-resolve credentials in memory; the fully-resolved
-        // config is never stored on the provider.
+        // Retain the last config + nonce for reloads. Normal shared-file starts
+        // keep a tokenized config and resolve credentials in memory; degraded
+        // inline starts may keep an already-resolved config, but only in the
+        // extension process, not in providerConfiguration or on disk.
         private var lastRawConfig: String?
         private var configSecretNonce: String?
+        private var lastConfigSecretsAreResolved = false
     #endif
 
     /// iOS kill-switch setting threaded from the app. When true, the engine is
@@ -64,10 +66,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             includeAllNetworksSetting = request.includeAllNetworks
 
             let rawConfig = try loadConfig(request: request)
-            // The generated config carries secret *references*, not credentials.
-            // The nonce (from start options, or the persisted provider
-            // configuration on an iOS-initiated restart) gates which tokens are
-            // resolvable, so import-supplied fields can't forge one.
+            // Normal generated configs carry secret *references*, not
+            // credentials. The nonce gates which tokens are resolvable so
+            // import-supplied fields can't forge one. Degraded inline starts
+            // mark the config as already resolved and skip token resolution.
             let nonce = request.secretNonce
             guard !nonce.isEmpty else { throw TunnelProviderError.missingSecretNonce }
 
@@ -91,6 +93,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             stopService()
             commandServer?.close()
             commandServer = nil
+            lastRawConfig = nil
+            configSecretNonce = nil
+            lastConfigSecretsAreResolved = false
         #endif
         completionHandler()
     }
@@ -101,7 +106,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             // engine. `resolved` stays a local — handed to libbox and then
             // released — so credentials don't linger on the provider for the
             // tunnel's lifetime.
-            let resolved = try resolveConfig(rawConfig: rawConfig, nonce: nonce)
+            let resolved = try resolveConfig(rawConfig: rawConfig, nonce: nonce, secretsAreResolved: request.configSecretsAreResolved)
             writeTunnelLog("Loaded tunnel settings (\(resolved.utf8.count) bytes)")
 
             let container = appGroupContainer(request: request)
@@ -141,9 +146,9 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             try server.start()
             commandServer = server
 
-            // Retain only the secret-free config + nonce for any later reload.
             lastRawConfig = rawConfig
             configSecretNonce = nonce
+            lastConfigSecretsAreResolved = request.configSecretsAreResolved
             try server.startOrReloadService(resolved, options: LibboxOverrideOptions())
         }
 
@@ -152,14 +157,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         /// shared Keychain is unreachable (e.g. the keychain-access-groups
         /// entitlement was dropped during signing), and starting anyway would
         /// run the tunnel with blank credentials.
-        private func resolveConfig(rawConfig: String, nonce: String) throws -> String {
-            let (config, unresolvedSecrets) = SecretResolver.resolve(rawConfig, nonce: nonce)
-            if unresolvedSecrets > 0 {
-                throw TunnelProviderError.unresolvedSecrets(unresolvedSecrets)
-            }
-            return config
-        }
-
         func stopService() {
             do {
                 try commandServer?.closeService()
@@ -173,12 +170,24 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             guard let commandServer, let lastRawConfig, let configSecretNonce else { return }
             reasserting = true
             defer { reasserting = false }
-            // Re-resolve from the tokenized config so secrets live in memory only
-            // for the duration of the reload, not for the tunnel's lifetime.
-            let resolved = try resolveConfig(rawConfig: lastRawConfig, nonce: configSecretNonce)
+            // Re-resolve tokenized configs for reloads; inline-resolved configs
+            // are already marked and returned unchanged.
+            let resolved = try resolveConfig(rawConfig: lastRawConfig, nonce: configSecretNonce, secretsAreResolved: lastConfigSecretsAreResolved)
             try commandServer.startOrReloadService(resolved, options: LibboxOverrideOptions())
         }
     #endif
+
+    private func resolveConfig(rawConfig: String, nonce: String, secretsAreResolved: Bool) throws -> String {
+        guard !secretsAreResolved else {
+            return rawConfig
+        }
+
+        let (config, unresolvedSecrets) = SecretResolver.resolve(rawConfig, nonce: nonce)
+        if unresolvedSecrets > 0 {
+            throw TunnelProviderError.unresolvedSecrets(unresolvedSecrets)
+        }
+        return config
+    }
 
     private func loadConfig(request: TunnelStartRequest) throws -> String {
         if let configContent = request.optionConfigContent {
@@ -323,6 +332,7 @@ private struct TunnelStartRequest {
     let providerConfigPath: String?
     let appGroup: String?
     let secretNonce: String
+    let configSecretsAreResolved: Bool
     let includeAllNetworks: Bool
     let visibleOptionKeys: [String]
 
@@ -333,6 +343,7 @@ private struct TunnelStartRequest {
         providerConfigPath = providerConfiguration?["configPath"] as? String
         appGroup = (options?["appGroup"] as? String) ?? (providerConfiguration?["appGroup"] as? String)
         secretNonce = (options?["secretNonce"] as? String) ?? (providerConfiguration?["secretNonce"] as? String) ?? ""
+        configSecretsAreResolved = ((options?["configSecrets"] as? String) ?? (providerConfiguration?["configSecrets"] as? String)) == "resolved"
         includeAllNetworks = ((options?["includeAllNetworks"] as? String) ?? (providerConfiguration?["includeAllNetworks"] as? String)) == "true"
 
         let hiddenKeys: Set = ["configContent", "configPath"]
