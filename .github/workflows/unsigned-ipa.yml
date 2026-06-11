@@ -1,0 +1,210 @@
+name: Build Unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/unsigned-ipa.yml"
+      - "Frameworks/Libbox.xcframework.sha256"
+      - "Hop/**"
+      - "Hop.xcodeproj/**"
+      - "HopTunnel/**"
+      - "Shared/**"
+      - "project.yml"
+      - "scripts/**"
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  unsigned-ipa:
+    name: Build unsigned IPA
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Show Xcode and SDK versions
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+
+          if ! command -v go >/dev/null 2>&1; then
+            brew install go
+          fi
+
+          go_version="$(go env GOVERSION 2>/dev/null || true)"
+          go_minor="$(printf '%s' "$go_version" | sed -E 's/^go1\.([0-9]+).*/\1/')"
+          if [[ -z "$go_minor" || "$go_minor" -lt 23 ]]; then
+            brew install go
+          fi
+
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+
+          if ! command -v gh >/dev/null 2>&1; then
+            brew install gh
+          fi
+
+          go version
+          xcodegen --version
+          gh --version
+
+      - name: Cache Go build artifacts
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-libbox-${{ hashFiles('scripts/build-libbox.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-go-libbox-
+
+      - name: Build pinned libbox engine
+        run: scripts/build-libbox.sh
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned app
+        run: |
+          set -euo pipefail
+
+          rm -rf build/UnsignedIPA
+          mkdir -p build/UnsignedIPA
+
+          xcodebuild \
+            -project Hop.xcodeproj \
+            -scheme Hop \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/UnsignedIPA/DerivedData \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+
+          APP="build/UnsignedIPA/DerivedData/Build/Products/Release-iphoneos/Hop.app"
+          STAGE="build/UnsignedIPA/staging"
+
+          test -d "$APP"
+          rm -rf "$STAGE" build/UnsignedIPA/Hop-unsigned.ipa
+          mkdir -p "$STAGE/Payload"
+          ditto "$APP" "$STAGE/Payload/Hop.app"
+          find "$STAGE/Payload/Hop.app" \( -name _CodeSignature -o -name embedded.mobileprovision \) -print -exec rm -rf {} +
+          xattr -cr "$STAGE/Payload/Hop.app" || true
+
+          # Fakesign: ad-hoc signatures whose entitlements mirror the real
+          # ones, so sideload signers can read each binary's required
+          # capabilities and re-map them onto their own certificate. A
+          # CODE_SIGNING_ALLOWED=NO build carries no entitlements blob at all,
+          # which makes signers re-sign HopTunnel.appex without the Packet
+          # Tunnel entitlement or App Groups — iOS then refuses to launch the
+          # extension and the VPN drops from connecting to disconnected
+          # immediately. The placeholder XXXXXXXXXX. team prefix is replaced
+          # by the signer's real team identifier.
+          sed 's/\$(AppIdentifierPrefix)/XXXXXXXXXX./' HopTunnel/HopTunnel.entitlements > "$STAGE/HopTunnel.entitlements"
+          sed 's/\$(AppIdentifierPrefix)/XXXXXXXXXX./' Hop/Hop.entitlements > "$STAGE/Hop.entitlements"
+          codesign --force --sign - --entitlements "$STAGE/HopTunnel.entitlements" "$STAGE/Payload/Hop.app/PlugIns/HopTunnel.appex"
+          codesign --force --sign - --entitlements "$STAGE/Hop.entitlements" "$STAGE/Payload/Hop.app"
+
+          echo "--- Hop.app entitlements ---"
+          codesign -d --entitlements - "$STAGE/Payload/Hop.app"
+          echo "--- HopTunnel.appex entitlements ---"
+          codesign -d --entitlements - "$STAGE/Payload/Hop.app/PlugIns/HopTunnel.appex"
+
+          (cd "$STAGE" && ditto -c -k --sequesterRsrc --keepParent Payload ../Hop-unsigned.ipa)
+
+      - name: Summarize artifact
+        run: |
+          set -euo pipefail
+
+          IPA="build/UnsignedIPA/Hop-unsigned.ipa"
+          test -f "$IPA"
+
+          size_bytes="$(stat -f '%z' "$IPA")"
+          sha256="$(shasum -a 256 "$IPA" | awk '{print $1}')"
+          printf '%s  %s\n' "$sha256" "Hop-unsigned.ipa" > build/UnsignedIPA/Hop-unsigned.ipa.sha256
+          release_tag="unsigned-ipa-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          release_name="Hop unsigned IPA ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          release_notes="build/UnsignedIPA/release-notes.md"
+
+          {
+            echo "RELEASE_TAG=${release_tag}"
+            echo "RELEASE_NAME=${release_name}"
+            echo "RELEASE_NOTES=${release_notes}"
+          } >> "$GITHUB_ENV"
+
+          cat > "$release_notes" <<EOF
+          Unsigned IPA built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}.
+
+          - Branch/ref: ${GITHUB_REF_NAME}
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Size: ${size_bytes} bytes
+          - SHA-256: ${sha256}
+
+          This IPA is ad-hoc fakesigned: each binary carries its required entitlements (Packet Tunnel, App Groups, Keychain) with a placeholder XXXXXXXXXX. team prefix so sideload signers can re-map them. It still needs proper signing/provisioning before installation on a physical device. When re-signing, make sure your tool signs the embedded HopTunnel.appex with the Packet Tunnel entitlement — without it iOS kills the VPN extension at launch.
+          EOF
+
+          {
+            echo "### Unsigned IPA"
+            echo
+            echo "- File: \`Hop-unsigned.ipa\`"
+            echo "- Size: \`${size_bytes} bytes\`"
+            echo "- SHA-256: \`${sha256}\`"
+            echo "- Release tag: \`${release_tag}\`"
+            echo
+            echo "> This IPA is ad-hoc fakesigned (entitlements embedded for re-signers). It still needs proper signing/provisioning before installation on a physical device; the signer must keep the Packet Tunnel entitlement on HopTunnel.appex."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: build/UnsignedIPA/Hop-unsigned.ipa
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: build/UnsignedIPA/Hop-unsigned.ipa.sha256
+          archive: false
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh release create "$RELEASE_TAG" \
+            "build/UnsignedIPA/Hop-unsigned.ipa#Hop-unsigned.ipa" \
+            "build/UnsignedIPA/Hop-unsigned.ipa.sha256#Hop-unsigned.ipa.sha256" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_NAME" \
+            --notes-file "$RELEASE_NOTES" \
+            --prerelease \
+            --latest=false
+
+          release_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          echo "- Release: ${release_url}" >> "$GITHUB_STEP_SUMMARY"

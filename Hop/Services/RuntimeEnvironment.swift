@@ -9,7 +9,27 @@ enum RuntimeEnvironment {
     /// Both identifiers are process-constant (derived from the entitlements and
     /// the bundle) but cost a provisioning-profile regex scan / PlugIns
     /// directory walk to compute — memoize as lazy `static let`s.
-    static let appGroupIdentifier: String = entitlementAppGroups().first(where: canOpenAppGroup) ?? fallbackAppGroup
+    static let appGroupIdentifier: String = resolvedAppGroupIdentifier()
+
+    static let appProvisioningAppGroups: [String] = appProvisioningProfileGroups()
+    static let tunnelProvisioningAppGroups: [String] = tunnelProvisioningProfileGroups()
+
+    static var appGroupResolutionDiagnostic: String {
+        let appGroups = appProvisioningAppGroups.isEmpty ? "none" : appProvisioningAppGroups.joined(separator: ", ")
+        let tunnelGroups = tunnelProvisioningAppGroups.isEmpty ? "none" : tunnelProvisioningAppGroups.joined(separator: ", ")
+        let commonGroups = Set(appProvisioningAppGroups).intersection(tunnelProvisioningAppGroups)
+        let common = commonGroups.isEmpty ? "none" : prioritizedAppGroups(commonGroups).joined(separator: ", ")
+        let transport = usesInlineResolvedTunnelConfiguration ? "inline" : "shared App Group file"
+        return "App profile groups: \(appGroups); tunnel profile groups: \(tunnelGroups); common groups: \(common); selected: \(appGroupIdentifier); config transport: \(transport)"
+    }
+
+    static var usesInlineResolvedTunnelConfiguration: Bool {
+        shouldUseInlineResolvedTunnelConfiguration(
+            appGroups: appProvisioningAppGroups,
+            tunnelGroups: tunnelProvisioningAppGroups,
+            selectedAppGroup: appGroupIdentifier,
+        )
+    }
 
     static var sharedContainerURL: URL {
         if let url = appGroupContainerURL {
@@ -26,6 +46,19 @@ enum RuntimeEnvironment {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupIdentifier)
     }
 
+    static func requireAppGroupAccess() throws {
+        if let error = appGroupProfileMismatchError(
+            appGroups: appProvisioningAppGroups,
+            tunnelGroups: tunnelProvisioningAppGroups,
+        ) {
+            throw error
+        }
+
+        guard appGroupContainerURL != nil else {
+            throw RuntimeEnvironmentError.appGroupUnavailable(appGroupIdentifier)
+        }
+    }
+
     static var stateFileURL: URL {
         sharedContainerURL.appendingPathComponent(stateFileName)
     }
@@ -37,6 +70,22 @@ enum RuntimeEnvironment {
     static var tunnelLogFileURL: URL {
         sharedContainerURL.appendingPathComponent(tunnelLogFileName)
     }
+
+    /// Whether any .appex is embedded under Hop.app/PlugIns. Some sideload
+    /// signers strip app extensions entirely; without the .appex the VPN can
+    /// never start, and `tunnelProviderBundleIdentifier` silently falls back
+    /// to the derived identifier, hiding the problem.
+    static let tunnelExtensionIsEmbedded: Bool = {
+        guard let plugInsURL = Bundle.main.builtInPlugInsURL,
+              let enumerator = FileManager.default.enumerator(at: plugInsURL, includingPropertiesForKeys: nil)
+        else {
+            return false
+        }
+        for case let url as URL in enumerator where url.pathExtension == "appex" {
+            return true
+        }
+        return false
+    }()
 
     static let tunnelProviderBundleIdentifier: String = {
         if let plugInsURL = Bundle.main.builtInPlugInsURL,
@@ -57,33 +106,134 @@ enum RuntimeEnvironment {
         return [Bundle.main.bundleIdentifier, "tunnel"].compactMap(\.self).joined(separator: ".")
     }()
 
-    private static func entitlementAppGroups() -> [String] {
-        Array(Set(embeddedProvisioningProfileGroups() + [fallbackAppGroup]))
-            .sorted()
+    static func selectAppGroup(
+        appGroups: [String],
+        tunnelGroups: [String],
+        canOpen: (String) -> Bool,
+    ) -> String {
+        let appSet = Set(appGroups)
+        let tunnelSet = Set(tunnelGroups)
+        let commonSet = appSet.intersection(tunnelSet)
+        let candidates: [String] = if !commonSet.isEmpty {
+            prioritizedAppGroups(commonSet)
+        } else if tunnelSet.isEmpty {
+            // Many re-sign/install flows do not leave an embedded provisioning
+            // profile inside the .appex, so the app cannot inspect the tunnel's
+            // groups at runtime. In that case prefer the checked-in shared App
+            // Group used by both entitlements, and only fall back to app-profile
+            // groups if that source group is not present in the app signature.
+            prioritizedAppGroups(appSet.union([fallbackAppGroup]))
+        } else if appSet.isEmpty {
+            prioritizedAppGroups(tunnelSet.union([fallbackAppGroup]))
+        } else {
+            [fallbackAppGroup]
+        }
+        return candidates.first(where: canOpen) ?? fallbackAppGroup
     }
 
-    private static func embeddedProvisioningProfileGroups() -> [String] {
-        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision"),
-              let raw = try? String(contentsOf: url, encoding: .isoLatin1)
-        else {
-            return []
+    static func appGroupProfileMismatchError(
+        appGroups: [String],
+        tunnelGroups: [String],
+    ) -> RuntimeEnvironmentError? {
+        let appSet = Set(appGroups)
+        let tunnelSet = Set(tunnelGroups)
+        guard !appSet.isEmpty, !tunnelSet.isEmpty else {
+            return nil
         }
 
+        let commonGroups = appSet.intersection(tunnelSet)
+        guard commonGroups.isEmpty else {
+            return nil
+        }
+
+        return .noSharedAppGroup(appGroups: prioritizedAppGroups(appSet), tunnelGroups: prioritizedAppGroups(tunnelSet))
+    }
+
+    static func shouldUseInlineResolvedTunnelConfiguration(
+        appGroups: [String],
+        tunnelGroups: [String],
+        selectedAppGroup: String,
+    ) -> Bool {
+        let appSet = Set(appGroups)
+        let tunnelSet = Set(tunnelGroups)
+
+        guard !tunnelSet.isEmpty else {
+            // Re-sign/install flows often omit embedded.mobileprovision from the
+            // .appex. If we selected the checked-in shared App Group and the app
+            // profile lists it, keep the safer shared-file path; otherwise avoid
+            // depending on a container that may be app-only.
+            return selectedAppGroup != fallbackAppGroup || !appSet.contains(fallbackAppGroup)
+        }
+
+        return !appSet.contains(selectedAppGroup) || !tunnelSet.contains(selectedAppGroup)
+    }
+
+    private static func resolvedAppGroupIdentifier() -> String {
+        selectAppGroup(
+            appGroups: appProvisioningAppGroups,
+            tunnelGroups: tunnelProvisioningAppGroups,
+            canOpen: canOpenAppGroup,
+        )
+    }
+
+    private static func appProvisioningProfileGroups() -> [String] {
+        guard let url = Bundle.main.url(forResource: "embedded", withExtension: "mobileprovision") else {
+            return []
+        }
+        return provisioningProfileGroups(at: url)
+    }
+
+    private static func tunnelProvisioningProfileGroups() -> [String] {
+        guard let plugInsURL = Bundle.main.builtInPlugInsURL,
+              let enumerator = FileManager.default.enumerator(at: plugInsURL, includingPropertiesForKeys: nil)
+        else { return [] }
+
+        var groups: [String] = []
+        for case let url as URL in enumerator where url.pathExtension == "appex" {
+            groups.append(contentsOf: provisioningProfileGroups(at: url.appendingPathComponent("embedded.mobileprovision")))
+        }
+        return Array(Set(groups)).sorted()
+    }
+
+    private static func provisioningProfileGroups(at url: URL) -> [String] {
+        guard let raw = try? String(contentsOf: url, encoding: .isoLatin1) else { return [] }
         let pattern = #"<string>(group\.[^<]+)</string>"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return []
         }
         let range = NSRange(raw.startIndex ..< raw.endIndex, in: raw)
-        return regex.matches(in: raw, range: range).compactMap { match in
+        return Array(Set(regex.matches(in: raw, range: range).compactMap { match in
             guard let matchRange = Range(match.range(at: 1), in: raw) else {
                 return nil
             }
             return String(raw[matchRange])
-        }
+        })).sorted()
     }
 
     private static func canOpenAppGroup(_ group: String) -> Bool {
         FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) != nil
+    }
+
+    private static func prioritizedAppGroups(_ groups: Set<String>) -> [String] {
+        let sortedGroups = groups.sorted()
+        guard groups.contains(fallbackAppGroup) else {
+            return sortedGroups
+        }
+        return [fallbackAppGroup] + sortedGroups.filter { $0 != fallbackAppGroup }
+    }
+}
+
+enum RuntimeEnvironmentError: LocalizedError {
+    case appGroupUnavailable(String)
+    case noSharedAppGroup(appGroups: [String], tunnelGroups: [String])
+
+    var errorDescription: String? {
+        switch self {
+        case let .appGroupUnavailable(appGroup):
+            "App Group \(appGroup) is unavailable in this build."
+        case let .noSharedAppGroup(appGroups, tunnelGroups):
+            "Hop.app and HopTunnel.appex do not share an App Group. App groups: \(appGroups.joined(separator: ", ")); tunnel groups: \(tunnelGroups.joined(separator: ", "))."
+        }
     }
 }
 

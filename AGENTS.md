@@ -101,10 +101,17 @@ mkdir -p "$STAGE/Payload"
 ditto "$APP" "$STAGE/Payload/Hop.app"
 find "$STAGE/Payload/Hop.app" \( -name _CodeSignature -o -name embedded.mobileprovision \) -print -exec rm -rf {} +
 xattr -cr "$STAGE/Payload/Hop.app" || true
+# Fakesign with the real entitlements (placeholder team prefix) so sideload
+# signers can mirror them; without this, re-signing drops the Packet Tunnel
+# entitlement from HopTunnel.appex and iOS kills the extension at launch.
+sed 's/\$(AppIdentifierPrefix)/XXXXXXXXXX./' HopTunnel/HopTunnel.entitlements > "$STAGE/HopTunnel.entitlements"
+sed 's/\$(AppIdentifierPrefix)/XXXXXXXXXX./' Hop/Hop.entitlements > "$STAGE/Hop.entitlements"
+codesign --force --sign - --entitlements "$STAGE/HopTunnel.entitlements" "$STAGE/Payload/Hop.app/PlugIns/HopTunnel.appex"
+codesign --force --sign - --entitlements "$STAGE/Hop.entitlements" "$STAGE/Payload/Hop.app"
 (cd "$STAGE" && ditto -c -k --sequesterRsrc --keepParent Payload ../Hop-unsigned.ipa)
 ```
 
-Remember: an unsigned IPA cannot be installed on a physical device without later signing/provisioning, especially because Hop includes a Network Extension entitlement.
+Remember: this IPA still cannot be installed on a physical device without later signing/provisioning. The ad-hoc fakesign step only embeds the entitlements each binary needs so the later signer can re-map them — the signer must keep the Packet Tunnel entitlement and App Group on both Hop.app and the embedded HopTunnel.appex, or the tunnel extension will not launch.
 
 ## Validation expectations
 

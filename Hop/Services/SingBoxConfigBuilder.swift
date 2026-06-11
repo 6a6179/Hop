@@ -36,9 +36,14 @@ struct SingBoxConfigBuilder {
         settings: AppSettings = .defaults,
         logOutputPath: String? = nil,
     ) throws -> String {
-        let resolver = OutboundTagResolver(profiles: profiles, groups: groups)
+        if let unsupportedReason = directlySelectedUnsupportedReason(for: selectedTarget, profiles: profiles) {
+            throw SingBoxConfigError.unsupportedProfile(unsupportedReason)
+        }
+
+        let singBoxProfiles = profiles.filter { singBoxUnsupportedReason(for: $0) == nil }
+        let resolver = OutboundTagResolver(profiles: singBoxProfiles, groups: groups)
         let selectedOutboundTag = resolver.tag(for: selectedTarget) ?? resolver.defaultProxyTag ?? "direct"
-        let profileOutbounds = try profiles.map { profile in
+        let profileOutbounds = try singBoxProfiles.map { profile in
             try outboundDictionary(for: profile, tag: resolver.tag(for: profile))
         }
         let groupOutbounds = groups.compactMap { group in
@@ -87,6 +92,30 @@ struct SingBoxConfigBuilder {
             throw SingBoxConfigError.serializationFailed
         }
         return string
+    }
+
+    private func directlySelectedUnsupportedReason(for target: OutboundTarget, profiles: [ProxyProfile]) -> String? {
+        switch target {
+        case let .profile(id):
+            return profiles.first { $0.id == id }.flatMap(singBoxUnsupportedReason)
+        case let .named(name):
+            let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return profiles.first { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized }.flatMap(singBoxUnsupportedReason)
+        case .selectedProxy, .direct, .reject, .group:
+            return nil
+        }
+    }
+
+    private func singBoxUnsupportedReason(for profile: ProxyProfile) -> String? {
+        if case let .vless(options) = profile.options,
+           options.normalizedEncryption != nil
+        {
+            return "\(options.encryptionAuthLabel) requires Xray VLESS Encryption/Auth; the bundled sing-box/libbox engine cannot run encrypted VLESS profiles yet."
+        }
+        if profile.security.reality?.mldsa65Verify?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return "REALITY ML-DSA-65 verification requires Xray mldsa65Verify/pqv support; the bundled sing-box/libbox engine cannot enforce it yet."
+        }
+        return nil
     }
 
     private func groupDictionary(for group: ProxyGroup, resolver: OutboundTagResolver) -> [String: Any]? {
