@@ -72,10 +72,6 @@ struct ProfileEditorView: View {
                     Label("\(draft.vlessEncryptionAuthLabel) is saved for compatibility, but Hop's current sing-box/libbox engine cannot run non-none VLESS Encryption/Auth yet.", systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
                         .foregroundStyle(.orange)
-                } else {
-                    Text("Paste a full Xray VLESS encryption string here if your node uses X25519 or ML-KEM-768 auth.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
                 }
             case .trojan:
                 ProfileTextField("Password", text: $draft.trojanPassword)
@@ -137,9 +133,6 @@ struct ProfileEditorView: View {
                 ProfileTextField("Short ID", text: $draft.realityShortID)
                 ProfileTextField("Server Name / SNI", text: $draft.realityServerName)
                 ProfileTextField("SpiderX (spx)", text: $draft.realitySpiderX, prompt: "/")
-                Text("SpiderX is the REALITY crawler path from share links. Leave blank only if your server expects the default.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
                 ProfileTextField("ML-DSA-65 Verify", text: $draft.realityMLDSA65Verify)
                 if draft.hasRealityMLDSA65Verify {
                     Label("pqv / ML-DSA-65 is preserved in this profile, but Hop's bundled sing-box/libbox engine cannot enforce it yet.", systemImage: "exclamationmark.triangle.fill")
@@ -147,9 +140,6 @@ struct ProfileEditorView: View {
                         .foregroundStyle(.orange)
                 }
                 MultiSelectMenu("ALPN", options: ProfileEditorChoices.alpn, selection: $draft.tlsALPN)
-                Text("ALPN is a Hop profile setting emitted to sing-box. 3X-UI may not expose REALITY ALPN; configure the server separately if it needs ALPN.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
                 UTLSFingerprintPicker(selection: $draft.realityFingerprint)
             }
         }
