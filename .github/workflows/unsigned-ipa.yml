@@ -26,8 +26,10 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # Third-party actions are pinned to commit SHAs (tag in the comment):
+      # mutable tags can be repointed, and this job's token has contents:write.
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
 
       - name: Show Xcode and SDK versions
         run: |
@@ -61,7 +63,7 @@ jobs:
           gh --version
 
       - name: Cache Go build artifacts
-        uses: actions/cache@v5
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
             ~/.cache/go-build
@@ -175,7 +177,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           path: build/UnsignedIPA/Hop-unsigned.ipa
           archive: false
@@ -183,7 +185,7 @@ jobs:
           retention-days: 14
 
       - name: Upload checksum artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           path: build/UnsignedIPA/Hop-unsigned.ipa.sha256
           archive: false

@@ -112,6 +112,14 @@ final class ImportSecurityTests: XCTestCase {
         for evil in ["(a+)+", "(a*)*$", "(.+)+", "(a+|b+)+", "((ab)+)+", "(\\d+)+"] {
             XCTAssertFalse(ImportPolicy.isSafeRegexPattern(evil), "\(evil) must be rejected as ReDoS-prone")
         }
+        // Second-order nesting: the unbounded repetition sits one group deeper,
+        // so the quantified outer group never directly contains a quantifier.
+        for evil in ["((a+)b)+", "((a+)b*)+", "((\\d+)\\D)+", "(x(a+))+", "(((a+)b)c)*"] {
+            XCTAssertFalse(ImportPolicy.isSafeRegexPattern(evil), "\(evil) must be rejected as ReDoS-prone")
+        }
+        // …while an unquantified wrapper around a quantified group stays safe.
+        XCTAssertTrue(ImportPolicy.isSafeRegexPattern("((a+)b)"), "no outer repetition — star height 1")
+        XCTAssertTrue(ImportPolicy.isSafeRegexPattern("(jp|us)-(node)+"), "sibling groups must not be conflated")
     }
 
     func testUnsafePolicyRegexFilterIsIgnored() throws {

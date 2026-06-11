@@ -8,9 +8,13 @@ final class InMemorySecretBackend: SecretBackend, @unchecked Sendable {
     private var storage: [String: String] = [:]
     private let lock = NSLock()
 
-    /// Number of `removeAll` calls. `HopAppDataStore.save` rewrites the secret
-    /// set exactly once per persist, so this counts state persists in tests.
+    /// Number of `removeAll` calls.
     private(set) var removeAllCount = 0
+
+    /// Number of `allKeys` calls. `SecretStore.replaceAll` scans the stored
+    /// keys exactly once per `HopAppDataStore.save`, so this counts state
+    /// persists in tests.
+    private(set) var allKeysCount = 0
 
     func value(forKey key: String) -> String? {
         lock.lock()
@@ -35,6 +39,13 @@ final class InMemorySecretBackend: SecretBackend, @unchecked Sendable {
         defer { lock.unlock() }
         storage.removeAll()
         removeAllCount += 1
+    }
+
+    func allKeys() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        allKeysCount += 1
+        return Array(storage.keys)
     }
 }
 

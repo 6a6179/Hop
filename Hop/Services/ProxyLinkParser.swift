@@ -326,7 +326,12 @@ struct ProxyImportService {
                 options: .vmess(
                     VMessOptions(
                         uuid: uuid,
-                        security: (object["scy"] as? String)?.nilIfEmpty ?? (object["type"] as? String)?.nilIfEmpty ?? "auto",
+                        // The cipher lives in `scy` only. `type` is the header
+                        // obfuscation mode ("none"/"http") — treating it as a
+                        // cipher fallback turned common `"type":"none"` links
+                        // into security:"none" (encryption disabled) instead of
+                        // the intended "auto".
+                        security: (object["scy"] as? String)?.nilIfEmpty ?? "auto",
                         alterID: intValueOrZero(object["aid"]),
                     ),
                 ),
@@ -605,6 +610,8 @@ struct ProxyImportService {
     }
 }
 
+/// Case-insensitive view of a link's query parameters: keys are stored
+/// lowercased once, so lookups in either case hit the same entry.
 private struct Query {
     private var values: [String: String] = [:]
 
@@ -613,13 +620,12 @@ private struct Query {
             guard let value = item.value?.removingPercentEncoding else {
                 continue
             }
-            values[item.name] = value
             values[item.name.lowercased()] = value
         }
     }
 
     subscript(_ key: String) -> String? {
-        values[key] ?? values[key.lowercased()]
+        values[key.lowercased()]
     }
 
     func first(_ keys: String...) -> String? {

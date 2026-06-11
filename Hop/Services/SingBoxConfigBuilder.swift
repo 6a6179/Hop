@@ -43,7 +43,16 @@ struct SingBoxConfigBuilder {
         let singBoxProfiles = profiles.filter { singBoxUnsupportedReason(for: $0) == nil }
         let resolver = OutboundTagResolver(profiles: singBoxProfiles, groups: groups)
         let selectedOutboundTag = resolver.tag(for: selectedTarget) ?? resolver.defaultProxyTag ?? "direct"
-        let profileOutbounds = try singBoxProfiles.map { profile in
+        // sing-box 1.13 removed the `wireguard` outbound type (the engine fails
+        // the whole config with "unknown outbound type"); WireGuard runs as an
+        // `endpoints` entry instead. Endpoint tags share the outbound namespace,
+        // so groups and routes can reference them like any other profile tag.
+        let endpoints = singBoxProfiles
+            .filter(\.isWireGuard)
+            .compactMap { profile in
+                endpointDictionary(for: profile, tag: resolver.tag(for: profile))
+            }
+        let profileOutbounds = try singBoxProfiles.filter { !$0.isWireGuard }.map { profile in
             try outboundDictionary(for: profile, tag: resolver.tag(for: profile))
         }
         let groupOutbounds = groups.compactMap { group in
@@ -67,9 +76,9 @@ struct SingBoxConfigBuilder {
             logDictionary["output"] = logOutputPath
         }
 
-        let config: [String: Any] = [
+        var config: [String: Any] = [
             "log": logDictionary,
-            "dns": dnsDictionary(settings: settings, proxyTag: selectedOutboundTag),
+            "dns": dnsDictionary(settings: settings, routingMode: routingMode, proxyTag: selectedOutboundTag),
             "inbounds": [
                 [
                     "type": "tun",
@@ -86,6 +95,9 @@ struct SingBoxConfigBuilder {
             "outbounds": outbounds,
             "route": routeDictionary(mode: routingMode, rules: rules, selectedTag: selectedOutboundTag, resolver: resolver, sniff: settings.sniffTraffic),
         ]
+        if !endpoints.isEmpty {
+            config["endpoints"] = endpoints
+        }
 
         let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
         guard let string = String(data: data, encoding: .utf8) else {
@@ -166,8 +178,8 @@ struct SingBoxConfigBuilder {
         return dictionary
     }
 
-    private func dnsDictionary(settings: AppSettings, proxyTag: String) -> [String: Any] {
-        let selectedServer = dnsServerDictionary(settings: settings, proxyTag: proxyTag)
+    private func dnsDictionary(settings: AppSettings, routingMode: RoutingMode, proxyTag: String) -> [String: Any] {
+        let selectedServer = dnsServerDictionary(settings: settings, routingMode: routingMode, proxyTag: proxyTag)
         var servers: [[String: Any]] = []
 
         if let selectedServer {
@@ -186,7 +198,7 @@ struct SingBoxConfigBuilder {
         ]
     }
 
-    private func dnsServerDictionary(settings: AppSettings, proxyTag: String) -> [String: Any]? {
+    private func dnsServerDictionary(settings: AppSettings, routingMode: RoutingMode, proxyTag: String) -> [String: Any]? {
         let tag: String
         let address: String
 
@@ -209,14 +221,51 @@ struct SingBoxConfigBuilder {
             "address": address,
         ]
 
-        if settings.proxyDNS {
+        // Direct mode routes all traffic off-proxy; sending DNS through the
+        // proxy there would leak the user's query history to the proxy server
+        // in the one mode that promises to bypass it.
+        if settings.proxyDNS, routingMode != .direct {
             server["detour"] = proxyTag
         }
 
         return server
     }
 
-    func outboundDictionary(for profile: ProxyProfile, tag: String) throws -> [String: Any] {
+    /// Builds the `endpoints` entry for a WireGuard profile (sing-box 1.13 has
+    /// no `wireguard` outbound). The local interface addresses and peer allowed
+    /// IPs must be CIDR prefixes or the engine rejects the config, so bare IPs
+    /// are normalized to host prefixes.
+    private func endpointDictionary(for profile: ProxyProfile, tag: String) -> [String: Any]? {
+        guard case let .wireGuard(options) = profile.options else {
+            return nil
+        }
+        return [
+            "type": "wireguard",
+            "tag": tag,
+            "address": options.localAddress.map(Self.normalizedHostPrefix),
+            "private_key": options.privateKey,
+            "peers": [
+                [
+                    "address": profile.endpoint.host,
+                    "port": profile.endpoint.port,
+                    "public_key": options.peerPublicKey,
+                    "allowed_ips": ["0.0.0.0/0", "::/0"],
+                ] as [String: Any],
+            ],
+        ]
+    }
+
+    /// Appends a host prefix length to a bare IP ("10.0.0.2" → "10.0.0.2/32",
+    /// "fd00::2" → "fd00::2/128"); values that already carry one pass through.
+    private static func normalizedHostPrefix(_ address: String) -> String {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.contains("/") else {
+            return trimmed
+        }
+        return trimmed + (trimmed.contains(":") ? "/128" : "/32")
+    }
+
+    private func outboundDictionary(for profile: ProxyProfile, tag: String) throws -> [String: Any] {
         var outbound: [String: Any] = [
             "tag": tag,
             "server": profile.endpoint.host,
@@ -279,12 +328,10 @@ struct SingBoxConfigBuilder {
             outbound["type"] = "socks"
             outbound["username"] = options.username
             outbound["password"] = options.password
-        case let .wireGuard(options):
-            guard profile.proto == .wireGuard else { throw SingBoxConfigError.unsupportedProfile("Mismatched WireGuard profile.") }
-            outbound["type"] = "wireguard"
-            outbound["private_key"] = options.privateKey
-            outbound["peer_public_key"] = options.peerPublicKey
-            outbound["local_address"] = options.localAddress
+        case .wireGuard:
+            // WireGuard is emitted via `endpointDictionary`; reaching this case
+            // means a caller bypassed the endpoint split in `build`.
+            throw SingBoxConfigError.unsupportedProfile("WireGuard profiles run as sing-box endpoints, not outbounds.")
         case let .anyTLS(options):
             guard profile.proto == .anyTLS else { throw SingBoxConfigError.unsupportedProfile("Mismatched AnyTLS profile.") }
             outbound["type"] = "anytls"
@@ -579,6 +626,15 @@ struct SingBoxConfigBuilder {
         default:
             return nil
         }
+    }
+}
+
+private extension ProxyProfile {
+    var isWireGuard: Bool {
+        if case .wireGuard = options {
+            return true
+        }
+        return false
     }
 }
 

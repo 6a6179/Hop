@@ -7,7 +7,11 @@ struct ConnectionsView: View {
     @State private var searchText = ""
 
     var body: some View {
-        List {
+        // Filter + sort once per render; telemetry pushes a connections batch
+        // about every second while this view is visible, and `body` references
+        // the visible list twice (empty check + ForEach).
+        let visibleConnections = visibleConnections
+        return List {
             Section {
                 Picker("Filter", selection: $filter) {
                     ForEach(ConnectionFilter.allCases) { filter in

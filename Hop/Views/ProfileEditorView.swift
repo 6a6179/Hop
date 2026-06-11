@@ -74,34 +74,34 @@ struct ProfileEditorView: View {
                         .foregroundStyle(.orange)
                 }
             case .trojan:
-                ProfileTextField("Password", text: $draft.trojanPassword)
+                ProfileTextField("Password", text: $draft.trojanPassword, isSecure: true)
             case .hysteria2:
-                ProfileTextField("Password", text: $draft.hysteriaPassword)
+                ProfileTextField("Password", text: $draft.hysteriaPassword, isSecure: true)
                 ProfileTextField("Obfuscation", text: $draft.hysteriaObfs, prompt: "salamander")
-                ProfileTextField("Obfs Password", text: $draft.hysteriaObfsPassword)
+                ProfileTextField("Obfs Password", text: $draft.hysteriaObfsPassword, isSecure: true)
             case .tuic:
                 ProfileTextField("UUID", text: $draft.tuicUUID)
-                ProfileTextField("Password", text: $draft.tuicPassword)
+                ProfileTextField("Password", text: $draft.tuicPassword, isSecure: true)
                 ProfileTextField("Congestion Control", text: $draft.tuicCongestionControl, prompt: "bbr")
             case .shadowsocks:
                 ProfileTextField("Method", text: $draft.shadowsocksMethod, prompt: "2022-blake3-aes-128-gcm")
-                ProfileTextField("Password", text: $draft.shadowsocksPassword)
+                ProfileTextField("Password", text: $draft.shadowsocksPassword, isSecure: true)
             case .vmess:
                 ProfileTextField("UUID", text: $draft.vmessUUID)
                 ProfileTextField("Security", text: $draft.vmessSecurity, prompt: "auto")
                 ProfileTextField("Alter ID", text: $draft.vmessAlterID, prompt: "0", keyboardType: .numberPad)
             case .http:
                 ProfileTextField("Username", text: $draft.httpUsername)
-                ProfileTextField("Password", text: $draft.httpPassword)
+                ProfileTextField("Password", text: $draft.httpPassword, isSecure: true)
             case .socks:
                 ProfileTextField("Username", text: $draft.socksUsername)
-                ProfileTextField("Password", text: $draft.socksPassword)
+                ProfileTextField("Password", text: $draft.socksPassword, isSecure: true)
             case .wireGuard:
-                ProfileTextField("Private Key", text: $draft.wireGuardPrivateKey)
+                ProfileTextField("Private Key", text: $draft.wireGuardPrivateKey, isSecure: true)
                 ProfileTextField("Peer Public Key", text: $draft.wireGuardPeerPublicKey)
                 ProfileTextField("Local Addresses", text: $draft.wireGuardLocalAddresses, prompt: "10.0.0.2/32, fd00::2/128")
             case .anyTLS:
-                ProfileTextField("Password", text: $draft.anyTLSPassword)
+                ProfileTextField("Password", text: $draft.anyTLSPassword, isSecure: true)
             }
         }
     }
@@ -175,6 +175,7 @@ struct ProfileTextField: View {
     var keyboardType: UIKeyboardType
     var capitalization: TextInputAutocapitalization
     var autocorrectionDisabled: Bool
+    var isSecure: Bool
 
     init(
         _ title: String,
@@ -183,6 +184,7 @@ struct ProfileTextField: View {
         keyboardType: UIKeyboardType = .default,
         capitalization: TextInputAutocapitalization = .never,
         autocorrectionDisabled: Bool = true,
+        isSecure: Bool = false,
     ) {
         self.title = title
         _text = text
@@ -190,11 +192,12 @@ struct ProfileTextField: View {
         self.keyboardType = keyboardType
         self.capitalization = capitalization
         self.autocorrectionDisabled = autocorrectionDisabled
+        self.isSecure = isSecure
     }
 
     var body: some View {
         LabeledContent(title) {
-            TextField(prompt, text: $text)
+            field
                 .multilineTextAlignment(.trailing)
                 .keyboardType(keyboardType)
                 .textInputAutocapitalization(capitalization)
@@ -202,6 +205,18 @@ struct ProfileTextField: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: 220)
+        }
+    }
+
+    /// Passwords and private keys render as `SecureField` so they stay masked
+    /// on screen — and out of screenshots, screen recordings, screen sharing,
+    /// and the keyboard's QuickType/learned-words cache.
+    @ViewBuilder
+    private var field: some View {
+        if isSecure {
+            SecureField(prompt, text: $text)
+        } else {
+            TextField(prompt, text: $text)
         }
     }
 }

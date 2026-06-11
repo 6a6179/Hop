@@ -167,6 +167,14 @@ struct ImportResult: Hashable, Codable {
         profiles.isEmpty && groups.isEmpty && rules.isEmpty
     }
 
+    /// Names of imported nodes that disable TLS certificate verification.
+    /// Import UIs require an explicit confirmation before saving these — a
+    /// share link or subscription can set `allow-insecure` and a dismissible
+    /// warning row alone is too easy to save past.
+    var insecureTLSProfileNames: [String] {
+        profiles.filter { $0.security.tls?.allowInsecure == true }.map(\.name)
+    }
+
     var summary: String {
         "\(profiles.count) nodes, \(groups.count) groups, \(rules.count) rules, \(warnings.count) warnings"
     }

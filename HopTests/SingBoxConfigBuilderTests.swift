@@ -382,6 +382,75 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         try assertNoDanglingOutboundReferences(root)
     }
 
+    /// sing-box 1.13 removed the `wireguard` outbound type (the stub errors at
+    /// config load, killing the whole tunnel); WireGuard must be emitted as an
+    /// `endpoints` entry with the server in `peers`.
+    func testWireGuardProfileEmitsEndpointNotOutbound() throws {
+        let profile = wireGuardProfile()
+
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let root = try XCTUnwrap(parse(json))
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+        let endpoints = try XCTUnwrap(root["endpoints"] as? [[String: Any]])
+        let endpoint = try XCTUnwrap(endpoints.first)
+        let peers = try XCTUnwrap(endpoint["peers"] as? [[String: Any]])
+        let peer = try XCTUnwrap(peers.first)
+        let route = try XCTUnwrap(root["route"] as? [String: Any])
+
+        XCTAssertFalse(outbounds.contains { $0["type"] as? String == "wireguard" }, "the engine rejects wireguard outbounds")
+        XCTAssertEqual(endpoint["type"] as? String, "wireguard")
+        XCTAssertEqual(endpoint["tag"] as? String, proxyTag(profile))
+        XCTAssertEqual(endpoint["private_key"] as? String, "PRIVATEKEY")
+        XCTAssertEqual(endpoint["address"] as? [String], ["10.0.0.2/32", "fd00::2/128"], "bare local IPs must gain host prefixes")
+        XCTAssertNil(endpoint["server"], "server/server_port are not endpoint fields")
+        XCTAssertNil(endpoint["server_port"])
+        XCTAssertNil(endpoint["peer_public_key"], "the peer key belongs inside peers")
+        XCTAssertEqual(peer["address"] as? String, "wg.example.net")
+        XCTAssertEqual(peer["port"] as? Int, 51820)
+        XCTAssertEqual(peer["public_key"] as? String, "PEERPUBLICKEY")
+        XCTAssertEqual(peer["allowed_ips"] as? [String], ["0.0.0.0/0", "::/0"])
+        XCTAssertEqual(route["final"] as? String, proxyTag(profile), "routes reference the endpoint by tag")
+        try assertNoDanglingOutboundReferences(root)
+    }
+
+    func testWireGuardEndpointIsSelectableGroupMember() throws {
+        let wireGuard = wireGuardProfile()
+        let group = ProxyGroup(
+            name: "Mixed",
+            type: .select,
+            members: [.profile(wireGuard.id), .profile(SampleData.trojanTLS.id)],
+        )
+
+        let json = try builder.build(
+            profiles: [wireGuard, SampleData.trojanTLS],
+            groups: [group],
+            selectedTarget: .group(group.id),
+            routingMode: .global,
+            rules: [],
+        )
+        let root = try XCTUnwrap(parse(json))
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+        let selector = try XCTUnwrap(outbounds.first { $0["tag"] as? String == groupTag(group) })
+
+        XCTAssertEqual(selector["outbounds"] as? [String], [proxyTag(wireGuard), proxyTag(SampleData.trojanTLS)])
+        try assertNoDanglingOutboundReferences(root)
+    }
+
+    /// Direct mode promises to bypass the proxy entirely; DNS must not detour
+    /// through it even when the Proxy DNS setting is on.
+    func testDirectModeDoesNotDetourDNSThroughProxy() throws {
+        var settings = AppSettings.defaults
+        settings.proxyDNS = true
+
+        let direct = try builder.build(profile: SampleData.trojanTLS, routingMode: .direct, rules: [], settings: settings)
+        let directServers = try XCTUnwrap(try (XCTUnwrap(parse(direct))["dns"] as? [String: Any])?["servers"] as? [[String: Any]])
+        XCTAssertNil(directServers.first?["detour"], "direct mode must not send DNS through the proxy")
+
+        let global = try builder.build(profile: SampleData.trojanTLS, routingMode: .global, rules: [], settings: settings)
+        let globalServers = try XCTUnwrap(try (XCTUnwrap(parse(global))["dns"] as? [String: Any])?["servers"] as? [[String: Any]])
+        XCTAssertEqual(globalServers.first?["detour"] as? String, proxyTag(SampleData.trojanTLS), "proxied modes keep the DNS detour")
+    }
+
     func testCredentiallessHTTPOutboundOmitsUsernameAndPassword() throws {
         // Optional-through-subscript assignment must drop nil credentials from
         // the outbound dictionary entirely (a wrapped Optional would fail
@@ -412,6 +481,20 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         return try XCTUnwrap(outbounds.first)
     }
 
+    private func wireGuardProfile() -> ProxyProfile {
+        ProxyProfile(
+            name: "WG Node",
+            endpoint: Endpoint(host: "wg.example.net", port: 51820),
+            proto: .wireGuard,
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "PRIVATEKEY",
+                peerPublicKey: "PEERPUBLICKEY",
+                localAddress: ["10.0.0.2", "fd00::2/128"],
+            )),
+            security: .none,
+        )
+    }
+
     private func encryptedVLESSProfile() -> ProxyProfile {
         ProxyProfile(
             name: "PQC VLESS",
@@ -436,7 +519,9 @@ final class SingBoxConfigBuilderTests: XCTestCase {
 
     private func assertNoDanglingOutboundReferences(_ root: [String: Any], file: StaticString = #filePath, line: UInt = #line) throws {
         let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]], file: file, line: line)
-        let outboundTags = Set(outbounds.compactMap { $0["tag"] as? String })
+        // Endpoint tags (WireGuard) share the outbound tag namespace.
+        let endpoints = root["endpoints"] as? [[String: Any]] ?? []
+        let outboundTags = Set((outbounds + endpoints).compactMap { $0["tag"] as? String })
 
         for outbound in outbounds {
             let tag = outbound["tag"] as? String ?? "<missing tag>"

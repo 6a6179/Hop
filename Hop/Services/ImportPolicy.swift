@@ -245,6 +245,11 @@ enum ImportPolicy {
                         return true // (…unbounded…)<unbounded>
                     }
                     markEnclosingGroupUnbounded() // a quantified group counts as a quantifier in its parent
+                } else if innerWasUnbounded {
+                    // An unquantified group still carries its inner unbounded
+                    // repetition into the parent, or `((a+)b)+` would close the
+                    // middle group "clean" and slip past the outer `+`.
+                    markEnclosingGroupUnbounded()
                 }
             case "*", "+":
                 markEnclosingGroupUnbounded()

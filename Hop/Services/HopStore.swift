@@ -189,50 +189,50 @@ extension AppSettings {
 final class HopStore {
     var profiles: [ProxyProfile] {
         didSet {
-            persist()
+            persistUnlessBatched()
         }
     }
 
     var groups: [ProxyGroup] {
         didSet {
-            persist()
+            persistUnlessBatched()
         }
     }
 
     var subscriptions: [SubscriptionSource] {
         didSet {
-            persist()
+            persistUnlessBatched()
         }
     }
 
     var ruleConfigurations: [RuleConfiguration] {
         didSet {
-            persist()
+            persistUnlessBatched()
         }
     }
 
     var activeRuleConfigurationID: RuleConfiguration.ID? {
         didSet {
-            persist()
+            persistUnlessBatched()
         }
     }
 
     var routingMode: RoutingMode {
         didSet {
-            persist()
+            persistUnlessBatched()
         }
     }
 
     var selectedTarget: OutboundTarget? {
         didSet {
-            persist()
+            persistUnlessBatched()
         }
     }
 
     var settings: AppSettings {
         didSet {
             tunnel.maximumLogEntries = settings.logRetention.rawValue
-            persist()
+            persistUnlessBatched()
         }
     }
 
@@ -245,6 +245,14 @@ final class HopStore {
     private let dataStore: HopAppDataStore
     private let latencyTester = LatencyTester()
     @ObservationIgnored private var logPersistTask: Task<Void, Never>?
+    /// Suppresses the per-`didSet` persist while a multi-property mutation runs;
+    /// see `withBatchedPersist`.
+    @ObservationIgnored private var persistBatchDepth = 0
+    /// Serial queue for state saves: each save encodes the full state, rewrites
+    /// the Keychain secret set, and writes the file — work that visibly stalls
+    /// the main thread when run inline. Serial ordering keeps the newest
+    /// snapshot the last one written.
+    @ObservationIgnored private let persistQueue = DispatchQueue(label: "cat.string.hop.persist", qos: .utility)
 
     init(
         profiles: [ProxyProfile]? = nil,
@@ -391,8 +399,10 @@ final class HopStore {
     }
 
     func addProfile(_ profile: ProxyProfile) {
-        profiles.insert(profile, at: 0)
-        selectedTarget = .profile(profile.id)
+        withBatchedPersist {
+            profiles.insert(profile, at: 0)
+            selectedTarget = .profile(profile.id)
+        }
     }
 
     func updateProfile(_ profile: ProxyProfile) {
@@ -403,41 +413,49 @@ final class HopStore {
     }
 
     func deleteProfile(id: ProxyProfile.ID) {
-        profiles.removeAll { $0.id == id }
-        nodeLatencies[id] = nil
-        groups = groups.map { group in
-            var group = group
-            group.members.removeAll { $0 == .profile(id) }
-            if group.defaultTarget == .profile(id) {
-                group.defaultTarget = group.members.first
+        withBatchedPersist {
+            profiles.removeAll { $0.id == id }
+            nodeLatencies[id] = nil
+            groups = groups.map { group in
+                var group = group
+                group.members.removeAll { $0 == .profile(id) }
+                if group.defaultTarget == .profile(id) {
+                    group.defaultTarget = group.members.first
+                }
+                return group
             }
-            return group
+            normalizeSelectedTarget()
         }
-        normalizeSelectedTarget()
     }
 
     func addGroup(_ group: ProxyGroup) {
-        groups.insert(group, at: 0)
-        selectedTarget = .group(group.id)
+        withBatchedPersist {
+            groups.insert(group, at: 0)
+            selectedTarget = .group(group.id)
+        }
     }
 
     func updateGroup(_ group: ProxyGroup) {
         guard let index = groups.firstIndex(where: { $0.id == group.id }) else {
             return
         }
-        groups[index] = group
-        normalizeSelectedTarget()
+        withBatchedPersist {
+            groups[index] = group
+            normalizeSelectedTarget()
+        }
     }
 
     func deleteGroup(id: ProxyGroup.ID) {
-        groups.removeAll { $0.id == id }
-        for index in groups.indices {
-            groups[index].members.removeAll { $0 == .group(id) }
-            if groups[index].defaultTarget == .group(id) {
-                groups[index].defaultTarget = groups[index].members.first
+        withBatchedPersist {
+            groups.removeAll { $0.id == id }
+            for index in groups.indices {
+                groups[index].members.removeAll { $0 == .group(id) }
+                if groups[index].defaultTarget == .group(id) {
+                    groups[index].defaultTarget = groups[index].members.first
+                }
             }
+            normalizeSelectedTarget()
         }
-        normalizeSelectedTarget()
     }
 
     func addSubscription(_ subscription: SubscriptionSource) {
@@ -459,16 +477,20 @@ final class HopStore {
         guard ruleConfigurations.contains(where: { $0.id == id }) else {
             return
         }
-        activeRuleConfigurationID = id
-        // Selecting a rule configuration implies rule-based routing; Global/Direct
-        // remain available from the Dashboard.
-        routingMode = .rule
+        withBatchedPersist {
+            activeRuleConfigurationID = id
+            // Selecting a rule configuration implies rule-based routing; Global/Direct
+            // remain available from the Dashboard.
+            routingMode = .rule
+        }
     }
 
     func addRuleConfiguration(_ configuration: RuleConfiguration) {
-        ruleConfigurations.insert(configuration, at: 0)
-        activeRuleConfigurationID = configuration.id
-        routingMode = .rule
+        withBatchedPersist {
+            ruleConfigurations.insert(configuration, at: 0)
+            activeRuleConfigurationID = configuration.id
+            routingMode = .rule
+        }
     }
 
     func updateRuleConfiguration(_ configuration: RuleConfiguration) {
@@ -479,9 +501,11 @@ final class HopStore {
     }
 
     func deleteRuleConfiguration(id: RuleConfiguration.ID) {
-        ruleConfigurations.removeAll { $0.id == id }
-        if activeRuleConfigurationID == id {
-            activeRuleConfigurationID = ruleConfigurations.first?.id
+        withBatchedPersist {
+            ruleConfigurations.removeAll { $0.id == id }
+            if activeRuleConfigurationID == id {
+                activeRuleConfigurationID = ruleConfigurations.first?.id
+            }
         }
     }
 
@@ -491,11 +515,13 @@ final class HopStore {
             return
         }
 
-        profiles.insert(contentsOf: result.profiles, at: 0)
-        groups.insert(contentsOf: result.groups, at: 0)
-        applyImportedRules(result.rules, deduplicate: false)
-        selectedTarget = result.groups.first(where: \.isEnabled).map { .group($0.id) } ?? result.profiles.first.map { .profile($0.id) } ?? selectedTarget
-        normalizeSelectedTarget()
+        withBatchedPersist {
+            profiles.insert(contentsOf: result.profiles, at: 0)
+            groups.insert(contentsOf: result.groups, at: 0)
+            applyImportedRules(result.rules)
+            selectedTarget = result.groups.first(where: \.isEnabled).map { .group($0.id) } ?? result.profiles.first.map { .profile($0.id) } ?? selectedTarget
+            normalizeSelectedTarget()
+        }
         tunnel.appendLog("Imported \(result.summary)")
         for warning in result.warnings.prefix(5) {
             tunnel.appendLog("Import warning: \(warning.message)")
@@ -513,39 +539,38 @@ final class HopStore {
         // Keychain rewrite), so per-item updates would write once per node.
         var merger = SubscriptionRefreshMerger(profiles: profiles, groups: groups, selectedTarget: selectedTarget)
         merger.merge(result)
-        profiles = merger.profiles
-        groups = merger.groups
-        selectedTarget = merger.selectedTarget
+        withBatchedPersist {
+            profiles = merger.profiles
+            groups = merger.groups
+            selectedTarget = merger.selectedTarget
+            normalizeSelectedTarget()
+        }
 
-        applyImportedRules(result.rules, deduplicate: true)
-        normalizeSelectedTarget()
+        // Unlike a user-initiated import (which shows a preview), a refresh
+        // applies without review — so routing rules from the response are NOT
+        // installed. A subscription server could otherwise silently prepend
+        // rules that re-route chosen domains through an outbound it controls.
+        if !result.rules.isEmpty {
+            tunnel.appendLog("Ignored \(result.rules.count) routing rule(s) from subscription refresh. Import the subscription manually to review and apply rule changes.")
+        }
+        for warning in merger.securityDowngradeWarnings.prefix(5) {
+            tunnel.appendLog("Refresh warning: \(warning)")
+        }
         tunnel.appendLog("Refreshed subscription: \(result.summary)")
         for warning in result.warnings.prefix(5) {
             tunnel.appendLog("Import warning: \(warning.message)")
         }
     }
 
-    private func applyImportedRules(_ importedRules: [RoutingRule], deduplicate: Bool) {
+    private func applyImportedRules(_ importedRules: [RoutingRule]) {
         guard !importedRules.isEmpty else {
             return
         }
 
-        let rulesToInsert: [RoutingRule]
-        if deduplicate, let index = ruleConfigurations.firstIndex(where: { $0.id == activeRuleConfigurationID }) {
-            let existingRules = Set(ruleConfigurations[index].rules)
-            rulesToInsert = importedRules.filter { !existingRules.contains($0) }
-        } else {
-            rulesToInsert = importedRules
-        }
-
-        guard !rulesToInsert.isEmpty else {
-            return
-        }
-
         if let index = ruleConfigurations.firstIndex(where: { $0.id == activeRuleConfigurationID }) {
-            ruleConfigurations[index].rules.insert(contentsOf: rulesToInsert, at: 0)
+            ruleConfigurations[index].rules.insert(contentsOf: importedRules, at: 0)
         } else {
-            let imported = RuleConfiguration(name: "Imported", rules: rulesToInsert)
+            let imported = RuleConfiguration(name: "Imported", rules: importedRules)
             ruleConfigurations.insert(imported, at: 0)
             activeRuleConfigurationID = imported.id
         }
@@ -579,13 +604,15 @@ final class HopStore {
     }
 
     func restoreSampleData() {
-        profiles = SampleData.profiles
-        groups = SampleData.groups
-        subscriptions = SampleData.subscriptions
-        ruleConfigurations = SampleData.ruleConfigurations
-        activeRuleConfigurationID = SampleData.defaultConfiguration.id
-        routingMode = .rule
-        selectedTarget = .group(SampleData.proxyGroup.id)
+        withBatchedPersist {
+            profiles = SampleData.profiles
+            groups = SampleData.groups
+            subscriptions = SampleData.subscriptions
+            ruleConfigurations = SampleData.ruleConfigurations
+            activeRuleConfigurationID = SampleData.defaultConfiguration.id
+            routingMode = .rule
+            selectedTarget = .group(SampleData.proxyGroup.id)
+        }
         tunnel.appendLog("Sample profiles, groups, subscriptions, and rules restored")
     }
 
@@ -609,19 +636,44 @@ final class HopStore {
     }
 
     func persist() {
-        dataStore.save(
-            HopAppData(
-                profiles: profiles,
-                groups: groups,
-                subscriptions: subscriptions,
-                routingMode: routingMode,
-                selectedTarget: selectedTarget,
-                settings: settings,
-                logs: tunnel.logs,
-                ruleConfigurations: ruleConfigurations,
-                activeRuleConfigurationID: activeRuleConfigurationID,
-            ),
+        let snapshot = HopAppData(
+            profiles: profiles,
+            groups: groups,
+            subscriptions: subscriptions,
+            routingMode: routingMode,
+            selectedTarget: selectedTarget,
+            settings: settings,
+            logs: tunnel.logs,
+            ruleConfigurations: ruleConfigurations,
+            activeRuleConfigurationID: activeRuleConfigurationID,
         )
+        let dataStore = dataStore
+        persistQueue.async {
+            dataStore.save(snapshot)
+        }
+    }
+
+    /// Runs `body` with intermediate `didSet` persists suppressed, then saves
+    /// once. Without this, a mutation that assigns several stored properties
+    /// (import, delete, restore) rewrites the state file and Keychain once per
+    /// assignment.
+    private func withBatchedPersist(_ body: () -> Void) {
+        persistBatchDepth += 1
+        body()
+        persistBatchDepth -= 1
+        persist()
+    }
+
+    private func persistUnlessBatched() {
+        if persistBatchDepth == 0 {
+            persist()
+        }
+    }
+
+    /// Blocks until every enqueued save has been written. For tests that assert
+    /// on the persisted state right after a mutation.
+    func flushPendingPersists() {
+        persistQueue.sync {}
     }
 
     /// Repoints `selectedTarget` at a valid default when it references a

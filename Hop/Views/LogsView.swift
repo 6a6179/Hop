@@ -12,8 +12,10 @@ struct LogsView: View {
                 // out. (Rendering the whole log as one selectable Text laid out
                 // every entry on every update and lagged the tab.)
                 List {
-                    ForEach(Array(store.tunnel.logs.enumerated()), id: \.offset) { _, line in
-                        Text(line)
+                    // Indices avoid materializing a fresh `Array(enumerated())`
+                    // copy of the whole log on every append-triggered render.
+                    ForEach(store.tunnel.logs.indices, id: \.self) { index in
+                        Text(store.tunnel.logs[index])
                             .font(.system(.footnote, design: .monospaced))
                             .textSelection(.enabled)
                             .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
@@ -26,12 +28,14 @@ struct LogsView: View {
         .navigationTitle("Logs")
         .navigationBarTitleDisplayMode(.inline)
         .task {
-            store.tunnel.syncExtensionLogs()
+            await store.tunnel.syncExtensionLogs()
         }
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
                 Button {
-                    store.tunnel.syncExtensionLogs()
+                    Task {
+                        await store.tunnel.syncExtensionLogs()
+                    }
                 } label: {
                     Label("Refresh Logs", systemImage: "arrow.clockwise")
                 }

@@ -78,6 +78,75 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         XCTAssertEqual(merger.groups.first?.members, [.profile(duplicate.id)], "group reference follows the collapse")
     }
 
+    // MARK: - Security downgrade protection
+
+    /// A subscription response is attacker-controllable; a refresh that matches
+    /// an existing node by name must not silently disable its certificate
+    /// verification.
+    func testRefreshCannotSilentlyEnableAllowInsecure() throws {
+        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        var weakened = trojanProfile(name: "Tokyo", host: "new.example.com")
+        weakened.security.tls?.allowInsecure = true
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        merger.merge(ImportResult(profiles: [weakened]))
+
+        let merged = try XCTUnwrap(merger.profiles.first)
+        XCTAssertEqual(merged.id, existing.id)
+        XCTAssertEqual(merged.endpoint.host, "new.example.com", "non-security updates still apply")
+        XCTAssertEqual(merged.security.tls?.allowInsecure, false, "verification must stay enabled")
+        XCTAssertEqual(merger.securityDowngradeWarnings.count, 1)
+    }
+
+    func testRefreshCannotSilentlyStripTLSLayer() throws {
+        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        var stripped = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        stripped.security = .none
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        merger.merge(ImportResult(profiles: [stripped]))
+
+        let merged = try XCTUnwrap(merger.profiles.first)
+        XCTAssertEqual(merged.security, existing.security, "the TLS layer must survive the refresh")
+        XCTAssertEqual(merger.securityDowngradeWarnings.count, 1)
+    }
+
+    /// REALITY also resists active probing; demoting a node to plain TLS (with
+    /// verification still on) is a downgrade a subscription must not push
+    /// silently.
+    func testRefreshCannotSilentlyDemoteRealityToTLS() throws {
+        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        existing.security = .reality(RealityOptions(publicKey: "PUBLICKEY", shortID: "abcd", serverName: "jp.example.com"))
+        let demoted = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        merger.merge(ImportResult(profiles: [demoted]))
+
+        let merged = try XCTUnwrap(merger.profiles.first)
+        XCTAssertEqual(merged.security.layer, .reality, "the REALITY layer must survive the refresh")
+        XCTAssertEqual(merged.security, existing.security)
+        XCTAssertEqual(merger.securityDowngradeWarnings.count, 1)
+
+        // …but moving up to REALITY is an upgrade and applies.
+        var upgradeMerger = SubscriptionRefreshMerger(profiles: [demoted], groups: [], selectedTarget: nil)
+        upgradeMerger.merge(ImportResult(profiles: [existing]))
+        XCTAssertEqual(upgradeMerger.profiles.first?.security.layer, .reality)
+        XCTAssertTrue(upgradeMerger.securityDowngradeWarnings.isEmpty)
+    }
+
+    func testRefreshStillAppliesLegitimateSecurityUpgrade() throws {
+        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        existing.security.tls?.allowInsecure = true
+        let hardened = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        merger.merge(ImportResult(profiles: [hardened]))
+
+        let merged = try XCTUnwrap(merger.profiles.first)
+        XCTAssertEqual(merged.security.tls?.allowInsecure, false, "turning verification on is not a downgrade")
+        XCTAssertTrue(merger.securityDowngradeWarnings.isEmpty)
+    }
+
     func testImportedGroupWithoutImportedTypeAlwaysInserts() {
         let existing = ProxyGroup(name: "Manual", type: .select, members: [.direct])
         var merger = SubscriptionRefreshMerger(profiles: [], groups: [existing], selectedTarget: nil)
@@ -114,24 +183,50 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
             subscriptions: [],
             dataStore: HopAppDataStore(url: tempStateURL(), secretStore: SecretStore(backend: backend)),
         )
-        let baseline = backend.removeAllCount
+        // init may normalize the selected target, which enqueues a save of its
+        // own; settle it before taking the baseline.
+        store.flushPendingPersists()
+        let baseline = backend.allKeysCount
 
         let imported = (0 ..< 25).map { trojanProfile(name: "Node \($0)", host: "n\($0).example.com") }
         store.applySubscriptionRefresh(ImportResult(profiles: imported))
+        store.flushPendingPersists()
 
         XCTAssertEqual(store.profiles.count, 26)
-        // One persist per mutated store property (profiles, groups,
-        // selectedTarget), not one per imported node.
-        XCTAssertLessThanOrEqual(backend.removeAllCount - baseline, 4)
+        // The whole refresh is one batched persist, not one per mutated
+        // property or per imported node.
+        XCTAssertEqual(backend.allKeysCount - baseline, 1)
+    }
+
+    /// A refresh applies without a preview, so routing rules in the response
+    /// must be ignored — a malicious subscription could otherwise prepend rules
+    /// that re-route chosen domains through an outbound it controls.
+    @MainActor
+    func testRefreshDoesNotInjectRoutingRulesIntoActiveConfiguration() {
+        let store = HopStore(
+            profiles: [trojanProfile(name: "Existing", host: "e.example.com")],
+            groups: [],
+            subscriptions: [],
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()),
+        )
+        let rulesBefore = store.ruleConfigurations.map(\.rules)
+
+        store.applySubscriptionRefresh(ImportResult(
+            profiles: [trojanProfile(name: "Existing", host: "n.example.com")],
+            rules: [RoutingRule(kind: .domainSuffix, value: "bank.example", target: .direct)],
+        ))
+
+        XCTAssertEqual(store.ruleConfigurations.map(\.rules), rulesBefore, "refresh rules must not touch rule configurations")
     }
 
     @MainActor
     func testInitWithCleanStateDoesNotPersist() {
         let backend = InMemorySecretBackend()
         let url = tempStateURL()
-        _ = HopStore(dataStore: HopAppDataStore(url: url, secretStore: SecretStore(backend: backend)))
+        let store = HopStore(dataStore: HopAppDataStore(url: url, secretStore: SecretStore(backend: backend)))
+        store.flushPendingPersists()
 
-        XCTAssertEqual(backend.removeAllCount, 0, "launching with consistent state must not rewrite it")
+        XCTAssertEqual(backend.allKeysCount, 0, "launching with consistent state must not rewrite it")
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
 

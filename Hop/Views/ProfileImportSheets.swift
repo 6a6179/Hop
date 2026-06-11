@@ -14,6 +14,8 @@ struct AddSubscriptionSheet: View {
     @State private var urlString = ""
     @State private var errorMessage: String?
     @State private var isLoading = false
+    @State private var showInsecureTLSConfirmation = false
+    @State private var pendingSave: (subscription: SubscriptionSource, result: ImportResult)?
 
     var importService: ProxyImportService
     var onSave: (SubscriptionSource, ImportResult) -> Void
@@ -61,6 +63,15 @@ struct AddSubscriptionSheet: View {
                     .disabled(isLoading)
                 }
             }
+            .insecureTLSImportConfirmation(
+                isPresented: $showInsecureTLSConfirmation,
+                profileNames: pendingSave?.result.insecureTLSProfileNames ?? [],
+            ) {
+                if let pendingSave {
+                    onSave(pendingSave.subscription, pendingSave.result)
+                    dismiss()
+                }
+            }
         }
     }
 
@@ -85,8 +96,14 @@ struct AddSubscriptionSheet: View {
                     lastImportSummary: result.summary,
                 )
                 await MainActor.run {
-                    onSave(subscription, result)
-                    dismiss()
+                    if result.insecureTLSProfileNames.isEmpty {
+                        onSave(subscription, result)
+                        dismiss()
+                    } else {
+                        pendingSave = (subscription, result)
+                        isLoading = false
+                        showInsecureTLSConfirmation = true
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -98,6 +115,25 @@ struct AddSubscriptionSheet: View {
     }
 }
 
+extension View {
+    /// Blocking confirmation shown before saving imported nodes that disable
+    /// TLS certificate verification. The preview's warning rows are advisory;
+    /// this makes the security downgrade an explicit user decision. Shared by
+    /// the import sheets and the QR-scan flow in `ProfilesView`.
+    func insecureTLSImportConfirmation(
+        isPresented: Binding<Bool>,
+        profileNames: [String],
+        onConfirm: @escaping () -> Void,
+    ) -> some View {
+        alert("Disable Certificate Verification?", isPresented: isPresented) {
+            Button("Import Anyway", role: .destructive, action: onConfirm)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(profileNames.count == 1 ? "1 node turns" : "\(profileNames.count) nodes turn") off TLS certificate verification (allow-insecure), so traffic to \(profileNames.count == 1 ? "it" : "them") can be intercepted: \(profileNames.prefix(5).joined(separator: ", "))\(profileNames.count > 5 ? ", …" : "")")
+        }
+    }
+}
+
 struct ImportTextSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var importText = ""
@@ -105,6 +141,7 @@ struct ImportTextSheet: View {
     @State private var importError: String?
     @State private var detectedSubscriptionURL: URL?
     @State private var isLoading = false
+    @State private var showInsecureTLSConfirmation = false
 
     var importService: ProxyImportService
     var onSave: (ImportTextSaveResult) -> Void
@@ -169,25 +206,41 @@ struct ImportTextSheet: View {
                         guard let importResult else {
                             return
                         }
-                        if let detectedSubscriptionURL {
-                            onSave(.subscription(
-                                SubscriptionSource(
-                                    name: detectedSubscriptionURL.host() ?? "Subscription",
-                                    url: detectedSubscriptionURL.absoluteString,
-                                    lastUpdatedAt: .now,
-                                    lastImportSummary: importResult.summary,
-                                ),
-                                importResult,
-                            ))
+                        if importResult.insecureTLSProfileNames.isEmpty {
+                            save(importResult)
                         } else {
-                            onSave(.importText(importResult))
+                            showInsecureTLSConfirmation = true
                         }
-                        dismiss()
                     }
                     .disabled(isLoading || (importResult?.isEmpty ?? true))
                 }
             }
+            .insecureTLSImportConfirmation(
+                isPresented: $showInsecureTLSConfirmation,
+                profileNames: importResult?.insecureTLSProfileNames ?? [],
+            ) {
+                if let importResult {
+                    save(importResult)
+                }
+            }
         }
+    }
+
+    private func save(_ importResult: ImportResult) {
+        if let detectedSubscriptionURL {
+            onSave(.subscription(
+                SubscriptionSource(
+                    name: detectedSubscriptionURL.host() ?? "Subscription",
+                    url: detectedSubscriptionURL.absoluteString,
+                    lastUpdatedAt: .now,
+                    lastImportSummary: importResult.summary,
+                ),
+                importResult,
+            ))
+        } else {
+            onSave(.importText(importResult))
+        }
+        dismiss()
     }
 
     private func previewImport() {

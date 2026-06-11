@@ -81,7 +81,11 @@ struct HopAppDataStore {
 private extension JSONEncoder {
     static var hop: JSONEncoder {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        #if DEBUG
+            // Human-readable state files help debugging, but pretty-printing and
+            // key-sorting roughly double encode time for a file only the app reads.
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        #endif
         encoder.dateEncodingStrategy = .iso8601
         return encoder
     }

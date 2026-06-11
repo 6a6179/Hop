@@ -29,6 +29,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
     #if canImport(Libbox)
         private lazy var platformInterface = HopPlatformInterface(provider: self)
+        /// Guards the libbox service state below. It is written by the start
+        /// worker, cleared from the NE callback thread in `stopTunnel`, and read
+        /// by `reloadService` on libbox's Go command-server thread — three
+        /// uncoordinated threads under `@unchecked Sendable`.
+        private let serviceStateLock = NSLock()
         private var commandServer: LibboxCommandServer?
         // Retain the last config + nonce for reloads. Normal shared-file starts
         // keep a tokenized config and resolve credentials in memory; degraded
@@ -90,12 +95,26 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         writeTunnelLog("PacketTunnelProvider.stopTunnel reason=\(reason.rawValue)")
         #if canImport(Libbox)
-            stopService()
-            commandServer?.close()
+            // Take and clear the service state BEFORE closing anything, so a
+            // concurrent `reloadService` on the libbox Go thread sees nil and
+            // no-ops instead of reloading a server that is being torn down.
+            // (The libbox calls themselves stay outside the lock: closeService
+            // can call back into command-server handlers, and re-entering the
+            // lock from those would deadlock.)
+            serviceStateLock.lock()
+            let server = commandServer
             commandServer = nil
             lastRawConfig = nil
             configSecretNonce = nil
             lastConfigSecretsAreResolved = false
+            serviceStateLock.unlock()
+            do {
+                try server?.closeService()
+            } catch {
+                writeTunnelLog("stopService error: \(error.diagnosticDescription)")
+            }
+            platformInterface.reset()
+            server?.close()
         #endif
         completionHandler()
     }
@@ -124,7 +143,15 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             // telemetry client reads the same shared-Keychain value, so a
             // process with only App Group container access (enough to reach the
             // unix socket) still can't drive the tunnel without it.
-            setup.commandServerSecret = SecretStore.runtime.commandServerSecret()
+            let commandServerSecret = SecretStore.runtime.commandServerSecret()
+            if commandServerSecret.isEmpty {
+                // The app side generates this before starting the tunnel, so an
+                // empty read here means the shared Keychain is unreachable — the
+                // server will then reject the app's authenticated telemetry
+                // client. Name the root cause instead of failing silently.
+                writeTunnelLog("WARNING: command-server secret not readable from the shared Keychain; telemetry will be rejected. Check the keychain-access-groups entitlement on both Hop.app and HopTunnel.appex.")
+            }
+            setup.commandServerSecret = commandServerSecret
 
             var setupError: NSError?
             LibboxSetup(setup, &setupError)
@@ -144,11 +171,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             if let serverError { throw serverError }
             guard let server else { throw HopTunnelError("libbox returned a nil command server") }
             try server.start()
+            serviceStateLock.lock()
             commandServer = server
-
             lastRawConfig = rawConfig
             configSecretNonce = nonce
             lastConfigSecretsAreResolved = request.configSecretsAreResolved
+            serviceStateLock.unlock()
             try server.startOrReloadService(resolved, options: LibboxOverrideOptions())
         }
 
@@ -158,22 +186,41 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         /// entitlement was dropped during signing), and starting anyway would
         /// run the tunnel with blank credentials.
         func stopService() {
+            serviceStateLock.lock()
+            let server = commandServer
+            serviceStateLock.unlock()
             do {
-                try commandServer?.closeService()
+                try server?.closeService()
             } catch {
                 writeTunnelLog("stopService error: \(error.diagnosticDescription)")
             }
             platformInterface.reset()
         }
 
+        /// Invoked by libbox on its Go command-server thread.
         func reloadService() throws {
-            guard let commandServer, let lastRawConfig, let configSecretNonce else { return }
-            reasserting = true
-            defer { reasserting = false }
+            serviceStateLock.lock()
+            let server = commandServer
+            let rawConfig = lastRawConfig
+            let nonce = configSecretNonce
+            let secretsAreResolved = lastConfigSecretsAreResolved
+            serviceStateLock.unlock()
+            guard let server, let rawConfig, let nonce else { return }
+            setReasserting(true)
+            defer { setReasserting(false) }
             // Re-resolve tokenized configs for reloads; inline-resolved configs
             // are already marked and returned unchanged.
-            let resolved = try resolveConfig(rawConfig: lastRawConfig, nonce: configSecretNonce, secretsAreResolved: lastConfigSecretsAreResolved)
-            try commandServer.startOrReloadService(resolved, options: LibboxOverrideOptions())
+            let resolved = try resolveConfig(rawConfig: rawConfig, nonce: nonce, secretsAreResolved: secretsAreResolved)
+            try server.startOrReloadService(resolved, options: LibboxOverrideOptions())
+        }
+
+        /// `reasserting` is a KVO-published NE property; mutating it from the
+        /// libbox Go thread is an unsynchronized ObjC property write. The main
+        /// queue is serial, so the true→false order is preserved.
+        private func setReasserting(_ value: Bool) {
+            DispatchQueue.main.async { [weak self] in
+                self?.reasserting = value
+            }
         }
     #endif
 
@@ -270,6 +317,14 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             return
         }
 
+        // Collapse line breaks so one call is one log line. Messages can carry
+        // remote-proxy-controlled text (libbox debug output), and an embedded
+        // newline would let a malicious server forge timestamped entries in the
+        // log the app displays (log injection).
+        let sanitized = message
+            .components(separatedBy: .newlines)
+            .joined(separator: " ")
+
         tunnelLogLock.lock()
         defer { tunnelLogLock.unlock() }
 
@@ -277,7 +332,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             rotateTunnelLogIfNeeded(at: logURL)
 
-            let line = "[\(tunnelLogDateFormatter.string(from: Date()))] \(message)\n"
+            let line = "[\(tunnelLogDateFormatter.string(from: Date()))] \(sanitized)\n"
             let data = Data(line.utf8)
 
             if FileManager.default.fileExists(atPath: logURL.path) {

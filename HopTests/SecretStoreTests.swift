@@ -39,6 +39,23 @@ final class SecretStoreTests: XCTestCase {
         XCTAssertEqual(store.value(forKey: "k2"), "v2")
     }
 
+    /// `replaceAll` must upsert before pruning — a clear-then-rewrite pass
+    /// would leave a window where the tunnel extension resolves no secrets and
+    /// fails a concurrent start/reload.
+    func testReplaceAllUpsertsWithoutClearingFirst() {
+        let backend = InMemorySecretBackend()
+        let store = SecretStore(backend: backend)
+
+        store.setValue("v1", forKey: "keep")
+        store.setValue("old", forKey: "stale")
+        store.replaceAll(with: [("keep", "v2"), ("new", "v3")])
+
+        XCTAssertEqual(backend.removeAllCount, 0, "replaceAll must never clear the whole store")
+        XCTAssertEqual(store.value(forKey: "keep"), "v2")
+        XCTAssertEqual(store.value(forKey: "new"), "v3")
+        XCTAssertNil(store.value(forKey: "stale"), "keys absent from the new set are pruned")
+    }
+
     func testSecretStoreHandlesSpecialCharacters() {
         let store = makeStore()
         defer { store.removeAll() }

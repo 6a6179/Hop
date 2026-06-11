@@ -9,6 +9,9 @@ protocol SecretBackend: Sendable {
     func setValue(_ value: String, forKey key: String)
     func removeValue(forKey key: String)
     func removeAll()
+    /// All stored keys; lets `replaceAll` prune stale items without a blanket
+    /// delete-everything-first pass.
+    func allKeys() -> [String]
 }
 
 /// Store for proxy secrets (passwords, UUIDs, private keys), shared between the
@@ -19,8 +22,8 @@ struct SecretStore {
 
     /// Separate Keychain service for runtime/inter-process secrets (e.g. the
     /// libbox command-server token). Kept apart from `defaultService` so a
-    /// profile save's `replaceAll` — which atomically rewrites the *profile*
-    /// secret set — never evicts these.
+    /// profile save's `replaceAll` — which rewrites the *profile* secret set —
+    /// never evicts these.
     static let runtimeService = "cat.string.hop.runtime"
 
     /// Group suffix; the team/app-identifier prefix is prepended at runtime to
@@ -59,12 +62,19 @@ struct SecretStore {
         backend.removeAll()
     }
 
-    /// Atomically replaces the stored set: clears everything, then writes the
-    /// provided items. Ensures secrets for deleted profiles do not linger.
+    /// Replaces the stored set: writes/updates the provided items first, then
+    /// prunes keys that are no longer present, so secrets for deleted profiles
+    /// do not linger. Upsert-before-prune keeps every still-valid secret
+    /// readable throughout — the Keychain has no cross-item transactions, and a
+    /// clear-then-rewrite pass would give the tunnel extension a window where
+    /// `SecretResolver` finds nothing and fails a concurrent start/reload.
     func replaceAll(with items: [(key: String, value: String)]) {
-        backend.removeAll()
         for item in items {
             backend.setValue(item.value, forKey: item.key)
+        }
+        let keep = Set(items.map(\.key))
+        for key in backend.allKeys() where !keep.contains(key) {
+            backend.removeValue(forKey: key)
         }
     }
 
@@ -78,7 +88,10 @@ struct SecretStore {
     /// Read by the tunnel extension (command *server*) and the app's telemetry
     /// client (command *client*); both hand it to `LibboxSetup` so the unix
     /// command socket rejects callers that can't present it. Empty on both
-    /// sides degrades to the prior unauthenticated behavior (no regression).
+    /// sides degrades to the prior unauthenticated behavior; empty on only one
+    /// side (shared Keychain unreachable, e.g. a re-sign dropped the
+    /// keychain-access-groups entitlement) makes the server reject the app's
+    /// telemetry client — the extension logs a warning naming that case.
     func commandServerSecret() -> String {
         value(forKey: Self.commandServerSecretKey) ?? ""
     }
@@ -147,6 +160,27 @@ struct KeychainSecretBackend: SecretBackend {
 
     func removeAll() {
         delete(account: nil, includeGroup: accessGroup != nil)
+    }
+
+    func allKeys() -> [String] {
+        keys(includeGroup: accessGroup != nil)
+    }
+
+    private func keys(includeGroup: Bool) -> [String] {
+        var query = baseQuery(account: nil, includeGroup: includeGroup)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecMissingEntitlement, includeGroup {
+            _ = Self.didLogEntitlementFallback
+            return keys(includeGroup: false)
+        }
+        guard status == errSecSuccess, let items = result as? [[String: Any]] else {
+            return []
+        }
+        return items.compactMap { $0[kSecAttrAccount as String] as? String }
     }
 
     private func read(account: String, includeGroup: Bool) -> String? {

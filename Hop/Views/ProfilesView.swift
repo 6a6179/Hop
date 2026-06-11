@@ -7,6 +7,10 @@ struct ProfilesView: View {
     @State private var importNotice: ProfileImportNotice?
     @State private var isHandlingScannedPayload = false
     @State private var refreshingSubscriptionIDs: Set<SubscriptionSource.ID> = []
+    /// QR-scanned import held back because it contains allow-insecure nodes;
+    /// applied only after the user confirms (the sheet flows gate themselves).
+    @State private var pendingInsecureScan: PendingInsecureScan?
+    @State private var showInsecureScanConfirmation = false
 
     private let importService = ProxyImportService()
 
@@ -93,7 +97,7 @@ struct ProfilesView: View {
                 }
             case .addSubscription:
                 AddSubscriptionSheet(importService: importService) { subscription, result in
-                    saveImportedSubscription(subscription, result: result, addedTitle: "Subscription Added")
+                    saveImportedSubscription(subscription, result: result, addedTitle: "Subscription Added", confirmedInsecureNodes: true)
                 }
             case .importText:
                 ImportTextSheet(importService: importService) { saveResult in
@@ -103,7 +107,7 @@ struct ProfilesView: View {
                         selectedSection = .nodes
                         importNotice = ProfileImportNotice(title: "Import Complete", message: result.summary)
                     case let .subscription(subscription, result):
-                        saveImportedSubscription(subscription, result: result, addedTitle: "Subscription URL Imported")
+                        saveImportedSubscription(subscription, result: result, addedTitle: "Subscription URL Imported", confirmedInsecureNodes: true)
                     }
                 }
             case .scanner:
@@ -119,6 +123,12 @@ struct ProfilesView: View {
                 message: Text(notice.message),
                 dismissButton: .default(Text("OK")),
             )
+        }
+        .insecureTLSImportConfirmation(
+            isPresented: $showInsecureScanConfirmation,
+            profileNames: pendingInsecureScan?.result.insecureTLSProfileNames ?? [],
+        ) {
+            applyPendingInsecureScan()
         }
     }
 
@@ -290,11 +300,32 @@ struct ProfilesView: View {
     private func importScannedText(_ text: String) {
         do {
             let result = try importService.importText(text)
-            store.applyImport(result)
-            selectedSection = .nodes
-            importNotice = ProfileImportNotice(title: "Scanned Import Complete", message: result.summary)
+            guard result.insecureTLSProfileNames.isEmpty else {
+                pendingInsecureScan = PendingInsecureScan(result: result)
+                showInsecureScanConfirmation = true
+                return
+            }
+            applyScannedImport(result)
         } catch {
             importNotice = ProfileImportNotice(title: "Could Not Import Code", message: error.localizedDescription)
+        }
+    }
+
+    private func applyScannedImport(_ result: ImportResult) {
+        store.applyImport(result)
+        selectedSection = .nodes
+        importNotice = ProfileImportNotice(title: "Scanned Import Complete", message: result.summary)
+    }
+
+    private func applyPendingInsecureScan() {
+        guard let pending = pendingInsecureScan else {
+            return
+        }
+        pendingInsecureScan = nil
+        if let subscription = pending.subscription {
+            addNewSubscription(subscription, result: pending.result, addedTitle: pending.addedTitle)
+        } else {
+            applyScannedImport(pending.result)
         }
     }
 
@@ -322,7 +353,10 @@ struct ProfilesView: View {
         }
     }
 
-    private func saveImportedSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
+    /// `confirmedInsecureNodes` is true for the sheet flows, which already ran
+    /// the allow-insecure confirmation before handing the result over; the
+    /// QR-scan path passes false so insecure nodes get gated here.
+    private func saveImportedSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String, confirmedInsecureNodes: Bool = false) {
         if let existing = store.subscriptions.first(where: { normalizedSubscriptionURL($0.url) == normalizedSubscriptionURL(subscription.url) }) {
             var refreshedSubscription = subscription
             refreshedSubscription.id = existing.id
@@ -336,12 +370,19 @@ struct ProfilesView: View {
                 title: "Subscription Updated",
                 message: "\(result.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
             )
+        } else if confirmedInsecureNodes || result.insecureTLSProfileNames.isEmpty {
+            addNewSubscription(subscription, result: result, addedTitle: addedTitle)
         } else {
-            store.applyImport(result)
-            store.addSubscription(subscription)
-            selectedSection = .subscriptions
-            importNotice = ProfileImportNotice(title: addedTitle, message: result.summary)
+            pendingInsecureScan = PendingInsecureScan(result: result, subscription: subscription, addedTitle: addedTitle)
+            showInsecureScanConfirmation = true
         }
+    }
+
+    private func addNewSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
+        store.applyImport(result)
+        store.addSubscription(subscription)
+        selectedSection = .subscriptions
+        importNotice = ProfileImportNotice(title: addedTitle, message: result.summary)
     }
 
     private func normalizedSubscriptionURL(_ value: String) -> String {
@@ -451,6 +492,14 @@ private enum ProfilesSheet: Identifiable {
             "scanner"
         }
     }
+}
+
+/// A QR-scanned import containing allow-insecure nodes, parked until the user
+/// confirms. `subscription` is set when the scan was a subscription URL.
+private struct PendingInsecureScan {
+    var result: ImportResult
+    var subscription: SubscriptionSource?
+    var addedTitle = ""
 }
 
 private struct ProfileImportNotice: Identifiable {

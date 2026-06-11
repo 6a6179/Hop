@@ -18,6 +18,9 @@ struct SubscriptionRefreshMerger {
     private(set) var profiles: [ProxyProfile]
     private(set) var groups: [ProxyGroup]
     private(set) var selectedTarget: OutboundTarget?
+    /// Human-readable notes for security settings the merge refused to weaken;
+    /// the store surfaces these in the app log after a refresh.
+    private(set) var securityDowngradeWarnings: [String] = []
 
     mutating func merge(_ result: ImportResult) {
         let profileIDMap = mergeProfiles(result.profiles)
@@ -40,6 +43,16 @@ struct SubscriptionRefreshMerger {
             if let profileIndex = preferredProfileIndex(from: matchingIndices, referencedProfileIDs: referencedProfileIDs) {
                 var updatedProfile = importedProfile
                 updatedProfile.id = profiles[profileIndex].id
+                // A name-matched update comes from the subscription server and
+                // must not silently weaken the stored TLS posture: an attacker
+                // controlling the response could otherwise strip certificate
+                // verification (or TLS entirely) from a node the user trusts.
+                if exactMatches.isEmpty {
+                    updatedProfile.security = securityPreservingDowngrades(
+                        existing: profiles[profileIndex],
+                        imported: updatedProfile,
+                    )
+                }
                 profiles[profileIndex] = updatedProfile
                 importedProfileIDMap[importedProfile.id] = updatedProfile.id
 
@@ -61,6 +74,39 @@ struct SubscriptionRefreshMerger {
         }
 
         return importedProfileIDMap
+    }
+
+    /// Returns the security settings to store for a name-matched refresh,
+    /// refusing the silent downgrades an attacker-controlled subscription
+    /// could push: demoting the security layer (REALITY → TLS → none — REALITY
+    /// also carries anti-probing properties plain TLS lacks) and flipping
+    /// `allowInsecure` on. Each refusal is recorded as a warning.
+    private mutating func securityPreservingDowngrades(existing: ProxyProfile, imported: ProxyProfile) -> ProxySecurity {
+        var security = imported.security
+
+        if Self.layerRank(security.layer) < Self.layerRank(existing.security.layer) {
+            securityDowngradeWarnings.append(
+                "Refresh tried to downgrade \(imported.name) from \(existing.security.layer.displayName) to \(security.layer.displayName); kept the existing security settings.",
+            )
+            return existing.security
+        }
+
+        if existing.security.tls?.allowInsecure == false, security.tls?.allowInsecure == true {
+            security.tls?.allowInsecure = false
+            securityDowngradeWarnings.append(
+                "Refresh tried to disable TLS certificate verification for \(imported.name); kept verification enabled.",
+            )
+        }
+
+        return security
+    }
+
+    private static func layerRank(_ layer: SecurityLayer) -> Int {
+        switch layer {
+        case .none: 0
+        case .tls: 1
+        case .reality: 2
+        }
     }
 
     private func profileIndices(matchingIdentityOf profile: ProxyProfile) -> [Int] {

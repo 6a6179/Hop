@@ -143,6 +143,23 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(profile.transport.host, "cdn.example.net")
     }
 
+    /// `type` is the VMess header-obfuscation mode, not the cipher. A common
+    /// link shape omits `scy` and carries `"type":"none"` — that must yield the
+    /// `auto` cipher, not VMess-layer encryption disabled.
+    func testVMessJSONWithoutCipherFallsBackToAutoNotHeaderType() throws {
+        let vmessJSON = """
+        {"ps":"NoScy","add":"vmess.example.net","port":"443","id":"33333333-3333-4333-8333-333333333333","aid":"0","net":"tcp","type":"none"}
+        """
+
+        let profile = try parser.parse("vmess://\(vmessJSON.base64Encoded())")
+
+        if case let .vmess(options) = profile.options {
+            XCTAssertEqual(options.security, "auto", "header type must not become the cipher")
+        } else {
+            XCTFail("Expected VMess options")
+        }
+    }
+
     func testVMessJSONWithOutOfRangePortIsRejected() {
         for badPort in ["0", "-1", "99999", "65536"] {
             let vmessJSON = """

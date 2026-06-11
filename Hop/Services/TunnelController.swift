@@ -103,6 +103,13 @@ final class TunnelController {
 
         do {
             appendLog("Preparing tunnel with \(profiles.count) nodes, \(groups.count) groups, \(rules.count) rules")
+            // The import preview warns once at import time; record it again at
+            // every connect so the session log always names nodes running
+            // without certificate verification (full MITM exposure).
+            let insecureProfiles = profiles.filter { $0.security.tls?.allowInsecure == true }
+            if !insecureProfiles.isEmpty {
+                appendLog("WARNING: TLS certificate verification is disabled (allow-insecure) for: \(insecureProfiles.map(\.name).joined(separator: ", "))")
+            }
             // Ensure secrets are in the shared Keychain for the normal tokenized
             // config path. If signing does not expose a verifiable shared App
             // Group, startup falls back to an inline one-shot resolved config so
@@ -154,7 +161,7 @@ final class TunnelController {
             }
             try manager.connection.startVPNTunnel(options: startOptions)
             appendLog("startVPNTunnel returned; current status is \(manager.connection.status.displayName)")
-            syncExtensionLogs()
+            await syncExtensionLogs()
             // The synchronous status read here is almost always still
             // `disconnected` — the connecting transition arrives via the status
             // notification. Feeding it into `updateState` would misreport a
@@ -169,7 +176,7 @@ final class TunnelController {
         } catch {
             state = .failed
             startInProgress = false
-            syncExtensionLogs()
+            await syncExtensionLogs()
             appendLog("Tunnel start failed: \(error.diagnosticDescription)")
             if let diagnosticHint = error.networkExtensionDiagnosticHint {
                 appendLog("Diagnostic: \(diagnosticHint)")
@@ -190,7 +197,7 @@ final class TunnelController {
         do {
             let manager = try await loadManager()
             manager.connection.stopVPNTunnel()
-            syncExtensionLogs()
+            await syncExtensionLogs()
             updateState(from: manager.connection.status, source: "disconnect")
             appendLog("Tunnel disconnect requested")
         } catch {
@@ -218,12 +225,24 @@ final class TunnelController {
         onLogsChanged?()
     }
 
-    func syncExtensionLogs() {
-        do {
-            for line in try sharedLogStore.readLines() where importedExtensionLogLines.insert(line).inserted {
+    /// Reads the shared tunnel log file off the main actor — the read is up to
+    /// 512 KB of file I/O, and it runs on hot paths (status notifications, the
+    /// post-start diagnostics, the Logs tab refresh).
+    func syncExtensionLogs() async {
+        let result: Result<[String], Error> = await Task.detached(priority: .utility) { [sharedLogStore] in
+            do {
+                return try .success(sharedLogStore.readLines())
+            } catch {
+                return .failure(error)
+            }
+        }.value
+
+        switch result {
+        case let .success(lines):
+            for line in lines where importedExtensionLogLines.insert(line).inserted {
                 appendLog("Extension \(line)")
             }
-        } catch {
+        case let .failure(error):
             appendLog("Unable to read extension logs: \(error.diagnosticDescription)")
         }
     }
@@ -303,7 +322,7 @@ final class TunnelController {
                 return
             }
             Task { @MainActor in
-                self?.syncExtensionLogs()
+                await self?.syncExtensionLogs()
                 self?.updateState(from: connection.status, source: "status notification")
             }
         }
@@ -321,13 +340,13 @@ final class TunnelController {
                 guard !Task.isCancelled else {
                     return
                 }
-                self?.runPostStartDiagnostic(delaySeconds: delaySeconds)
+                await self?.runPostStartDiagnostic(delaySeconds: delaySeconds)
             }
         }
     }
 
-    private func runPostStartDiagnostic(delaySeconds: Int) {
-        syncExtensionLogs()
+    private func runPostStartDiagnostic(delaySeconds: Int) async {
+        await syncExtensionLogs()
         guard let status = manager?.connection.status else {
             appendLog("Post-start diagnostic +\(delaySeconds)s: no tunnel manager connection available")
             return
@@ -367,7 +386,7 @@ final class TunnelController {
                     appendLog("If no Extension lines appear here, iOS rejected or killed HopTunnel.appex before PacketTunnelProvider could write logs. Check the App Group diagnostic above and that the embedded .appex was re-signed with Hop.app.")
                     logLastDisconnectError()
                 }
-                syncExtensionLogs()
+                Task { await syncExtensionLogs() }
             } else {
                 state = .disconnected
             }
