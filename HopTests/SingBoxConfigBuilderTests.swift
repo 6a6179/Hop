@@ -20,17 +20,7 @@ final class SingBoxConfigBuilderTests: XCTestCase {
     }
 
     func testVLESSEncryptionAuthFailsClosedForSingBoxRuntime() throws {
-        let profile = ProxyProfile(
-            name: "PQC VLESS",
-            endpoint: Endpoint(host: "edge.example.net", port: 443),
-            proto: .vless,
-            options: .vless(VLESSOptions(
-                uuid: "11111111-1111-4111-8111-111111111111",
-                flow: "xtls-rprx-vision",
-                encryption: "mlkem768x25519plus.native.0rtt..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-            )),
-            security: .reality(RealityOptions(publicKey: "PUBLICKEY", shortID: "abcd")),
-        )
+        let profile = encryptedVLESSProfile()
 
         XCTAssertThrowsError(try builder.build(profile: profile, routingMode: .global, rules: [])) { error in
             let message = error.localizedDescription
@@ -38,6 +28,57 @@ final class SingBoxConfigBuilderTests: XCTestCase {
             XCTAssertTrue(message.contains("sing-box/libbox"))
             XCTAssertTrue(message.contains("cannot run encrypted VLESS"))
         }
+    }
+
+    func testInactiveUnsupportedProfileDoesNotPoisonBuild() throws {
+        let unsupported = encryptedVLESSProfile()
+        let selected = SampleData.trojanTLS
+
+        let json = try builder.build(
+            profiles: [unsupported, selected],
+            groups: [],
+            selectedTarget: .profile(selected.id),
+            routingMode: .global,
+            rules: [],
+        )
+        let root = try XCTUnwrap(parse(json))
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+        let route = try XCTUnwrap(root["route"] as? [String: Any])
+
+        XCTAssertNil(outbounds.first { $0["tag"] as? String == proxyTag(unsupported) })
+        XCTAssertNotNil(outbounds.first { $0["tag"] as? String == proxyTag(selected) })
+        XCTAssertEqual(route["final"] as? String, proxyTag(selected))
+        try assertNoDanglingOutboundReferences(root)
+    }
+
+    func testGroupsSkipUnsupportedMembers() throws {
+        let unsupported = encryptedVLESSProfile()
+        let selected = SampleData.vlessReality
+        let group = ProxyGroup(
+            name: "Mixed",
+            type: .select,
+            members: [
+                .profile(unsupported.id),
+                .profile(selected.id),
+            ],
+            defaultTarget: .profile(unsupported.id),
+        )
+
+        let json = try builder.build(
+            profiles: [unsupported, selected],
+            groups: [group],
+            selectedTarget: .group(group.id),
+            routingMode: .global,
+            rules: [],
+        )
+        let root = try XCTUnwrap(parse(json))
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+        let groupOutbound = try XCTUnwrap(outbounds.first { $0["tag"] as? String == groupTag(group) })
+
+        XCTAssertNil(outbounds.first { $0["tag"] as? String == proxyTag(unsupported) })
+        XCTAssertEqual(groupOutbound["outbounds"] as? [String], [proxyTag(selected)])
+        XCTAssertEqual(groupOutbound["default"] as? String, proxyTag(selected))
+        try assertNoDanglingOutboundReferences(root)
     }
 
     func testRealityMLDSA65VerifyFailsClosedForSingBoxRuntime() throws {
@@ -369,6 +410,20 @@ final class SingBoxConfigBuilderTests: XCTestCase {
     private func firstOutbound(_ root: [String: Any]) throws -> [String: Any] {
         let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
         return try XCTUnwrap(outbounds.first)
+    }
+
+    private func encryptedVLESSProfile() -> ProxyProfile {
+        ProxyProfile(
+            name: "PQC VLESS",
+            endpoint: Endpoint(host: "edge.example.net", port: 443),
+            proto: .vless,
+            options: .vless(VLESSOptions(
+                uuid: "11111111-1111-4111-8111-111111111111",
+                flow: "xtls-rprx-vision",
+                encryption: "mlkem768x25519plus.native.0rtt..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )),
+            security: .reality(RealityOptions(publicKey: "PUBLICKEY", shortID: "abcd")),
+        )
     }
 
     private func proxyTag(_ profile: ProxyProfile) -> String {
