@@ -36,6 +36,23 @@ swiftformat Hop HopTunnel Shared HopTests
   - Be careful when crossing from gomobile/libbox callback types into Swift concurrency; convert non-Sendable libbox objects into Hop-owned value types before dispatching or crossing actor/thread boundaries.
   - Keep `HopTunnel` in Swift 6.2 and avoid broad `@unchecked Sendable`; use it only for tightly scoped bridge wrappers with clear synchronization or lifetime guarantees.
 
+## Invariants to preserve
+
+Security and consistency properties that code changes must not regress:
+
+- `SingBoxConfigBuilder` emits WireGuard profiles as sing-box `endpoints`, never as outbounds — the vendored sing-box 1.13 removed the `wireguard` outbound type and rejects the whole config if one appears. Endpoint tags share the outbound tag namespace, so groups and routes can reference them like any profile tag.
+- Imported and refreshed data is untrusted (subscription servers and share links are attacker-controllable):
+  - Subscription refreshes must never silently weaken a matched profile's security — layer demotions (REALITY → TLS → none) and `allowInsecure` flips are blocked by `SubscriptionRefreshMerger.securityPreservingDowngrades`, which records warnings the store logs.
+  - Subscription refreshes must not install routing rules from the response; rules only apply through reviewed manual imports.
+  - Every UI path that saves imported nodes with `allowInsecure` must run the blocking `insecureTLSImportConfirmation` first. The sheet flows gate themselves; the QR-scan paths in `ProfilesView` gate via `pendingInsecureScan`. New import paths need the same gate.
+  - Centralized limits and validation for untrusted import data live in `ImportPolicy`; route new parsing through it rather than adding ad-hoc checks.
+- `HopStore` persists once per logical mutation: `didSet` observers call `persistUnlessBatched()`, multi-property mutations are wrapped in `withBatchedPersist`, and saves run on a serial background queue. Tests that assert on persisted state must call `flushPendingPersists()` first.
+- `SecretStore.replaceAll` upserts new items before pruning stale keys. Never reintroduce a clear-then-rewrite pass: the tunnel extension can resolve secrets concurrently and must never observe an empty keychain.
+- Tunnel-extension logging goes through `PacketTunnelProvider.writeTunnelLog`, which strips newlines so remote-proxy-controlled text cannot forge log entries; keep new log writes on that path.
+- The libbox service state in `PacketTunnelProvider` (`commandServer`, `lastRawConfig`, `configSecretNonce`, `lastConfigSecretsAreResolved`) is guarded by `serviceStateLock` and accessed from three threads. Never call into libbox while holding the lock — its callbacks can re-enter the provider and deadlock. Clear the state under the lock before tearing the server down.
+- Credential fields in editors (passwords, private keys) render as `SecureField` via `ProfileTextField(isSecure: true)`.
+- Pin GitHub Actions `uses:` references to commit SHAs with the tag in a trailing comment; do not move them back to mutable tags.
+
 ## Build and test commands
 
 Regenerate the project after `project.yml` changes:
