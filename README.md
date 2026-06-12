@@ -1,91 +1,70 @@
 # Hop
 
-Hop is an original iOS proxy/VPN client.
+iOS proxy client built on [sing-box](https://github.com/SagerNet/sing-box). SwiftUI app + Network Extension packet tunnel; the engine (libbox v1.13.12) is compiled from a pinned upstream commit and statically linked into the tunnel extension.
 
-The first implementation focuses on:
+There is no App Store build. You sideload it.
 
-- Secure modern outbound profiles: VLESS + REALITY, Trojan + TLS, Hysteria2 + TLS, TUIC + TLS, AnyTLS, Shadowsocks, VMess, HTTP, SOCKS, and WireGuard where sing-box supports them.
-- Shadowrocket-compatible imports for single links, plain/base64 subscriptions, and `.conf` files with `[Proxy]`, `[Proxy Group]`, and `[Rule]` sections — via paste, QR scan, or the `hop://import?url=…` / `hop://import?text=…` URL scheme (always routed through the preview-and-confirm import sheet).
-- Node export: per-node share links (copy with pasteboard expiry, system share sheet, or QR code) that round-trip through the importer.
-- Proxy groups with sing-box `selector` and `urltest` outbounds; unsupported imported group types are preserved disabled with warnings.
-- Routing rules that can target direct, reject, the active outbound, a specific node, or a proxy group.
-- Shared-container persistence for nodes, groups, subscriptions, rules, settings, tunnel startup config, and logs.
-- A native SwiftUI shell for dashboard, profile/group/subscription/import management, routing rules, logs, and settings — with node search, bulk latency testing, and optional foreground auto-refresh of stale subscriptions.
-- `NETunnelProviderManager` app-side tunnel setup with runtime App Group and embedded extension bundle ID resolution, optional Connect-On-Demand, and a kill switch.
+## Features
 
-Packet routing is handled by sing-box's `libbox` engine, compiled from source and embedded in `HopTunnel`. Build the engine once before generating the Xcode project (see Build).
+- **Protocols:** VLESS (+ REALITY), Trojan, Hysteria2, TUIC, Shadowsocks, VMess, HTTP, SOCKS, WireGuard, AnyTLS. Transports: TCP, WebSocket, gRPC, HTTPUpgrade, QUIC.
+- **Import:** share links, plain/base64 subscriptions, and Shadowrocket `.conf` (`[Proxy]`, `[Proxy Group]`, `[Rule]`) — by paste, QR scan, or URL scheme. Subscriptions refresh in place without duplicating nodes.
+- **Export:** per-node share links via copy (expiring pasteboard), share sheet, or QR. Links round-trip through the importer.
+- **Groups:** manual select and URL-test (sing-box `selector`/`urltest`).
+- **Rules:** domain/suffix/keyword/regex, IP CIDR, ports, geosite/geoip (remote rule-sets), network type, Wi-Fi SSID; targets can be a node, group, direct, reject, or the active outbound. Switchable rule configurations with prebuilt China/Iran bypass sets.
+- **Tunnel:** kill switch (`includeAllNetworks`), Connect On Demand, DoH presets, strict route, protocol sniffing.
+- **UI:** live traffic + per-connection telemetry, node search, bulk latency tests (TCP/TLS/ICMP), log viewer with export, optional auto-refresh of stale subscriptions on foreground.
+
+## Install
+
+1. Grab `Hop-unsigned.ipa` from [Releases](../../releases) (built by CI from a pinned engine commit; SHA-256 in the release notes) or build it yourself (below).
+2. Re-sign with your own certificate/profile (SideStore, AltStore, ESign, KSign, …).
+3. **Your signer must keep, on both `Hop.app` and the embedded `PlugIns/HopTunnel.appex`:**
+   - the App Group (`group.cat.string.hop`)
+   - the keychain access group (`<team-prefix>.cat.string.hop`)
+   - and on the **appex**: the `packet-tunnel-provider` Network Extension entitlement.
+
+   The IPA is ad-hoc fakesigned so each binary carries these entitlements for your signer to re-map. If the signer strips the appex or its entitlements, the VPN flips from connecting to disconnected immediately — that's the symptom. Free (non-developer) Apple IDs cannot sign the Network Extension entitlement; the app will run but the tunnel won't start.
+
+## URL scheme
+
+```
+hop://import?url=<https subscription url>
+hop://import?text=<percent-encoded links or config>
+```
+
+Payloads open the import preview; nothing is applied without confirmation.
 
 ## Build
 
-The tunnel needs the sing-box engine (`Libbox.xcframework`). Build it once — requires the Go toolchain and takes ~10–15 minutes:
+Requirements: Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen), Go 1.23+ (engine only).
 
 ```sh
-brew install go            # if needed; Go 1.23+ required
-./scripts/build-libbox.sh  # clones sing-box v1.13.12, builds Frameworks/Libbox.xcframework
-```
-
-`build-libbox.sh` pins both the release tag **and** the exact upstream commit it
-must resolve to, and refuses to build if the tag has moved. After building it
-records the engine's checksum in `Frameworks/Libbox.xcframework.sha256`. The
-Xcode build runs `scripts/verify-libbox.sh` as a pre-build step and fails if the
-vendored engine no longer matches that checksum, so the privileged tunnel binary
-has a tamper-evident provenance baseline. To verify the vendored engine manually:
-
-```sh
-./scripts/verify-libbox.sh            # verify against the checked-in checksum
-./scripts/verify-libbox.sh --update   # re-record after a reviewed engine update
-```
-
-Then generate and build the app:
-
-```sh
+./scripts/build-libbox.sh   # once: clones sing-box at a pinned tag+commit, ~10-15 min
 xcodegen generate
 xcodebuild -project Hop.xcodeproj -scheme Hop -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
-Run tests:
+Tests (no signing or device needed):
 
 ```sh
-xcodebuild test -project Hop.xcodeproj -scheme Hop -destination 'platform=iOS Simulator,id=<booted-simulator-udid>' CODE_SIGNING_ALLOWED=NO
+xcodebuild test -project Hop.xcodeproj -scheme Hop \
+  -destination 'platform=iOS Simulator,name=iPhone 17' CODE_SIGNING_ALLOWED=NO
 ```
 
-Real device VPN execution requires the sideload signer to preserve the App Group and keychain-access-group entitlements on **both** the app and the tunnel extension, the `packet-tunnel-provider` Network Extension entitlement on the **`HopTunnel.appex` extension** (the containing app does not need it), and to keep `HopTunnel.appex` (the sing-box engine is statically linked into it) enabled and re-signed.
+`build-libbox.sh` refuses to build if the upstream tag no longer resolves to the pinned commit, and records the engine's checksum in `Frameworks/Libbox.xcframework.sha256`; an Xcode pre-build step (`scripts/verify-libbox.sh`) fails the build if the vendored engine stops matching it. CI builds the engine from the same pinned commit and prints both digests in the run summary.
 
-## Security
+Packaging an unsigned IPA from the build is scripted in `.github/workflows/unsigned-ipa.yml` (and documented in `AGENTS.md`).
 
-Untrusted import data (pasted links, subscriptions, Shadowrocket `.conf`) is
-constrained by a single policy in `Hop/Services/ImportPolicy.swift`:
+## Security model
 
-- Subscriptions are fetched HTTPS-only and may not point at local, private,
-  link-local, or cloud-metadata addresses (basic SSRF protection), with a
-  request timeout and a response-size cap.
-- Payloads are bounded by total bytes, decoded bytes, line count, item count,
-  and base64 recursion depth.
-- Import-supplied regular expressions (`policy-regex-filter`, `DOMAIN-REGEX`)
-  are length-capped and compile-checked before use.
-- URL-test probe URLs are restricted to public hosts, and interval/tolerance
-  values are clamped to safe ranges before they reach the tunnel scheduler.
-- Profiles imported with TLS certificate verification disabled (`allowInsecure`)
-  surface a warning on import and a visible marker in the editor.
-- Parser warnings/logs are redacted so credentials in malformed links are never
-  persisted or exported.
+Short version — details live in `Hop/Services/ImportPolicy.swift`, `Shared/SecretStore.swift`, and the invariants section of `AGENTS.md`:
 
-Secrets — proxy passwords, UUIDs, WireGuard private keys, and REALITY keys — are
-stored in the iOS **Keychain** (`Shared/SecretStore.swift`), not in cleartext
-files. Persisted state holds only non-secret metadata; the generated sing-box
-config carries secret *references* (`Shared/SecretReference.swift`) that the
-packet-tunnel extension resolves from the shared Keychain at start time, so no
-credentials are written to disk or passed through IPC/provider configuration.
-The app and extension share these items through the
-`keychain-access-groups` entitlement (`$(AppIdentifierPrefix)cat.string.hop`),
-which a real-device signer must preserve alongside the App Group and Network
-Extension entitlements. Existing plaintext state is migrated into the Keychain
-automatically on first load.
+- **Secrets never touch disk.** Passwords, UUIDs, and private keys live in the iOS Keychain. Persisted state is secret-free; the generated sing-box config contains nonce-bound secret *references* that only the tunnel extension can resolve, so credentials don't cross IPC or land in provider configuration. Legacy plaintext state migrates automatically.
+- **Imports are treated as hostile.** Subscriptions are HTTPS-only with SSRF blocking (private/loopback/metadata hosts rejected, redirects re-validated), size/recursion/item caps, regex safety checks, clamped URL-test scheduling, and display-name sanitization. Saving any node that disables TLS verification — including new nodes arriving via subscription *refresh* — requires an explicit blocking confirmation, and refreshes can never silently downgrade an existing node's TLS posture.
+- **Logs can't be forged or leak credentials.** All log writes strip newlines; import warnings are redacted before logging; the shared tunnel log is size-rotated and file-protected.
 
-Persisted app state, the generated sing-box config, and the tunnel log are also
-written with `completeUntilFirstUserAuthentication` file protection as
-defense-in-depth, and the tunnel log is size-rotated.
+Found a hole? Open an issue.
 
-## Licensing
+## License
 
-The protocol engine is sing-box/libbox, which is GPL licensed. Hop is therefore intended to be distributed as GPL-3.0-or-later compatible source.
+[GPL-3.0-or-later](LICENSE) — required by the sing-box/libbox engine, and fine by us. Hop is original software; it does not copy Shadowrocket assets, branding, or metadata.
