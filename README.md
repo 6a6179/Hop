@@ -17,13 +17,21 @@ There is no App Store build. You sideload it.
 ## Install
 
 1. Grab `Hop-unsigned.ipa` from [Releases](../../releases) (built by CI from a pinned engine commit; SHA-256 in the release notes) or build it yourself (below).
-2. Re-sign with your own certificate/profile (SideStore, AltStore, ESign, KSign, …).
+2. Re-sign with a certificate whose provisioning can carry the `packet-tunnel-provider` Network Extension entitlement. Straight answer on what qualifies:
+
+   | Signing setup | Tunnel works? |
+   |---|---|
+   | Free Apple ID ("personal team" via AltStore/SideStore/Sideloadly) | **No.** Free provisioning cannot include Network Extension. The app launches; the VPN never connects. |
+   | Paid Apple Developer Program ($99/yr), incl. via AltStore/SideStore with that account | **Yes.** Enable the Network Extensions capability on the App ID — it's a standard capability, no Apple approval process since 2016. |
+   | Enterprise certificate (what paid signing services like ESign/KSign/Feather resell) | **Only if that specific cert's profile includes Network Extension.** Varies per cert — ask the seller for one that "supports VPN" before paying. |
+   | TrollStore (iOS versions with the CoreTrust bug) | **Yes** — entitlements aren't checked at all. |
+
 3. **Your signer must keep, on both `Hop.app` and the embedded `PlugIns/HopTunnel.appex`:**
    - the App Group (`group.cat.string.hop`)
    - the keychain access group (`<team-prefix>.cat.string.hop`)
    - and on the **appex**: the `packet-tunnel-provider` Network Extension entitlement.
 
-   The IPA is ad-hoc fakesigned so each binary carries these entitlements for your signer to re-map. If the signer strips the appex or its entitlements, the VPN flips from connecting to disconnected immediately — that's the symptom. Free (non-developer) Apple IDs cannot sign the Network Extension entitlement; the app will run but the tunnel won't start.
+   The IPA is ad-hoc fakesigned so each binary carries these entitlements for your signer to re-map. If the signer strips the appex or its entitlements — or your cert can't provide them — the VPN flips from connecting to disconnected immediately. That's the symptom.
 
 ## URL scheme
 
