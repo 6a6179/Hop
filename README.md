@@ -50,6 +50,8 @@ hop://import?text=<percent-encoded links or config>
 
 Every payload opens the import preview; nothing is applied without confirmation, and subscription URLs are never fetched until you ask. (`ssr://` links are recognized but unsupported — you get a clear message instead of silence.)
 
+**Scheme conflicts.** Custom URL schemes are first-come-first-serve on iOS: if another client that registers these schemes (Shadowrocket, Stash, V2Box, …) was installed before Hop, *it* keeps receiving the links — Apple's documentation says the target is undefined when schemes collide, there is no prompt and no Settings toggle to pick a handler, and in practice the earliest-installed app wins until it's uninstalled. When another app owns the schemes, use Hop's in-app QR scanner or paste import (which never involve the scheme system), or `hop://import?text=…` — the `hop://` scheme is Hop's own and stays deterministic. Note the flip side: any installed app registering these schemes can receive credential-bearing share links you tap; that risk is inherent to the ecosystem's ad-hoc schemes, not specific to Hop.
+
 ## Build
 
 Requirements: Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen), Go 1.23+ (engine only).
