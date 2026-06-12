@@ -68,12 +68,12 @@ struct ProxyImportService {
         }
 
         if looksLikeShadowrocketConfig(trimmed) {
-            return parseShadowrocketConfig(trimmed).truncated(to: ImportPolicy.maxImportedItems)
+            return parseShadowrocketConfig(trimmed).sanitizingNames().truncated(to: ImportPolicy.maxImportedItems)
         }
 
         let decoded = decodeBase64String(trimmed)
         if let decoded, looksLikeShadowrocketConfig(decoded) {
-            return parseShadowrocketConfig(decoded).truncated(to: ImportPolicy.maxImportedItems)
+            return parseShadowrocketConfig(decoded).sanitizingNames().truncated(to: ImportPolicy.maxImportedItems)
         }
 
         let lines = importLines(from: decoded ?? trimmed)
@@ -104,7 +104,7 @@ struct ProxyImportService {
             throw ProxyLinkParseError.noImportableItems
         }
 
-        return result.truncated(to: ImportPolicy.maxImportedItems)
+        return result.sanitizingNames().truncated(to: ImportPolicy.maxImportedItems)
     }
 
     func importSubscription(url: URL) async throws -> ImportResult {
@@ -191,6 +191,10 @@ struct ProxyImportService {
         let password = try requiredUser(components)
         let endpoint = try endpoint(from: components)
         let query = Query(components)
+        // Hysteria2 runs over QUIC and always uses TLS; sing-box rejects the
+        // whole config for a hysteria2 outbound without one. Links commonly
+        // omit an explicit security parameter, so default to TLS on the host.
+        let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
 
         return ProxyProfile(
             name: displayName(from: components, fallback: "Hysteria2 \(endpoint.host)"),
@@ -203,7 +207,7 @@ struct ProxyImportService {
                     obfsPassword: query["obfs-password"] ?? query["obfs_password"] ?? query["obfsParam"],
                 ),
             ),
-            security: parseSecurity(query: query, fallbackServerName: endpoint.host),
+            security: security.layer == .none ? .tls(TLSOptions(serverName: endpoint.host)) : security,
             transport: .tcp,
         )
     }
@@ -215,6 +219,9 @@ struct ProxyImportService {
         }
         let endpoint = try endpoint(from: components)
         let query = Query(components)
+        // TUIC is QUIC-based like Hysteria2: TLS is mandatory in sing-box, so
+        // default it in when the link doesn't say otherwise.
+        let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
 
         return ProxyProfile(
             name: displayName(from: components, fallback: "TUIC \(endpoint.host)"),
@@ -227,7 +234,7 @@ struct ProxyImportService {
                     congestionControl: query["congestion_control"] ?? query["congestionControl"],
                 ),
             ),
-            security: parseSecurity(query: query, fallbackServerName: endpoint.host),
+            security: security.layer == .none ? .tls(TLSOptions(serverName: endpoint.host)) : security,
             transport: .tcp,
         )
     }

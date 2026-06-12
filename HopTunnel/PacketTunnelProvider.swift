@@ -180,11 +180,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             try server.startOrReloadService(resolved, options: LibboxOverrideOptions())
         }
 
-        /// Resolves secret tokens from the shared Keychain in memory and fails
-        /// closed if any nonce-matching token is unresolvable — that means the
-        /// shared Keychain is unreachable (e.g. the keychain-access-groups
-        /// entitlement was dropped during signing), and starting anyway would
-        /// run the tunnel with blank credentials.
+        /// Invoked by libbox's `serviceStop` command. Stops the sing-box
+        /// service but keeps the command server (the socket) and the retained
+        /// config/nonce alive: the server is not being torn down — a later
+        /// `serviceReload` legitimately restarts the service from the retained
+        /// state. Full teardown (close + clear state) happens only in
+        /// `stopTunnel`.
         func stopService() {
             serviceStateLock.lock()
             let server = commandServer
@@ -224,6 +225,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         }
     #endif
 
+    /// Resolves secret tokens from the shared Keychain in memory and fails
+    /// closed if any nonce-matching token is unresolvable — that means the
+    /// shared Keychain is unreachable (e.g. the keychain-access-groups
+    /// entitlement was dropped during signing), and starting anyway would
+    /// run the tunnel with blank credentials.
     private func resolveConfig(rawConfig: String, nonce: String, secretsAreResolved: Bool) throws -> String {
         guard !secretsAreResolved else {
             return rawConfig

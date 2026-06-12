@@ -271,6 +271,36 @@ enum ImportPolicy {
         min(max(milliseconds, minURLTestToleranceMilliseconds), maxURLTestToleranceMilliseconds)
     }
 
+    // MARK: - Display-name hygiene
+
+    /// Maximum length kept from an imported display name.
+    static let maxImportedNameLength = 80
+
+    /// Cleans an attacker-controllable display name for rendering in lists,
+    /// logs, and — critically — the blocking allow-insecure confirmation
+    /// alert: collapses all whitespace runs to single spaces, strips control
+    /// and invisible Unicode formatting characters (bidirectional overrides
+    /// like U+202E can visually reverse alert text, zero-width characters can
+    /// hide it — CWE-451), and caps the length so one name can't push the
+    /// rest of an alert off screen.
+    static func sanitizeImportedName(_ name: String, fallback: String = "Imported") -> String {
+        let collapsed = name
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        var cleaned = String.UnicodeScalarView()
+        for scalar in collapsed.unicodeScalars {
+            switch scalar.properties.generalCategory {
+            case .control, .format, .surrogate, .privateUse, .unassigned:
+                continue
+            default:
+                cleaned.append(scalar)
+            }
+        }
+        let capped = String(String(cleaned).prefix(maxImportedNameLength))
+            .trimmingCharacters(in: .whitespaces)
+        return capped.isEmpty ? fallback : capped
+    }
+
     // MARK: - Redaction
 
     /// Produces a credential-free description of an import line for warnings and

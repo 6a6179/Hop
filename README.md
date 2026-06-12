@@ -5,12 +5,13 @@ Hop is an original iOS proxy/VPN client.
 The first implementation focuses on:
 
 - Secure modern outbound profiles: VLESS + REALITY, Trojan + TLS, Hysteria2 + TLS, TUIC + TLS, AnyTLS, Shadowsocks, VMess, HTTP, SOCKS, and WireGuard where sing-box supports them.
-- Shadowrocket-compatible imports for single links, plain/base64 subscriptions, and `.conf` files with `[Proxy]`, `[Proxy Group]`, and `[Rule]` sections.
+- Shadowrocket-compatible imports for single links, plain/base64 subscriptions, and `.conf` files with `[Proxy]`, `[Proxy Group]`, and `[Rule]` sections — via paste, QR scan, or the `hop://import?url=…` / `hop://import?text=…` URL scheme (always routed through the preview-and-confirm import sheet).
+- Node export: per-node share links (copy with pasteboard expiry, system share sheet, or QR code) that round-trip through the importer.
 - Proxy groups with sing-box `selector` and `urltest` outbounds; unsupported imported group types are preserved disabled with warnings.
 - Routing rules that can target direct, reject, the active outbound, a specific node, or a proxy group.
 - Shared-container persistence for nodes, groups, subscriptions, rules, settings, tunnel startup config, and logs.
-- A native SwiftUI shell for dashboard, profile/group/subscription/import management, routing rules, logs, and settings.
-- `NETunnelProviderManager` app-side tunnel setup with runtime App Group and embedded extension bundle ID resolution.
+- A native SwiftUI shell for dashboard, profile/group/subscription/import management, routing rules, logs, and settings — with node search, bulk latency testing, and optional foreground auto-refresh of stale subscriptions.
+- `NETunnelProviderManager` app-side tunnel setup with runtime App Group and embedded extension bundle ID resolution, optional Connect-On-Demand, and a kill switch.
 
 Packet routing is handled by sing-box's `libbox` engine, compiled from source and embedded in `HopTunnel`. Build the engine once before generating the Xcode project (see Build).
 

@@ -27,6 +27,23 @@ struct SubscriptionRefreshMerger {
         mergeGroups(result.groups, importedProfileIDMap: profileIDMap)
     }
 
+    /// Names of imported nodes that would *newly* disable TLS certificate
+    /// verification if this refresh were applied: allow-insecure nodes with no
+    /// name+protocol match among the existing profiles. A matched node is
+    /// never newly insecure — if the existing profile is already insecure
+    /// nothing changes, and if it is secure `securityPreservingDowngrades`
+    /// blocks the flip (and logs the refusal). Only genuinely new nodes are
+    /// inserted verbatim, so refresh flows must run the blocking insecure-TLS
+    /// confirmation for these, same as initial imports (see the AGENTS.md
+    /// import-gate invariant).
+    static func newInsecureProfileNames(existing: [ProxyProfile], imported: [ProxyProfile]) -> [String] {
+        let existingNameAndProtocols = Set(existing.map { NameAndProtocol($0) })
+        return imported
+            .filter { $0.security.tls?.allowInsecure == true }
+            .filter { !existingNameAndProtocols.contains(NameAndProtocol($0)) }
+            .map(\.name)
+    }
+
     // MARK: - Profiles
 
     private mutating func mergeProfiles(_ importedProfiles: [ProxyProfile]) -> [ProxyProfile.ID: ProxyProfile.ID] {
@@ -95,6 +112,19 @@ struct SubscriptionRefreshMerger {
             security.tls?.allowInsecure = false
             securityDowngradeWarnings.append(
                 "Refresh tried to disable TLS certificate verification for \(imported.name); kept verification enabled.",
+            )
+        }
+
+        // A changed REALITY public key re-targets which server the client
+        // authenticates. Key rotation is legitimate, so the change applies —
+        // but never silently: the log names the node so an unexpected swap
+        // pushed by the subscription server is visible to the user.
+        if let existingKey = existing.security.reality?.publicKey,
+           let importedKey = security.reality?.publicKey,
+           !existingKey.isEmpty, existingKey != importedKey
+        {
+            securityDowngradeWarnings.append(
+                "Refresh changed the REALITY public key for \(imported.name). If you did not expect a key rotation from this provider, re-verify the node.",
             )
         }
 
@@ -279,6 +309,19 @@ struct SubscriptionRefreshMerger {
 
     private func normalizedImportName(_ name: String) -> String {
         name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}
+
+/// The merger's second-tier match key: a refreshed node is "the same node" as
+/// an existing one when name and protocol agree, even if host or credentials
+/// moved. Used by `newInsecureProfileNames` to mirror the merge's matching.
+private struct NameAndProtocol: Hashable {
+    var name: String
+    var proto: ProxyProtocol
+
+    init(_ profile: ProxyProfile) {
+        name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        proto = profile.proto
     }
 }
 

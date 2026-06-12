@@ -42,6 +42,8 @@ struct HopAppData: Codable {
 struct HopAppDataStore {
     var url: URL = RuntimeEnvironment.stateFileURL
     var secretStore: SecretStore = .shared
+    /// Shared across value copies of this store; see `SecretWriteCache`.
+    private let secretWriteCache = SecretWriteCache()
 
     func load() -> HopAppData? {
         guard let data = try? Data(contentsOf: url),
@@ -63,8 +65,23 @@ struct HopAppDataStore {
     func save(_ data: HopAppData) {
         do {
             // Move secrets into the Keychain and strip them from the JSON so
-            // credentials, UUIDs, and private keys are never written in cleartext.
-            secretStore.replaceAll(with: data.profiles.flatMap(\.keychainSecretItems))
+            // credentials, UUIDs, and private keys are never written in
+            // cleartext. `replaceAll` costs one Keychain round-trip per secret
+            // plus an enumerate-and-prune pass — with hundreds of imported
+            // profiles that dominates every save — so it runs only when the
+            // secret set actually changed since the last write. Most saves
+            // (log updates, settings, rule edits) change no secret at all.
+            // The first save after launch always writes, so a Keychain that
+            // drifted while the app was not running heals on next persist.
+            let secretItems = data.profiles.flatMap(\.keychainSecretItems)
+            if secretWriteCache.changedSinceLastWrite(secretItems) {
+                if !secretStore.replaceAll(with: secretItems) {
+                    // A write failed inside the Keychain. Drop the cache so the
+                    // next save retries the full set instead of skipping forever
+                    // on a state that never actually landed.
+                    secretWriteCache.invalidate()
+                }
+            }
             var redacted = data
             redacted.profiles = data.profiles.map { $0.redactingSecrets() }
 
@@ -75,6 +92,38 @@ struct HopAppDataStore {
         } catch {
             assertionFailure("Unable to persist Hop app data: \(error)")
         }
+    }
+}
+
+/// Remembers the secret set most recently handed to `SecretStore.replaceAll`
+/// so unchanged saves can skip the Keychain entirely. A reference type shared
+/// across value copies of `HopAppDataStore`; saves are serialized on
+/// `HopStore`'s persist queue, and the lock covers the one load-time migration
+/// save that runs before that queue is in play.
+private final class SecretWriteCache: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lastWritten: [String: String]?
+
+    /// Records `items` as the latest intended Keychain state and reports
+    /// whether they differ from the previous write (always true for the first).
+    func changedSinceLastWrite(_ items: [(key: String, value: String)]) -> Bool {
+        let dictionary = Dictionary(items, uniquingKeysWith: { _, last in last })
+        lock.lock()
+        defer { lock.unlock() }
+        if lastWritten == dictionary {
+            return false
+        }
+        lastWritten = dictionary
+        return true
+    }
+
+    /// Forgets the recorded state after a failed Keychain write, so the next
+    /// save runs `replaceAll` again rather than treating the failed state as
+    /// already written.
+    func invalidate() {
+        lock.lock()
+        defer { lock.unlock() }
+        lastWritten = nil
     }
 }
 

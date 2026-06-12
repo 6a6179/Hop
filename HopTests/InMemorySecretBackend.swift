@@ -22,16 +22,20 @@ final class InMemorySecretBackend: SecretBackend, @unchecked Sendable {
         return storage[key]
     }
 
-    func setValue(_ value: String, forKey key: String) {
+    @discardableResult
+    func setValue(_ value: String, forKey key: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         storage[key] = value
+        return true
     }
 
-    func removeValue(forKey key: String) {
+    @discardableResult
+    func removeValue(forKey key: String) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         storage[key] = nil
+        return true
     }
 
     func removeAll() {
@@ -53,5 +57,40 @@ extension SecretStore {
     /// A fresh, isolated in-memory store for tests.
     static func inMemory() -> SecretStore {
         SecretStore(backend: InMemorySecretBackend())
+    }
+}
+
+/// Backend whose first `setValue` fails (returning false and storing nothing),
+/// for exercising the secret-write retry path in `HopAppDataStore`.
+final class FailOnceSecretBackend: SecretBackend, @unchecked Sendable {
+    private let inner = InMemorySecretBackend()
+    private let lock = NSLock()
+    private var didFail = false
+
+    func value(forKey key: String) -> String? {
+        inner.value(forKey: key)
+    }
+
+    func setValue(_ value: String, forKey key: String) -> Bool {
+        lock.lock()
+        let shouldFail = !didFail
+        didFail = true
+        lock.unlock()
+        if shouldFail {
+            return false
+        }
+        return inner.setValue(value, forKey: key)
+    }
+
+    func removeValue(forKey key: String) -> Bool {
+        inner.removeValue(forKey: key)
+    }
+
+    func removeAll() {
+        inner.removeAll()
+    }
+
+    func allKeys() -> [String] {
+        inner.allKeys()
     }
 }

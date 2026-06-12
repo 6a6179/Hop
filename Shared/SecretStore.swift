@@ -6,8 +6,13 @@ import Security
 /// unsigned simulator unit tests).
 protocol SecretBackend: Sendable {
     func value(forKey key: String) -> String?
-    func setValue(_ value: String, forKey key: String)
-    func removeValue(forKey key: String)
+    /// Returns whether the write landed in the backing store, so callers that
+    /// cache "already written" state (`HopAppDataStore`) can retry after a
+    /// silent Keychain failure instead of skipping forever.
+    func setValue(_ value: String, forKey key: String) -> Bool
+    /// Returns whether the key is absent afterwards (deleting a missing key
+    /// counts as success).
+    func removeValue(forKey key: String) -> Bool
     func removeAll()
     /// All stored keys; lets `replaceAll` prune stale items without a blanket
     /// delete-everything-first pass.
@@ -50,11 +55,13 @@ struct SecretStore {
         backend.value(forKey: key)
     }
 
-    func setValue(_ value: String, forKey key: String) {
+    @discardableResult
+    func setValue(_ value: String, forKey key: String) -> Bool {
         backend.setValue(value, forKey: key)
     }
 
-    func removeValue(forKey key: String) {
+    @discardableResult
+    func removeValue(forKey key: String) -> Bool {
         backend.removeValue(forKey: key)
     }
 
@@ -68,14 +75,18 @@ struct SecretStore {
     /// readable throughout — the Keychain has no cross-item transactions, and a
     /// clear-then-rewrite pass would give the tunnel extension a window where
     /// `SecretResolver` finds nothing and fails a concurrent start/reload.
-    func replaceAll(with items: [(key: String, value: String)]) {
+    /// Returns false if any write or prune failed; the set may then be partial.
+    @discardableResult
+    func replaceAll(with items: [(key: String, value: String)]) -> Bool {
+        var allSucceeded = true
         for item in items {
-            backend.setValue(item.value, forKey: item.key)
+            allSucceeded = backend.setValue(item.value, forKey: item.key) && allSucceeded
         }
         let keep = Set(items.map(\.key))
         for key in backend.allKeys() where !keep.contains(key) {
-            backend.removeValue(forKey: key)
+            allSucceeded = backend.removeValue(forKey: key) && allSucceeded
         }
+        return allSucceeded
     }
 
     // MARK: - Command-server secret
@@ -150,16 +161,16 @@ struct KeychainSecretBackend: SecretBackend {
         read(account: key, includeGroup: accessGroup != nil)
     }
 
-    func setValue(_ value: String, forKey key: String) {
+    func setValue(_ value: String, forKey key: String) -> Bool {
         write(account: key, data: Data(value.utf8), includeGroup: accessGroup != nil)
     }
 
-    func removeValue(forKey key: String) {
+    func removeValue(forKey key: String) -> Bool {
         delete(account: key, includeGroup: accessGroup != nil)
     }
 
     func removeAll() {
-        delete(account: nil, includeGroup: accessGroup != nil)
+        _ = delete(account: nil, includeGroup: accessGroup != nil)
     }
 
     func allKeys() -> [String] {
@@ -200,7 +211,7 @@ struct KeychainSecretBackend: SecretBackend {
         return String(data: data, encoding: .utf8)
     }
 
-    private func write(account: String, data: Data, includeGroup: Bool) {
+    private func write(account: String, data: Data, includeGroup: Bool) -> Bool {
         let query = baseQuery(account: account, includeGroup: includeGroup)
         // Set the accessibility on update as well as add, so an item created
         // with a weaker class by an earlier build can't survive a value rewrite
@@ -219,17 +230,20 @@ struct KeychainSecretBackend: SecretBackend {
 
         if status == errSecMissingEntitlement, includeGroup {
             _ = Self.didLogEntitlementFallback
-            write(account: account, data: data, includeGroup: false)
+            return write(account: account, data: data, includeGroup: false)
         }
+        return status == errSecSuccess
     }
 
-    private func delete(account: String?, includeGroup: Bool) {
+    private func delete(account: String?, includeGroup: Bool) -> Bool {
         let query = baseQuery(account: account, includeGroup: includeGroup)
         let status = SecItemDelete(query as CFDictionary)
         if status == errSecMissingEntitlement, includeGroup {
             _ = Self.didLogEntitlementFallback
-            delete(account: account, includeGroup: false)
+            return delete(account: account, includeGroup: false)
         }
+        // Deleting something already gone is the desired end state.
+        return status == errSecSuccess || status == errSecItemNotFound
     }
 
     private func baseQuery(account: String?, includeGroup: Bool) -> [String: Any] {

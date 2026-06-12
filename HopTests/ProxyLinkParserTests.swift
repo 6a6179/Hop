@@ -216,6 +216,22 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(encoded.profiles.map(\.name), ["One", "Two"])
     }
 
+    // MARK: - Default TLS for Hysteria2 and TUIC (regression)
+
+    func testHysteria2WithoutSecurityParamDefaultsToTLS() throws {
+        // No `security=` or `sni=` or `tls=` param — just the bare minimum
+        let profile = try parser.parse("hysteria2://pass@example.com:443#n")
+        XCTAssertEqual(profile.security.layer, .tls, "hysteria2 with no security param must default to TLS")
+        XCTAssertEqual(profile.security.tls?.serverName, "example.com", "server name must default to the host")
+    }
+
+    func testTUICWithoutSecurityParamDefaultsToTLS() throws {
+        // tuic:// requires uuid:password in user info
+        let profile = try parser.parse("tuic://22222222-2222-4222-8222-222222222222:pass@example.com:443#n")
+        XCTAssertEqual(profile.security.layer, .tls, "tuic with no security param must default to TLS")
+        XCTAssertEqual(profile.security.tls?.serverName, "example.com", "server name must default to the host")
+    }
+
     func testParsesWrappedAndUnpaddedBase64Subscriptions() throws {
         // Byte count chosen so the base64 form needs padding ("==") — that is
         // the case the padding computation must get right.

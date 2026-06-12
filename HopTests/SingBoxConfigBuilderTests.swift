@@ -451,6 +451,110 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         XCTAssertEqual(globalServers.first?["detour"] as? String, proxyTag(SampleData.trojanTLS), "proxied modes keep the DNS detour")
     }
 
+    // MARK: - TLS-required guards (TUIC, Hysteria2, AnyTLS, QUIC transport)
+
+    func testTUICWithNoSecurityThrowsWhenDirectlySelected() {
+        let profile = tuicNoTLSProfile()
+        XCTAssertThrowsError(try builder.build(profile: profile, routingMode: .global, rules: [])) { error in
+            guard case let SingBoxConfigError.unsupportedProfile(reason) = error else {
+                return XCTFail("Expected .unsupportedProfile, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("TUIC") || reason.contains("TLS"), "reason must mention TUIC and TLS requirement")
+        }
+    }
+
+    func testHysteria2WithNoSecurityThrowsWhenDirectlySelected() {
+        let profile = hysteria2NoTLSProfile()
+        XCTAssertThrowsError(try builder.build(profile: profile, routingMode: .global, rules: [])) { error in
+            guard case let SingBoxConfigError.unsupportedProfile(reason) = error else {
+                return XCTFail("Expected .unsupportedProfile, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("Hysteria2") || reason.contains("TLS"), "reason must mention Hysteria2 and TLS requirement")
+        }
+    }
+
+    func testAnyTLSWithNoSecurityThrowsWhenDirectlySelected() {
+        let profile = anyTLSNoTLSProfile()
+        XCTAssertThrowsError(try builder.build(profile: profile, routingMode: .global, rules: [])) { error in
+            guard case let SingBoxConfigError.unsupportedProfile(reason) = error else {
+                return XCTFail("Expected .unsupportedProfile, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("AnyTLS") || reason.contains("TLS"), "reason must mention AnyTLS and TLS requirement")
+        }
+    }
+
+    func testQUICTransportWithNoSecurityThrowsWhenDirectlySelected() {
+        let profile = quicTransportNoTLSProfile()
+        XCTAssertThrowsError(try builder.build(profile: profile, routingMode: .global, rules: [])) { error in
+            guard case let SingBoxConfigError.unsupportedProfile(reason) = error else {
+                return XCTFail("Expected .unsupportedProfile, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("QUIC") || reason.contains("TLS"), "reason must mention QUIC and TLS requirement")
+        }
+    }
+
+    func testTUICWithNoSecurityIsSkippedInMultiProfileBuild() throws {
+        let unsupported = tuicNoTLSProfile()
+        let selected = SampleData.trojanTLS
+
+        let json = try builder.build(
+            profiles: [unsupported, selected],
+            groups: [],
+            selectedTarget: .profile(selected.id),
+            routingMode: .global,
+            rules: [],
+        )
+        let root = try XCTUnwrap(parse(json))
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+
+        XCTAssertNil(outbounds.first { $0["tag"] as? String == proxyTag(unsupported) }, "no-TLS TUIC must be silently skipped in multi-profile build")
+        XCTAssertNotNil(outbounds.first { $0["tag"] as? String == proxyTag(selected) })
+        try assertNoDanglingOutboundReferences(root)
+    }
+
+    func testHysteria2WithNoSecurityIsSkippedInMultiProfileBuild() throws {
+        let unsupported = hysteria2NoTLSProfile()
+        let selected = SampleData.trojanTLS
+
+        let json = try builder.build(
+            profiles: [unsupported, selected],
+            groups: [],
+            selectedTarget: .profile(selected.id),
+            routingMode: .global,
+            rules: [],
+        )
+        let root = try XCTUnwrap(parse(json))
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+
+        XCTAssertNil(outbounds.first { $0["tag"] as? String == proxyTag(unsupported) }, "no-TLS Hysteria2 must be silently skipped in multi-profile build")
+        XCTAssertNotNil(outbounds.first { $0["tag"] as? String == proxyTag(selected) })
+        try assertNoDanglingOutboundReferences(root)
+    }
+
+    // MARK: - WireGuard preSharedKey
+
+    func testWireGuardEmitsPreSharedKeyWhenSet() throws {
+        let profile = wireGuardProfileWithPreSharedKey("PRESHAREDKEY")
+
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let root = try XCTUnwrap(parse(json))
+        let endpoints = try XCTUnwrap(root["endpoints"] as? [[String: Any]])
+        let peer = try XCTUnwrap((endpoints.first?["peers"] as? [[String: Any]])?.first)
+
+        XCTAssertEqual(peer["pre_shared_key"] as? String, "PRESHAREDKEY")
+    }
+
+    func testWireGuardOmitsPreSharedKeyWhenNil() throws {
+        let profile = wireGuardProfile() // no preSharedKey
+
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let root = try XCTUnwrap(parse(json))
+        let endpoints = try XCTUnwrap(root["endpoints"] as? [[String: Any]])
+        let peer = try XCTUnwrap((endpoints.first?["peers"] as? [[String: Any]])?.first)
+
+        XCTAssertNil(peer["pre_shared_key"], "pre_shared_key must be omitted when nil")
+    }
+
     func testCredentiallessHTTPOutboundOmitsUsernameAndPassword() throws {
         // Optional-through-subscript assignment must drop nil credentials from
         // the outbound dictionary entirely (a wrapped Optional would fail
@@ -490,6 +594,62 @@ final class SingBoxConfigBuilderTests: XCTestCase {
                 privateKey: "PRIVATEKEY",
                 peerPublicKey: "PEERPUBLICKEY",
                 localAddress: ["10.0.0.2", "fd00::2/128"],
+            )),
+            security: .none,
+        )
+    }
+
+    private func tuicNoTLSProfile() -> ProxyProfile {
+        ProxyProfile(
+            name: "TUIC No TLS",
+            endpoint: Endpoint(host: "tuic.example.net", port: 443),
+            proto: .tuic,
+            options: .tuic(TUICOptions(uuid: "22222222-2222-4222-8222-222222222222", password: "secret", congestionControl: "bbr")),
+            security: .none,
+        )
+    }
+
+    private func hysteria2NoTLSProfile() -> ProxyProfile {
+        ProxyProfile(
+            name: "Hysteria2 No TLS",
+            endpoint: Endpoint(host: "hy2.example.net", port: 443),
+            proto: .hysteria2,
+            options: .hysteria2(Hysteria2Options(password: "secret")),
+            security: .none,
+        )
+    }
+
+    private func anyTLSNoTLSProfile() -> ProxyProfile {
+        ProxyProfile(
+            name: "AnyTLS No TLS",
+            endpoint: Endpoint(host: "anytls.example.net", port: 443),
+            proto: .anyTLS,
+            options: .anyTLS(AnyTLSOptions(password: "secret")),
+            security: .none,
+        )
+    }
+
+    private func quicTransportNoTLSProfile() -> ProxyProfile {
+        ProxyProfile(
+            name: "VLESS QUIC No TLS",
+            endpoint: Endpoint(host: "quic.example.net", port: 443),
+            proto: .vless,
+            options: .vless(VLESSOptions(uuid: "11111111-1111-4111-8111-111111111111")),
+            security: .none,
+            transport: TransportOptions(type: .quic),
+        )
+    }
+
+    private func wireGuardProfileWithPreSharedKey(_ preSharedKey: String) -> ProxyProfile {
+        ProxyProfile(
+            name: "WG PSK Node",
+            endpoint: Endpoint(host: "wg.example.net", port: 51820),
+            proto: .wireGuard,
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "PRIVATEKEY",
+                peerPublicKey: "PEERPUBLICKEY",
+                preSharedKey: preSharedKey,
+                localAddress: ["10.0.0.2/32"],
             )),
             security: .none,
         )

@@ -65,7 +65,9 @@ struct ProfileEditorView: View {
         Section("Credentials") {
             switch draft.proto {
             case .vless:
-                ProfileTextField("UUID", text: $draft.vlessUUID)
+                // UUIDs are bearer credentials (possession authenticates), so
+                // they get the same SecureField treatment as passwords.
+                ProfileTextField("UUID", text: $draft.vlessUUID, isSecure: true)
                 ProfileTextField("Flow", text: $draft.vlessFlow, prompt: "xtls-rprx-vision")
                 ProfileTextField("Encryption/Auth", text: $draft.vlessEncryption, prompt: "none")
                 if draft.hasVLESSEncryption {
@@ -80,14 +82,14 @@ struct ProfileEditorView: View {
                 ProfileTextField("Obfuscation", text: $draft.hysteriaObfs, prompt: "salamander")
                 ProfileTextField("Obfs Password", text: $draft.hysteriaObfsPassword, isSecure: true)
             case .tuic:
-                ProfileTextField("UUID", text: $draft.tuicUUID)
+                ProfileTextField("UUID", text: $draft.tuicUUID, isSecure: true)
                 ProfileTextField("Password", text: $draft.tuicPassword, isSecure: true)
                 ProfileTextField("Congestion Control", text: $draft.tuicCongestionControl, prompt: "bbr")
             case .shadowsocks:
                 ProfileTextField("Method", text: $draft.shadowsocksMethod, prompt: "2022-blake3-aes-128-gcm")
                 ProfileTextField("Password", text: $draft.shadowsocksPassword, isSecure: true)
             case .vmess:
-                ProfileTextField("UUID", text: $draft.vmessUUID)
+                ProfileTextField("UUID", text: $draft.vmessUUID, isSecure: true)
                 ProfileTextField("Security", text: $draft.vmessSecurity, prompt: "auto")
                 ProfileTextField("Alter ID", text: $draft.vmessAlterID, prompt: "0", keyboardType: .numberPad)
             case .http:
@@ -99,6 +101,7 @@ struct ProfileEditorView: View {
             case .wireGuard:
                 ProfileTextField("Private Key", text: $draft.wireGuardPrivateKey, isSecure: true)
                 ProfileTextField("Peer Public Key", text: $draft.wireGuardPeerPublicKey)
+                ProfileTextField("Pre-Shared Key", text: $draft.wireGuardPreSharedKey, prompt: "optional", isSecure: true)
                 ProfileTextField("Local Addresses", text: $draft.wireGuardLocalAddresses, prompt: "10.0.0.2/32, fd00::2/128")
             case .anyTLS:
                 ProfileTextField("Password", text: $draft.anyTLSPassword, isSecure: true)
@@ -119,7 +122,7 @@ struct ProfileEditorView: View {
                 Label("No TLS or REALITY will be configured.", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.secondary)
             case .tls:
-                ProfileTextField("Server Name / SNI", text: $draft.tlsServerName)
+                ProfileTextField("SNI", text: $draft.tlsServerName, prompt: "example.com")
                 MultiSelectMenu("ALPN", options: ProfileEditorChoices.alpn, selection: $draft.tlsALPN)
                 UTLSFingerprintPicker(selection: $draft.tlsFingerprint)
                 Toggle("Allow Insecure", isOn: $draft.tlsAllowInsecure)
@@ -131,7 +134,7 @@ struct ProfileEditorView: View {
             case .reality:
                 ProfileTextField("Public Key", text: $draft.realityPublicKey)
                 ProfileTextField("Short ID", text: $draft.realityShortID)
-                ProfileTextField("Server Name / SNI", text: $draft.realityServerName)
+                ProfileTextField("SNI", text: $draft.realityServerName, prompt: "camouflage domain")
                 ProfileTextField("SpiderX (spx)", text: $draft.realitySpiderX, prompt: "/")
                 ProfileTextField("ML-DSA-65 Verify", text: $draft.realityMLDSA65Verify)
                 if draft.hasRealityMLDSA65Verify {
@@ -196,7 +199,14 @@ struct ProfileTextField: View {
     }
 
     var body: some View {
-        LabeledContent(title) {
+        // A plain HStack, not LabeledContent: LabeledContent wraps the value
+        // onto its own full-width line when label + value don't fit, so long
+        // values (hosts, keys) made rows grow to two lines. Here the row is
+        // always one line — the label keeps its natural size and the field
+        // squeezes and truncates in the middle instead.
+        HStack(spacing: 12) {
+            Text(title)
+                .fixedSize(horizontal: true, vertical: false)
             field
                 .multilineTextAlignment(.trailing)
                 .keyboardType(keyboardType)
@@ -204,7 +214,7 @@ struct ProfileTextField: View {
                 .autocorrectionDisabled(autocorrectionDisabled)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: 220)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 
@@ -344,6 +354,7 @@ private struct ProfileEditorDraft {
     var socksPassword = ""
     var wireGuardPrivateKey = ""
     var wireGuardPeerPublicKey = ""
+    var wireGuardPreSharedKey = ""
     var wireGuardLocalAddresses = ""
     var anyTLSPassword = ""
 
@@ -404,6 +415,7 @@ private struct ProfileEditorDraft {
         case let .wireGuard(options):
             wireGuardPrivateKey = options.privateKey
             wireGuardPeerPublicKey = options.peerPublicKey
+            wireGuardPreSharedKey = options.preSharedKey ?? ""
             wireGuardLocalAddresses = options.localAddress.joined(separator: ", ")
         case let .anyTLS(options):
             anyTLSPassword = options.password
@@ -470,6 +482,21 @@ private struct ProfileEditorDraft {
         if securityLayer == .reality, trimmed(realityPublicKey).isEmpty {
             return "REALITY public key is required."
         }
+        if securityLayer == .reality, trimmed(realityServerName).isEmpty {
+            return "REALITY requires an SNI — the camouflage domain the handshake presents."
+        }
+        // sing-box requires TLS for QUIC-based outbounds and the QUIC
+        // transport; without this guard the engine rejects the whole config at
+        // connect time with no actionable message.
+        if proto == .tuic || proto == .hysteria2 || proto == .anyTLS, securityLayer == .none {
+            return "\(proto.displayName) requires TLS or REALITY security."
+        }
+        if transportType == .quic, securityLayer == .none {
+            return "QUIC transport requires TLS or REALITY security."
+        }
+        if proto == .hysteria2, !trimmed(hysteriaObfs).isEmpty, trimmed(hysteriaObfsPassword).isEmpty {
+            return "Hysteria2 obfuscation requires an obfs password."
+        }
 
         return nil
     }
@@ -509,7 +536,7 @@ private struct ProfileEditorDraft {
         case .socks:
             .socks(SOCKSOptions(username: optional(socksUsername), password: optional(socksPassword)))
         case .wireGuard:
-            .wireGuard(WireGuardOptions(privateKey: trimmed(wireGuardPrivateKey), peerPublicKey: trimmed(wireGuardPeerPublicKey), localAddress: list(from: wireGuardLocalAddresses)))
+            .wireGuard(WireGuardOptions(privateKey: trimmed(wireGuardPrivateKey), peerPublicKey: trimmed(wireGuardPeerPublicKey), preSharedKey: optional(wireGuardPreSharedKey), localAddress: list(from: wireGuardLocalAddresses)))
         case .anyTLS:
             .anyTLS(AnyTLSOptions(password: trimmed(anyTLSPassword)))
         }

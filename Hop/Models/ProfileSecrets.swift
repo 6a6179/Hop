@@ -8,6 +8,7 @@ enum ProfileSecretField: String, CaseIterable {
     case password
     case obfsPassword
     case privateKey
+    case preSharedKey
     case realityPublicKey
     case realityShortID
     case realityMLDSA65Verify
@@ -39,6 +40,7 @@ extension ProxyProfile {
             values[.password] = options.password
         case let .wireGuard(options):
             values[.privateKey] = options.privateKey
+            values[.preSharedKey] = options.preSharedKey
         case let .anyTLS(options):
             values[.password] = options.password
         }
@@ -118,6 +120,7 @@ extension ProxyProfile {
             copy.options = .wireGuard(WireGuardOptions(
                 privateKey: transform(.privateKey, options.privateKey),
                 peerPublicKey: options.peerPublicKey,
+                preSharedKey: options.preSharedKey.map { transform(.preSharedKey, $0) },
                 localAddress: options.localAddress,
             ))
         case let .anyTLS(options):

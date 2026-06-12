@@ -21,10 +21,19 @@ struct SettingsView: View {
                 Toggle("Protocol Sniffing", isOn: $store.settings.sniffTraffic)
                 Toggle("Strict Route", isOn: $store.settings.strictRoute)
                 Toggle("Kill Switch", isOn: $store.settings.killSwitch)
+                Toggle("Connect On Demand", isOn: $store.settings.connectOnDemand)
             } header: {
                 Text("Tunnel")
             } footer: {
-                Text("Applied the next time you connect. Sniffing enables protocol and SNI based rules; strict route reduces traffic falling outside the tunnel route. Kill switch forces all traffic through the tunnel and blocks it if the tunnel drops — this can interrupt connectivity on captive-portal networks.")
+                Text("Applied the next time you connect. Sniffing enables protocol and SNI based rules; strict route reduces traffic falling outside the tunnel route. Kill switch forces all traffic through the tunnel and blocks it if the tunnel drops — this can interrupt connectivity on captive-portal networks. Connect on demand lets iOS start and keep the tunnel up automatically; disconnecting manually pauses it until your next connect.")
+            }
+
+            Section {
+                Toggle("Auto-Refresh Subscriptions", isOn: $store.settings.autoRefreshSubscriptions)
+            } header: {
+                Text("Subscriptions")
+            } footer: {
+                Text("Refreshes subscriptions older than 24 hours when the app returns to the foreground. Each refresh contacts the subscription server, which can observe your current network address. Refreshes that would add nodes with TLS verification disabled are skipped and need a manual refresh to review.")
             }
 
             Section {

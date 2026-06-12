@@ -72,8 +72,41 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-libbox-
 
+      - name: Record committed libbox provenance
+        run: |
+          set -euo pipefail
+          # Snapshot the reviewed, repo-committed engine digest BEFORE
+          # build-libbox.sh rebuilds the engine and refreshes the manifest —
+          # otherwise the later verify pass only compares the fresh build
+          # against itself and the committed provenance never gates anything.
+          cp Frameworks/Libbox.xcframework.sha256 /tmp/libbox-committed.sha256
+
       - name: Build pinned libbox engine
         run: scripts/build-libbox.sh
+
+      - name: Compare engine digest against committed provenance
+        run: |
+          set -euo pipefail
+          committed="$(awk '{print $1}' /tmp/libbox-committed.sha256)"
+          rebuilt="$(awk '{print $1}' Frameworks/Libbox.xcframework.sha256)"
+          {
+            echo "### Libbox provenance"
+            echo
+            echo "- Committed manifest digest: \`${committed}\`"
+            echo "- CI-rebuilt engine digest: \`${rebuilt}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$committed" == "$rebuilt" ]]; then
+            echo "- Digests match: the CI build reproduced the committed engine." >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Not fatal: gomobile output is not bit-reproducible across
+            # Xcode/Go toolchain versions, so a mismatch alone is expected.
+            # The enforced supply-chain control is the pinned-commit check in
+            # build-libbox.sh (the tag must resolve to SING_BOX_COMMIT before
+            # any upstream code runs). This step makes the divergence visible
+            # instead of silently re-recording whatever was built.
+            echo "- Digests differ. Expected when the CI toolchain differs from the one that produced the committed engine; the pinned sing-box commit check in scripts/build-libbox.sh remains the integrity gate." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Libbox digest differs from committed manifest::CI rebuilt the engine from the pinned commit, but the binary digest differs from Frameworks/Libbox.xcframework.sha256 (toolchain difference or upstream build change)."
+          fi
 
       - name: Generate Xcode project
         run: xcodegen generate

@@ -59,6 +59,10 @@ final class TunnelController {
         rules: [RoutingRule],
         settings: AppSettings,
     ) async {
+        guard !startInProgress else {
+            appendLog("Connect ignored: a tunnel start is already in progress")
+            return
+        }
         diagnosticsTask?.cancel()
         importedExtensionLogLines.removeAll()
         lastObservedStatus = nil
@@ -110,6 +114,19 @@ final class TunnelController {
             if !insecureProfiles.isEmpty {
                 appendLog("WARNING: TLS certificate verification is disabled (allow-insecure) for: \(insecureProfiles.map(\.name).joined(separator: ", "))")
             }
+            // Rules that silently can't do their job get named here: the
+            // config builder routes a rule with a vanished target to the
+            // selected outbound, and protocol rules never match with sniffing
+            // off — both look like "rules ignored" without an explanation.
+            if routingMode == .rule {
+                let unresolvedRules = rules.filter { !Self.ruleTargetIsResolvable($0.target, profiles: profiles, groups: groups) }
+                if !unresolvedRules.isEmpty {
+                    appendLog("WARNING: \(unresolvedRules.count) routing rule(s) reference nodes or groups that no longer exist; matching traffic is routed to the selected outbound instead.")
+                }
+                if !settings.sniffTraffic, rules.contains(where: { $0.kind == .protocolSniff }) {
+                    appendLog("WARNING: Protocol routing rules need traffic sniffing, which is off in Settings — those rules will never match.")
+                }
+            }
             // Ensure secrets are in the shared Keychain for the normal tokenized
             // config path. If signing does not expose a verifiable shared App
             // Group, startup falls back to an inline one-shot resolved config so
@@ -145,7 +162,15 @@ final class TunnelController {
             }
             try sharedConfigStore.writeConfig(configContent)
 
-            let manager = try await configuredManager(secretNonce: secretNonce, killSwitch: settings.killSwitch)
+            let manager = try await configuredManager(secretNonce: secretNonce, onDemand: settings.connectOnDemand, killSwitch: settings.killSwitch)
+            // The manager round-trip suspends; a disconnect() issued meanwhile
+            // cleared `startInProgress`, and starting anyway would override the
+            // user's explicit stop with a stale connect.
+            guard startInProgress else {
+                appendLog("Tunnel start cancelled before launch")
+                await disarmOnDemandIfNeeded(context: "start cancelled")
+                return
+            }
             observeStatus(for: manager.connection)
             appendLog("Starting NetworkExtension tunnel with sing-box engine")
             var startOptions: [String: NSObject] = [
@@ -181,12 +206,35 @@ final class TunnelController {
             if let diagnosticHint = error.networkExtensionDiagnosticHint {
                 appendLog("Diagnostic: \(diagnosticHint)")
             }
+            await disarmOnDemandIfNeeded(context: "tunnel start failed")
+        }
+    }
+
+    /// Best-effort removal of the on-demand rule when a start did not stick.
+    /// Without this, a failed connect leaves the rule armed in the system
+    /// configuration and iOS keeps relaunching a tunnel the app shows as
+    /// failed — a loop the user could otherwise only break from iOS Settings.
+    /// The setting itself is untouched; the next manual connect re-arms it.
+    private func disarmOnDemandIfNeeded(context: String) async {
+        guard let manager, manager.isOnDemandEnabled else {
+            return
+        }
+        manager.isOnDemandEnabled = false
+        do {
+            try await save(manager)
+            appendLog("On-demand connect disabled (\(context))")
+        } catch {
+            appendLog("Could not disable on-demand connect (\(context)): \(error.diagnosticDescription)")
         }
     }
 
     func disconnect() async {
         guard state.isConnected || state == .connecting else {
             state = .disconnected
+            // A failed session can leave the on-demand rule armed (the start
+            // saved it before failing); clear it so iOS stops relaunching a
+            // tunnel the UI shows as down.
+            await disarmOnDemandIfNeeded(context: "disconnect while not connected")
             return
         }
 
@@ -196,6 +244,14 @@ final class TunnelController {
         stopTelemetry()
         do {
             let manager = try await loadManager()
+            // With on-demand rules active, iOS would immediately relaunch the
+            // tunnel after stopVPNTunnel; disable them before stopping so a
+            // manual disconnect sticks until the next connect re-arms them.
+            if manager.isOnDemandEnabled {
+                manager.isOnDemandEnabled = false
+                try await save(manager)
+                appendLog("On-demand connect disabled until the next manual connect")
+            }
             manager.connection.stopVPNTunnel()
             await syncExtensionLogs()
             updateState(from: manager.connection.status, source: "disconnect")
@@ -210,8 +266,26 @@ final class TunnelController {
     }
 
     func appendLog(_ message: String) {
+        appendLogs([message])
+    }
+
+    /// Appends a chronological batch as one array mutation and one persist
+    /// callback, instead of one per line — extension log syncs deliver bursts.
+    /// One call is one visual entry: line breaks collapse to spaces so
+    /// messages embedding remote-controlled text (import warnings, engine
+    /// errors) can't forge extra timestamped entries in the app log. This
+    /// mirrors `PacketTunnelProvider.writeTunnelLog`.
+    func appendLogs(_ messages: [String]) {
+        guard !messages.isEmpty else {
+            return
+        }
         let timestamp = Date.now.formatted(date: .omitted, time: .standard)
-        logs.insert("[\(timestamp)] \(message)", at: 0)
+        let entries = messages.map { message in
+            "[\(timestamp)] \(message.components(separatedBy: .newlines).joined(separator: " "))"
+        }
+        // Newest-first display order: the last message of the batch lands at
+        // index 0, matching what per-line inserts would have produced.
+        logs.insert(contentsOf: entries.reversed(), at: 0)
         if logs.count > maximumLogEntries {
             logs.removeLast(logs.count - maximumLogEntries)
         }
@@ -239,15 +313,37 @@ final class TunnelController {
 
         switch result {
         case let .success(lines):
-            for line in lines where importedExtensionLogLines.insert(line).inserted {
-                appendLog("Extension \(line)")
-            }
+            let newLines = lines.filter { !importedExtensionLogLines.contains($0) }
+            appendLogs(newLines.map { "Extension \($0)" })
+            // Rebuild rather than accumulate: the shared file only appends and
+            // the reader only sees its bounded tail, so a line absent from
+            // `lines` can never be read again — retaining it would grow the
+            // dedup set without bound over a long session.
+            importedExtensionLogLines = Set(lines)
         case let .failure(error):
             appendLog("Unable to read extension logs: \(error.diagnosticDescription)")
         }
     }
 
-    private func configuredManager(secretNonce: String, killSwitch: Bool) async throws -> NETunnelProviderManager {
+    private static func ruleTargetIsResolvable(_ target: OutboundTarget, profiles: [ProxyProfile], groups: [ProxyGroup]) -> Bool {
+        switch target {
+        case .selectedProxy, .direct, .reject:
+            return true
+        case let .profile(id):
+            return profiles.contains { $0.id == id }
+        case let .group(id):
+            return groups.contains { $0.id == id && $0.isEnabled }
+        case let .named(name):
+            let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ["direct", "reject", "proxy"].contains(normalized) {
+                return true
+            }
+            return profiles.contains { $0.name.lowercased() == normalized }
+                || groups.contains { $0.name.lowercased() == normalized && $0.isEnabled }
+        }
+    }
+
+    private func configuredManager(secretNonce: String, onDemand: Bool, killSwitch: Bool) async throws -> NETunnelProviderManager {
         let manager = try await loadManager()
         let tunnelProtocol = NETunnelProviderProtocol()
         tunnelProtocol.providerBundleIdentifier = RuntimeEnvironment.tunnelProviderBundleIdentifier
@@ -277,6 +373,12 @@ final class TunnelController {
         manager.localizedDescription = "Hop"
         manager.protocolConfiguration = tunnelProtocol
         manager.isEnabled = true
+        // On-demand: iOS starts the tunnel whenever any network is reachable
+        // and restarts it if the extension stops. A manual disconnect clears
+        // the flag first (see `disconnect`), so the user's explicit stop is
+        // never fought by the system.
+        manager.isOnDemandEnabled = onDemand
+        manager.onDemandRules = onDemand ? [NEOnDemandRuleConnect()] : nil
         try await save(manager)
         try await manager.loadFromPreferences()
         self.manager = manager
@@ -385,9 +487,16 @@ final class TunnelController {
                     appendLog("Tunnel stopped before connecting. If this happened immediately, the packet tunnel extension failed during startup.")
                     appendLog("If no Extension lines appear here, iOS rejected or killed HopTunnel.appex before PacketTunnelProvider could write logs. Check the App Group diagnostic above and that the embedded .appex was re-signed with Hop.app.")
                     logLastDisconnectError()
+                    // A startup failure repeats identically on every on-demand
+                    // relaunch; disarm so iOS doesn't loop a broken config.
+                    Task { await self.disarmOnDemandIfNeeded(context: "tunnel failed during startup") }
                 }
                 Task { await syncExtensionLogs() }
-            } else {
+            } else if state != .failed {
+                // A failed start stays visibly failed: the post-start
+                // diagnostics and late status notifications re-read
+                // `.disconnected` seconds after the failure and would
+                // otherwise quietly wash the red failure state away.
                 state = .disconnected
             }
             stopTelemetry()

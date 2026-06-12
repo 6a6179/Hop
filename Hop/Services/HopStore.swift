@@ -1,187 +1,15 @@
 import Foundation
 import Observation
 
-enum AppAppearance: String, CaseIterable, Codable, Identifiable {
-    case system
-    case light
-    case dark
-
-    var id: String {
-        rawValue
-    }
-
-    var displayName: String {
-        switch self {
-        case .system:
-            "System"
-        case .light:
-            "Light"
-        case .dark:
-            "Dark"
-        }
-    }
-}
-
-enum ConfigLogLevel: String, CaseIterable, Codable, Identifiable {
-    case debug
-    case info
-    case warn
-    case error
-
-    var id: String {
-        rawValue
-    }
-
-    var displayName: String {
-        switch self {
-        case .debug:
-            "Debug"
-        case .info:
-            "Info"
-        case .warn:
-            "Warning"
-        case .error:
-            "Error"
-        }
-    }
-}
-
-enum DNSPreset: String, CaseIterable, Codable, Identifiable {
-    case cloudflare
-    case google
-    case quad9
-    case system
-
-    var id: String {
-        rawValue
-    }
-
-    var displayName: String {
-        switch self {
-        case .cloudflare:
-            "Cloudflare"
-        case .google:
-            "Google"
-        case .quad9:
-            "Quad9"
-        case .system:
-            "System"
-        }
-    }
-}
-
-enum DNSStrategy: String, CaseIterable, Codable, Identifiable {
-    case preferIPv4 = "prefer_ipv4"
-    case preferIPv6 = "prefer_ipv6"
-    case ipv4Only = "ipv4_only"
-    case ipv6Only = "ipv6_only"
-
-    var id: String {
-        rawValue
-    }
-
-    var displayName: String {
-        switch self {
-        case .preferIPv4:
-            "Prefer IPv4"
-        case .preferIPv6:
-            "Prefer IPv6"
-        case .ipv4Only:
-            "IPv4 Only"
-        case .ipv6Only:
-            "IPv6 Only"
-        }
-    }
-}
-
-enum LogRetention: Int, CaseIterable, Codable, Identifiable {
-    case oneHundred = 100
-    case fiveHundred = 500
-    case oneThousand = 1000
-
-    var id: Int {
-        rawValue
-    }
-
-    var displayName: String {
-        switch self {
-        case .oneHundred:
-            "100 entries"
-        case .fiveHundred:
-            "500 entries"
-        case .oneThousand:
-            "1,000 entries"
-        }
-    }
-}
-
-enum LatencyTestMethod: String, CaseIterable, Codable, Identifiable {
-    case tcp
-    case connect
-    case icmp
-
-    var id: String {
-        rawValue
-    }
-
-    var displayName: String {
-        switch self {
-        case .tcp:
-            "TCP"
-        case .connect:
-            "Connect (TLS)"
-        case .icmp:
-            "ICMP"
-        }
-    }
-
-    var footnote: String {
-        switch self {
-        case .tcp:
-            "Times a TCP handshake to the node's host and port. Best for TCP-based nodes."
-        case .connect:
-            "Times a TCP plus TLS handshake (falls back to TCP for nodes without TLS)."
-        case .icmp:
-            "Pings the node's host. Works for any protocol but may be blocked by some servers."
-        }
-    }
-}
-
-struct AppSettings: Hashable, Codable {
-    var appearance: AppAppearance = .system
-    var logLevel: ConfigLogLevel = .info
-    var dnsPreset: DNSPreset = .cloudflare
-    var dnsStrategy: DNSStrategy = .preferIPv4
-    var proxyDNS: Bool = true
-    var sniffTraffic: Bool = true
-    var strictRoute: Bool = true
-    /// Kill switch. When on, iOS forces all traffic through the tunnel and drops
-    /// it if the extension dies, instead of failing open to the default network.
-    var killSwitch: Bool = false
-    var logRetention: LogRetention = .fiveHundred
-    var latencyTestMethod: LatencyTestMethod = .tcp
-
-    static let defaults = AppSettings()
-}
-
-extension AppSettings {
-    /// Decode field-by-field so adding a new setting never invalidates state
-    /// persisted by an older build (a missing key falls back to its default
-    /// rather than failing the whole decode).
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let defaults = AppSettings.defaults
-        appearance = try container.decodeIfPresent(AppAppearance.self, forKey: .appearance) ?? defaults.appearance
-        logLevel = try container.decodeIfPresent(ConfigLogLevel.self, forKey: .logLevel) ?? defaults.logLevel
-        dnsPreset = try container.decodeIfPresent(DNSPreset.self, forKey: .dnsPreset) ?? defaults.dnsPreset
-        dnsStrategy = try container.decodeIfPresent(DNSStrategy.self, forKey: .dnsStrategy) ?? defaults.dnsStrategy
-        proxyDNS = try container.decodeIfPresent(Bool.self, forKey: .proxyDNS) ?? defaults.proxyDNS
-        sniffTraffic = try container.decodeIfPresent(Bool.self, forKey: .sniffTraffic) ?? defaults.sniffTraffic
-        strictRoute = try container.decodeIfPresent(Bool.self, forKey: .strictRoute) ?? defaults.strictRoute
-        killSwitch = try container.decodeIfPresent(Bool.self, forKey: .killSwitch) ?? defaults.killSwitch
-        logRetention = try container.decodeIfPresent(LogRetention.self, forKey: .logRetention) ?? defaults.logRetention
-        latencyTestMethod = try container.decodeIfPresent(LatencyTestMethod.self, forKey: .latencyTestMethod) ?? defaults.latencyTestMethod
-    }
+/// What a `HopStore.refreshSubscription` produced, for the caller to present.
+enum SubscriptionRefreshOutcome {
+    case applied(summary: String)
+    /// The refresh would introduce nodes that disable TLS certificate
+    /// verification and were not already insecure; nothing was applied. The
+    /// caller must run the blocking insecure-TLS confirmation, then call
+    /// `confirmInsecureSubscriptionRefresh`.
+    case needsInsecureConfirmation(result: ImportResult, newInsecureProfileNames: [String])
+    case failed(message: String)
 }
 
 @MainActor
@@ -242,8 +70,19 @@ final class HopStore {
     /// persisted — latency is only meaningful for the current session.
     var nodeLatencies: [ProxyProfile.ID: NodeLatencyResult] = [:]
 
+    /// Subscriptions with a fetch in flight (manual or auto-refresh). Drives
+    /// the per-row spinner and prevents overlapping refreshes of one source.
+    var refreshingSubscriptionIDs: Set<SubscriptionSource.ID> = []
+
+    /// Import text handed in from outside the app (the `hop://` URL scheme),
+    /// waiting for `ProfilesView` to present it in the gated import sheet.
+    /// Untrusted by definition — never applied without the preview/confirm
+    /// flow. Transient; not persisted.
+    var pendingExternalImportText: String?
+
     private let dataStore: HopAppDataStore
     private let latencyTester = LatencyTester()
+    private let importService = ProxyImportService()
     @ObservationIgnored private var logPersistTask: Task<Void, Never>?
     /// Suppresses the per-`didSet` persist while a multi-property mutation runs;
     /// see `withBatchedPersist`.
@@ -528,7 +367,7 @@ final class HopStore {
         }
     }
 
-    func applySubscriptionRefresh(_ result: ImportResult) {
+    func applySubscriptionRefresh(_ result: ImportResult, updating subscription: SubscriptionSource? = nil) {
         guard !result.isEmpty else {
             tunnel.appendLog("Subscription refresh skipped: no runnable items found")
             return
@@ -537,6 +376,8 @@ final class HopStore {
         // Merge on value copies and assign each collection once: every
         // `profiles`/`groups` mutation persists the whole state (file write +
         // Keychain rewrite), so per-item updates would write once per node.
+        // The subscription record updates inside the same batch — a refresh is
+        // one logical mutation and persists once.
         var merger = SubscriptionRefreshMerger(profiles: profiles, groups: groups, selectedTarget: selectedTarget)
         merger.merge(result)
         withBatchedPersist {
@@ -544,6 +385,9 @@ final class HopStore {
             groups = merger.groups
             selectedTarget = merger.selectedTarget
             normalizeSelectedTarget()
+            if let subscription, let index = subscriptions.firstIndex(where: { $0.id == subscription.id }) {
+                subscriptions[index] = subscription
+            }
         }
 
         // Unlike a user-initiated import (which shows a preview), a refresh
@@ -560,6 +404,83 @@ final class HopStore {
         for warning in result.warnings.prefix(5) {
             tunnel.appendLog("Import warning: \(warning.message)")
         }
+    }
+
+    /// Fetches a subscription and merges the result, returning what happened so
+    /// the caller can present it. Refreshes that would introduce *new*
+    /// allow-insecure nodes are not applied here — they come back as
+    /// `.needsInsecureConfirmation`, and the caller must run the blocking
+    /// insecure-TLS confirmation before applying via
+    /// `confirmInsecureSubscriptionRefresh`. Matched nodes are already
+    /// protected by the merger's downgrade guards.
+    func refreshSubscription(_ subscription: SubscriptionSource) async -> SubscriptionRefreshOutcome {
+        guard !refreshingSubscriptionIDs.contains(subscription.id) else {
+            return .failed(message: "A refresh for this subscription is already running.")
+        }
+        guard let url = URL(string: subscription.url) else {
+            return .failed(message: "The subscription URL is invalid.")
+        }
+
+        refreshingSubscriptionIDs.insert(subscription.id)
+        defer { refreshingSubscriptionIDs.remove(subscription.id) }
+
+        let result: ImportResult
+        do {
+            result = try await importService.importSubscription(url: url)
+        } catch {
+            return .failed(message: error.localizedDescription)
+        }
+
+        let newInsecureNames = SubscriptionRefreshMerger.newInsecureProfileNames(existing: profiles, imported: result.profiles)
+        guard newInsecureNames.isEmpty else {
+            return .needsInsecureConfirmation(result: result, newInsecureProfileNames: newInsecureNames)
+        }
+
+        applyRefreshResult(result, for: subscription)
+        return .applied(summary: result.summary)
+    }
+
+    /// Applies a refresh the user explicitly confirmed despite it introducing
+    /// new allow-insecure nodes. Only call after the blocking
+    /// `insecureTLSImportConfirmation` has run.
+    func confirmInsecureSubscriptionRefresh(_ result: ImportResult, for subscription: SubscriptionSource) {
+        applyRefreshResult(result, for: subscription)
+    }
+
+    /// Refreshes every subscription that hasn't updated within
+    /// `AppSettings.subscriptionStaleness`. Used on foregrounding when the
+    /// auto-refresh setting is on. Refreshes that would add new allow-insecure
+    /// nodes are skipped — there is no user present to run the blocking
+    /// confirmation, and applying without it would bypass the import gate.
+    func autoRefreshStaleSubscriptions() async {
+        guard settings.autoRefreshSubscriptions else {
+            return
+        }
+
+        let staleBefore = Date.now.addingTimeInterval(-AppSettings.subscriptionStaleness)
+        let stale = subscriptions.filter { ($0.lastUpdatedAt ?? .distantPast) < staleBefore }
+        guard !stale.isEmpty else {
+            return
+        }
+
+        tunnel.appendLog("Auto-refreshing \(stale.count) stale subscription(s)")
+        for subscription in stale {
+            switch await refreshSubscription(subscription) {
+            case let .applied(summary):
+                tunnel.appendLog("Auto-refreshed \(subscription.name): \(summary)")
+            case let .needsInsecureConfirmation(_, names):
+                tunnel.appendLog("Auto-refresh of \(subscription.name) skipped: it adds \(names.count) node(s) that disable TLS certificate verification. Refresh manually to review.")
+            case let .failed(message):
+                tunnel.appendLog("Auto-refresh of \(subscription.name) failed: \(message)")
+            }
+        }
+    }
+
+    private func applyRefreshResult(_ result: ImportResult, for subscription: SubscriptionSource) {
+        var refreshed = subscription
+        refreshed.lastUpdatedAt = .now
+        refreshed.lastImportSummary = result.summary
+        applySubscriptionRefresh(result, updating: refreshed)
     }
 
     private func applyImportedRules(_ importedRules: [RoutingRule]) {
@@ -597,6 +518,29 @@ final class HopStore {
             method: settings.latencyTestMethod,
         )
         nodeLatencies[profile.id] = result
+    }
+
+    /// Probes the given nodes (all profiles by default) with bounded
+    /// concurrency. Each probe runs the same private-host policy as
+    /// `testLatency`, so an imported list can't fan a bulk test out into a
+    /// LAN scan.
+    func testAllLatencies(_ profilesToTest: [ProxyProfile]? = nil, maxConcurrent: Int = 6) async {
+        let snapshot = profilesToTest ?? profiles
+        await withTaskGroup(of: Void.self) { group in
+            var index = 0
+            while index < snapshot.count, index < maxConcurrent {
+                let profile = snapshot[index]
+                group.addTask { await self.testLatency(for: profile) }
+                index += 1
+            }
+            while await group.next() != nil {
+                if index < snapshot.count {
+                    let profile = snapshot[index]
+                    group.addTask { await self.testLatency(for: profile) }
+                    index += 1
+                }
+            }
+        }
     }
 
     func clearLogs() {

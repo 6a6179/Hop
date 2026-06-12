@@ -157,6 +157,231 @@ final class HopAppDataStoreTests: XCTestCase {
         XCTAssertEqual(store.selectedTarget, .group(existingGroup.id))
     }
 
+    // MARK: - Secret-write skip (SecretWriteCache)
+
+    func testSecondSaveWithIdenticalProfilesDoesNotWriteSecretsAgain() {
+        let backend = InMemorySecretBackend()
+        let url = tempStateURL()
+        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend))
+
+        let profile = trojanProfile(id: UUID(), name: "Tokyo", host: "jp.example.com", password: "secret")
+        let data = HopAppData(
+            profiles: [profile],
+            groups: [],
+            subscriptions: [],
+            routingMode: .global,
+            selectedTarget: nil,
+            settings: .defaults,
+            logs: [],
+        )
+
+        store.save(data)
+        let writesAfterFirst = backend.allKeysCount
+
+        // Second save with identical profiles — secret set is unchanged
+        store.save(data)
+        let writesAfterSecond = backend.allKeysCount
+
+        XCTAssertEqual(writesAfterFirst, writesAfterSecond, "second save with identical profiles must not re-enumerate Keychain")
+    }
+
+    func testFailedSecretWriteIsRetriedOnNextSave() {
+        let backend = FailOnceSecretBackend()
+        let url = tempStateURL()
+        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend))
+
+        let profile = trojanProfile(id: UUID(), name: "Tokyo", host: "jp.example.com", password: "secret")
+        let data = HopAppData(
+            profiles: [profile],
+            groups: [],
+            subscriptions: [],
+            routingMode: .global,
+            selectedTarget: nil,
+            settings: .defaults,
+            logs: [],
+        )
+
+        // First save: the backend rejects the write, so nothing lands.
+        store.save(data)
+        XCTAssertNil(backend.value(forKey: HopSecret.key(profileID: profile.id, fieldRaw: "password")))
+
+        // Second save with the UNCHANGED secret set must retry rather than
+        // treat the failed state as already written (SecretWriteCache must
+        // have been invalidated by the failure).
+        store.save(data)
+        XCTAssertEqual(
+            backend.value(forKey: HopSecret.key(profileID: profile.id, fieldRaw: "password")),
+            "secret",
+            "a save after a failed Keychain write must rewrite the secret set",
+        )
+    }
+
+    func testMutatedPasswordCausesSecretWrite() {
+        let backend = InMemorySecretBackend()
+        let url = tempStateURL()
+        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend))
+
+        let profileID = UUID()
+        let original = trojanProfile(id: profileID, name: "Tokyo", host: "jp.example.com", password: "old-password")
+        let mutated = trojanProfile(id: profileID, name: "Tokyo", host: "jp.example.com", password: "new-password")
+
+        let originalData = HopAppData(
+            profiles: [original],
+            groups: [],
+            subscriptions: [],
+            routingMode: .global,
+            selectedTarget: nil,
+            settings: .defaults,
+            logs: [],
+        )
+        let mutatedData = HopAppData(
+            profiles: [mutated],
+            groups: [],
+            subscriptions: [],
+            routingMode: .global,
+            selectedTarget: nil,
+            settings: .defaults,
+            logs: [],
+        )
+
+        store.save(originalData)
+        let writesAfterFirst = backend.allKeysCount
+
+        store.save(mutatedData)
+        let writesAfterMutation = backend.allKeysCount
+
+        XCTAssertGreaterThan(writesAfterMutation, writesAfterFirst, "mutating a password must trigger a Keychain rewrite")
+    }
+
+    func testKeychainEndsWithCorrectPasswordAfterIdenticalSaves() {
+        let backend = InMemorySecretBackend()
+        let url = tempStateURL()
+        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend))
+        let secretStore = SecretStore(backend: backend)
+
+        let profileID = UUID()
+        let profile = trojanProfile(id: profileID, name: "Tokyo", host: "jp.example.com", password: "final-password")
+        let data = HopAppData(
+            profiles: [profile],
+            groups: [],
+            subscriptions: [],
+            routingMode: .global,
+            selectedTarget: nil,
+            settings: .defaults,
+            logs: [],
+        )
+
+        store.save(data)
+        store.save(data)
+
+        let key = HopSecret.key(profileID: profileID, fieldRaw: ProfileSecretField.password.rawValue)
+        XCTAssertEqual(secretStore.value(forKey: key), "final-password", "Keychain must hold the correct password after two identical saves")
+    }
+
+    // MARK: - WireGuard preSharedKey in secretFieldValues
+
+    func testWireGuardSecretFieldValuesIncludesPreSharedKey() {
+        let profile = ProxyProfile(
+            name: "WG",
+            endpoint: Endpoint(host: "wg.example.net", port: 51820),
+            proto: .wireGuard,
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "PRIVATEKEY",
+                peerPublicKey: "PEERPUBLICKEY",
+                preSharedKey: "PRESHAREDKEY",
+                localAddress: ["10.0.0.2/32"],
+            )),
+            security: .none,
+        )
+        XCTAssertNotNil(profile.secretFieldValues[.preSharedKey], "preSharedKey must be in secretFieldValues when set")
+        XCTAssertEqual(profile.secretFieldValues[.preSharedKey], "PRESHAREDKEY")
+    }
+
+    func testWireGuardSecretFieldValuesOmitsPreSharedKeyWhenNil() {
+        let profile = ProxyProfile(
+            name: "WG",
+            endpoint: Endpoint(host: "wg.example.net", port: 51820),
+            proto: .wireGuard,
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "PRIVATEKEY",
+                peerPublicKey: "PEERPUBLICKEY",
+                preSharedKey: nil,
+                localAddress: ["10.0.0.2/32"],
+            )),
+            security: .none,
+        )
+        XCTAssertNil(profile.secretFieldValues[.preSharedKey], "preSharedKey must not appear in secretFieldValues when nil")
+    }
+
+    func testTokenizingSecretsHandlesPreSharedKey() {
+        let profile = ProxyProfile(
+            name: "WG",
+            endpoint: Endpoint(host: "wg.example.net", port: 51820),
+            proto: .wireGuard,
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "PRIVATEKEY",
+                peerPublicKey: "PEERPUBLICKEY",
+                preSharedKey: "PRESHAREDKEY",
+                localAddress: ["10.0.0.2/32"],
+            )),
+            security: .none,
+        )
+        let tokenized = profile.tokenizingSecrets(nonce: "testnonce")
+        guard case let .wireGuard(opts) = tokenized.options else {
+            return XCTFail("Expected wireGuard options")
+        }
+        XCTAssertTrue(opts.preSharedKey?.hasPrefix("##HOP_SECRET:") == true, "preSharedKey must be tokenized")
+        XCTAssertNotEqual(opts.privateKey, "PRIVATEKEY", "privateKey must also be tokenized")
+    }
+
+    func testRedactingSecretsHandlesPreSharedKey() {
+        let profile = ProxyProfile(
+            name: "WG",
+            endpoint: Endpoint(host: "wg.example.net", port: 51820),
+            proto: .wireGuard,
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "PRIVATEKEY",
+                peerPublicKey: "PEERPUBLICKEY",
+                preSharedKey: "PRESHAREDKEY",
+                localAddress: ["10.0.0.2/32"],
+            )),
+            security: .none,
+        )
+        let redacted = profile.redactingSecrets()
+        guard case let .wireGuard(opts) = redacted.options else {
+            return XCTFail("Expected wireGuard options")
+        }
+        XCTAssertEqual(opts.preSharedKey, "", "preSharedKey must be blanked by redactingSecrets")
+    }
+
+    func testHydratingSecretsRestoresPreSharedKey() {
+        let backend = InMemorySecretBackend()
+        let secretStore = SecretStore(backend: backend)
+        let profileID = UUID()
+
+        let key = HopSecret.key(profileID: profileID, fieldRaw: ProfileSecretField.preSharedKey.rawValue)
+        secretStore.setValue("PRESHAREDKEY", forKey: key)
+
+        let profile = ProxyProfile(
+            id: profileID,
+            name: "WG",
+            endpoint: Endpoint(host: "wg.example.net", port: 51820),
+            proto: .wireGuard,
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "",
+                peerPublicKey: "PEERPUBLICKEY",
+                preSharedKey: "",
+                localAddress: ["10.0.0.2/32"],
+            )),
+            security: .none,
+        )
+        let hydrated = profile.hydratingSecrets(from: secretStore)
+        guard case let .wireGuard(opts) = hydrated.options else {
+            return XCTFail("Expected wireGuard options")
+        }
+        XCTAssertEqual(opts.preSharedKey, "PRESHAREDKEY", "hydratingSecrets must restore preSharedKey from the Keychain")
+    }
+
     private func trojanProfile(id: UUID, name: String, host: String, password: String) -> ProxyProfile {
         ProxyProfile(
             id: id,

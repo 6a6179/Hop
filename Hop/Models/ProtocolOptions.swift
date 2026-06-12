@@ -115,6 +115,10 @@ struct SOCKSOptions: Hashable, Codable {
 struct WireGuardOptions: Hashable, Codable {
     var privateKey: String
     var peerPublicKey: String
+    /// Optional peer pre-shared key (the `PresharedKey` of a wg peer). Stored
+    /// in the Keychain like the private key; emitted as the endpoint peer's
+    /// `pre_shared_key`. Decodes as nil from state saved by older builds.
+    var preSharedKey: String? = nil
     var localAddress: [String]
 }
 

@@ -90,41 +90,55 @@ struct DashboardView: View {
                     }
                 }
 
-                LabeledContent("Speed") {
-                    Text(speedSummary)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-
-                LabeledContent("Transferred") {
-                    Text(transferSummary)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
-                }
-
-                NavigationLink {
-                    ConnectionsView()
-                } label: {
-                    LabeledContent("Connections") {
-                        Text(connectionsSummary)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                if let telemetryError = store.tunnel.telemetryError, store.tunnel.state.isConnected {
-                    Text("Telemetry unavailable: \(telemetryError)")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                }
+                // The traffic counters tick once per second while connected.
+                // They live in their own child view so @Observable tracking
+                // re-renders only these rows — not this whole Form, whose
+                // outbound Picker can hold hundreds of profile rows.
+                TrafficSummaryRows()
             }
         }
         .animation(reduceMotion ? nil : .default, value: visualState)
         .navigationTitle("Hop")
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// The per-second telemetry rows. Isolated so the dashboard's heavier
+/// content doesn't recompute every status tick (see the call site).
+private struct TrafficSummaryRows: View {
+    @Environment(HopStore.self) private var store
+
+    var body: some View {
+        LabeledContent("Speed") {
+            Text(speedSummary)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+
+        LabeledContent("Transferred") {
+            Text(transferSummary)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+
+        NavigationLink {
+            ConnectionsView()
+        } label: {
+            LabeledContent("Connections") {
+                Text(connectionsSummary)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if let telemetryError = store.tunnel.telemetryError, store.tunnel.state.isConnected {
+            Text("Telemetry unavailable: \(telemetryError)")
+                .font(.footnote)
+                .foregroundStyle(.orange)
+        }
     }
 
     private var speedSummary: String {

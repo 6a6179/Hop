@@ -236,6 +236,89 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
             .appendingPathComponent("hop-state.json")
     }
 
+    // MARK: - newInsecureProfileNames
+
+    func testNewInsecureProfileNamesFlagsBrandNewInsecureProfile() {
+        let brandNew = insecureTrojanProfile(name: "Evil")
+        let names = SubscriptionRefreshMerger.newInsecureProfileNames(existing: [], imported: [brandNew])
+        XCTAssertEqual(names, ["Evil"], "a brand-new allow-insecure profile must be flagged")
+    }
+
+    func testNewInsecureProfileNamesDoesNotFlagProfileMatchingExistingInsecureByIdentity() {
+        let existing = insecureTrojanProfile(name: "Tokyo")
+        // exact refresh identity: same name/host/port/proto/options/security/transport
+        let imported = existing
+        let names = SubscriptionRefreshMerger.newInsecureProfileNames(existing: [existing], imported: [imported])
+        XCTAssertTrue(names.isEmpty, "exact-identity match against an already-insecure existing profile must not be flagged")
+    }
+
+    func testNewInsecureProfileNamesDoesNotFlagProfileMatchingExistingInsecureByNameAndProto() {
+        let existing = insecureTrojanProfile(name: "Tokyo")
+        var changed = insecureTrojanProfile(name: " tokyo ") // same name (trimmed+lowercased), same proto, different host
+        changed.endpoint = Endpoint(host: "new.example.com", port: 443)
+        let names = SubscriptionRefreshMerger.newInsecureProfileNames(existing: [existing], imported: [changed])
+        XCTAssertTrue(names.isEmpty, "name+proto match against an existing already-insecure profile must not be flagged")
+    }
+
+    func testNewInsecureProfileNamesDoesNotFlagSecureImportedProfiles() {
+        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        let imported = trojanProfile(name: "Berlin", host: "de.example.com")
+        let names = SubscriptionRefreshMerger.newInsecureProfileNames(existing: [existing], imported: [imported])
+        XCTAssertTrue(names.isEmpty, "a secure imported profile must never be flagged")
+    }
+
+    /// An imported allow-insecure profile that name+proto-matches an EXISTING
+    /// SECURE profile is not flagged: the merge updates the matched profile and
+    /// `securityPreservingDowngrades` blocks the allowInsecure flip (logging a
+    /// refusal), so no node ends up newly insecure and prompting the user would
+    /// describe an outcome that cannot happen.
+    func testNewInsecureProfileNamesDoesNotFlagImportedInsecureWhenExistingMatchIsSecure() throws {
+        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        var imported = insecureTrojanProfile(name: "Tokyo") // name matches existing (secure)
+        imported.endpoint = Endpoint(host: "new.example.com", port: 443)
+        let names = SubscriptionRefreshMerger.newInsecureProfileNames(existing: [existing], imported: [imported])
+        XCTAssertTrue(names.isEmpty, "a name+proto match is flip-guarded by the merge, so it is not a NEW insecure node")
+
+        // And the companion guarantee: the merge indeed refuses the flip.
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+        merger.merge(ImportResult(profiles: [imported]))
+        let merged = try XCTUnwrap(merger.profiles.first)
+        XCTAssertEqual(merged.security.tls?.allowInsecure, false, "securityPreservingDowngrades must block the allowInsecure flip for the matched profile")
+        XCTAssertFalse(merger.securityDowngradeWarnings.isEmpty, "the refusal must be recorded as a warning")
+    }
+
+    // MARK: - REALITY public-key change warning
+
+    func testRealityPublicKeyChangeAppliesNewKeyAndAppendsWarning() throws {
+        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        existing.security = .reality(RealityOptions(publicKey: "OLDKEY", shortID: "abcd"))
+        var imported = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        imported.security = .reality(RealityOptions(publicKey: "NEWKEY", shortID: "abcd"))
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        merger.merge(ImportResult(profiles: [imported]))
+
+        let merged = try XCTUnwrap(merger.profiles.first)
+        XCTAssertEqual(merged.security.reality?.publicKey, "NEWKEY", "the new REALITY public key must be applied")
+        XCTAssertEqual(merger.securityDowngradeWarnings.count, 1)
+        XCTAssertTrue(merger.securityDowngradeWarnings[0].contains("Tokyo"), "warning must name the profile")
+        XCTAssertTrue(merger.securityDowngradeWarnings[0].lowercased().contains("reality") || merger.securityDowngradeWarnings[0].lowercased().contains("public key"), "warning must mention the REALITY key change")
+    }
+
+    func testRealityPublicKeyUnchangedProducesNoWarning() {
+        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        existing.security = .reality(RealityOptions(publicKey: "SAMEKEY", shortID: "abcd"))
+        var imported = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        imported.security = .reality(RealityOptions(publicKey: "SAMEKEY", shortID: "abcd"))
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        merger.merge(ImportResult(profiles: [imported]))
+
+        XCTAssertTrue(merger.securityDowngradeWarnings.isEmpty, "no warning when REALITY public key is unchanged")
+    }
+
+    // MARK: - Helpers
+
     private func trojanProfile(name: String, host: String) -> ProxyProfile {
         ProxyProfile(
             name: name,
@@ -243,6 +326,16 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
             proto: .trojan,
             options: .trojan(TrojanOptions(password: "secret")),
             security: .tls(TLSOptions(serverName: host)),
+        )
+    }
+
+    private func insecureTrojanProfile(name: String) -> ProxyProfile {
+        ProxyProfile(
+            name: name,
+            endpoint: Endpoint(host: "jp.example.com", port: 443),
+            proto: .trojan,
+            options: .trojan(TrojanOptions(password: "secret")),
+            security: .tls(TLSOptions(serverName: "jp.example.com", allowInsecure: true)),
         )
     }
 }

@@ -304,6 +304,103 @@ final class ImportSecurityTests: XCTestCase {
         }
     }
 
+    // MARK: - sanitizeImportedName (ImportPolicy)
+
+    func testSanitizeImportedNameStripsRTLOverrideAndZeroWidthCharacters() {
+        // U+202E is the RTL override; U+200B is zero-width space
+        let withRTL = "Safe\u{202E}EVIL"
+        let withZW = "Safe\u{200B}Hidden"
+        XCTAssertFalse(ImportPolicy.sanitizeImportedName(withRTL).unicodeScalars.contains { $0 == "\u{202E}" })
+        XCTAssertFalse(ImportPolicy.sanitizeImportedName(withZW).unicodeScalars.contains { $0 == "\u{200B}" })
+    }
+
+    func testSanitizeImportedNameCollapsesWhitespaceRunsAndNewlines() {
+        XCTAssertEqual(ImportPolicy.sanitizeImportedName("hello\nworld"), "hello world")
+        XCTAssertEqual(ImportPolicy.sanitizeImportedName("hello\t\tworld"), "hello world")
+        XCTAssertEqual(ImportPolicy.sanitizeImportedName("a   b   c"), "a b c")
+    }
+
+    func testSanitizeImportedNameCapsAtMaxLength() {
+        let long = String(repeating: "a", count: ImportPolicy.maxImportedNameLength + 20)
+        let result = ImportPolicy.sanitizeImportedName(long)
+        XCTAssertEqual(result.count, ImportPolicy.maxImportedNameLength)
+    }
+
+    func testSanitizeImportedNameReturnsFallbackForEmptyOrAllStrippedInput() {
+        XCTAssertEqual(ImportPolicy.sanitizeImportedName("", fallback: "FB"), "FB")
+        // A name that is entirely invisible/control characters should produce the fallback
+        let allControl = "\u{202E}\u{200B}\u{200C}\u{200D}"
+        XCTAssertEqual(ImportPolicy.sanitizeImportedName(allControl, fallback: "Fallback"), "Fallback")
+    }
+
+    func testSanitizeImportedNameEndToEndVLESSWithRTLFragmentName() throws {
+        // U+202E = %E2%80%AE in UTF-8 (3 bytes: E2 80 AE)
+        // Construct a vless:// link with a name containing a RTL override in the fragment
+        let linkWithRTL = "vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=tls&sni=edge.example.net#Safe%E2%80%AEEvil"
+        let result = try importService.importText(linkWithRTL)
+        let profile = try XCTUnwrap(result.profiles.first)
+        XCTAssertFalse(profile.name.unicodeScalars.contains { $0 == "\u{202E}" }, "RTL override must be stripped from imported profile name")
+    }
+
+    // MARK: - ImportResult.sanitizingNames
+
+    func testSanitizingNamesCleanesProfileNamesAndGroupNames() {
+        let profile = ProxyProfile(
+            name: "Evil\u{202E}Name",
+            endpoint: Endpoint(host: "example.com", port: 443),
+            proto: .trojan,
+            options: .trojan(TrojanOptions(password: "p")),
+            security: .tls(TLSOptions(serverName: "example.com")),
+        )
+        let group = ProxyGroup(
+            name: "Group\u{200B}Hidden",
+            type: .select,
+            members: [.profile(profile.id)],
+        )
+        let result = ImportResult(profiles: [profile], groups: [group])
+        let sanitized = result.sanitizingNames()
+
+        XCTAssertFalse(sanitized.profiles[0].name.unicodeScalars.contains { $0 == "\u{202E}" })
+        XCTAssertFalse(sanitized.groups[0].name.unicodeScalars.contains { $0 == "\u{200B}" })
+    }
+
+    func testSanitizingNamesSanitizesNamedGroupMembersAndDefaultTarget() {
+        // Named targets in group members and defaultTarget must be sanitized
+        let dirtyName = "Target\u{202E}DIRTY"
+        let group = ProxyGroup(
+            name: "G",
+            type: .select,
+            members: [.named(dirtyName)],
+            defaultTarget: .named(dirtyName),
+        )
+        let result = ImportResult(groups: [group])
+        let sanitized = result.sanitizingNames()
+
+        if case let .named(name) = sanitized.groups[0].members.first {
+            XCTAssertFalse(name.unicodeScalars.contains { $0 == "\u{202E}" })
+        } else {
+            XCTFail("Expected .named member")
+        }
+        if case let .named(name) = sanitized.groups[0].defaultTarget {
+            XCTAssertFalse(name.unicodeScalars.contains { $0 == "\u{202E}" })
+        } else {
+            XCTFail("Expected .named defaultTarget")
+        }
+    }
+
+    func testSanitizingNamesSanitizesRuleNamedTargets() {
+        let dirtyTarget = "Proxy\u{200B}Dirty"
+        let rule = RoutingRule(kind: .domainSuffix, value: "apple.com", target: .named(dirtyTarget))
+        let result = ImportResult(rules: [rule])
+        let sanitized = result.sanitizingNames()
+
+        if case let .named(name) = sanitized.rules[0].target {
+            XCTAssertFalse(name.unicodeScalars.contains { $0 == "\u{200B}" })
+        } else {
+            XCTFail("Expected .named rule target")
+        }
+    }
+
     func testGeoRuleSetRejectsPathTraversalCategory() throws {
         let builder = SingBoxConfigBuilder()
         let profile = SampleData.trojanTLS

@@ -179,6 +179,42 @@ struct ImportResult: Hashable, Codable {
         "\(profiles.count) nodes, \(groups.count) groups, \(rules.count) rules, \(warnings.count) warnings"
     }
 
+    /// Returns the result with every profile and group display name run
+    /// through `ImportPolicy.sanitizeImportedName`. Applied at the import
+    /// chokepoints so spoofable names (bidi overrides, invisible characters,
+    /// unbounded length) never reach the UI or the insecure-TLS confirmation.
+    /// Group member references by name are remapped to match.
+    func sanitizingNames() -> ImportResult {
+        var sanitized = self
+        sanitized.profiles = profiles.map { profile in
+            var profile = profile
+            profile.name = ImportPolicy.sanitizeImportedName(profile.name, fallback: "Imported Node")
+            return profile
+        }
+        sanitized.groups = groups.map { group in
+            var group = group
+            group.name = ImportPolicy.sanitizeImportedName(group.name, fallback: "Imported Group")
+            group.members = group.members.map(Self.sanitizingNamedTarget)
+            group.defaultTarget = group.defaultTarget.map(Self.sanitizingNamedTarget)
+            return group
+        }
+        sanitized.rules = rules.map { rule in
+            var rule = rule
+            rule.target = Self.sanitizingNamedTarget(rule.target)
+            return rule
+        }
+        return sanitized
+    }
+
+    /// Named targets resolve by display name at config-build time, so they
+    /// must be sanitized identically to the names they reference.
+    private static func sanitizingNamedTarget(_ target: OutboundTarget) -> OutboundTarget {
+        guard case let .named(name) = target else {
+            return target
+        }
+        return .named(ImportPolicy.sanitizeImportedName(name, fallback: "Imported"))
+    }
+
     /// Bounds the number of imported items so a malicious payload cannot create
     /// an unbounded number of profiles/groups/rules. Profiles are kept first,
     /// then groups, then rules; anything beyond `maxItems` is dropped with a

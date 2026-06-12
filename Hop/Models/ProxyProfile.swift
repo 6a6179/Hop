@@ -62,7 +62,20 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         return "REALITY ML-DSA-65 verification is preserved, but the bundled sing-box/libbox engine cannot enforce pqv yet."
     }
 
+    /// The config builder only emits Hysteria2 obfuscation when both the type
+    /// and password are present; an obfs type without a password is silently
+    /// unusable at runtime, so it surfaces as a warning instead.
+    var hysteria2ObfsRuntimeWarning: String? {
+        guard case let .hysteria2(options) = options,
+              let obfs = options.obfs, !obfs.isEmpty,
+              options.obfsPassword?.isEmpty != false
+        else {
+            return nil
+        }
+        return "Hysteria2 \(obfs) obfuscation has no obfs password, so it is left out of the generated config."
+    }
+
     var importRuntimeWarnings: [String] {
-        [vlessEncryptionRuntimeWarning, realityMLDSA65RuntimeWarning].compactMap(\.self)
+        [vlessEncryptionRuntimeWarning, realityMLDSA65RuntimeWarning, hysteria2ObfsRuntimeWarning].compactMap(\.self)
     }
 }

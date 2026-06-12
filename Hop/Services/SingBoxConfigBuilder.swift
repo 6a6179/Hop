@@ -127,6 +127,22 @@ struct SingBoxConfigBuilder {
         if profile.security.reality?.mldsa65Verify?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             return "REALITY ML-DSA-65 verification requires Xray mldsa65Verify/pqv support; the bundled sing-box/libbox engine cannot enforce it yet."
         }
+        // sing-box rejects the entire config — not just the one outbound — for
+        // TLS-mandatory protocols/transports emitted without a `tls` block, so
+        // these profiles are screened out here with an explanation instead of
+        // bricking the whole tunnel. Imports and the editor both default/require
+        // TLS for them; this guard covers profiles persisted by older builds.
+        if profile.security.layer == .none {
+            switch profile.proto {
+            case .tuic, .hysteria2, .anyTLS:
+                return "\(profile.proto.displayName) requires TLS; sing-box rejects a \(profile.proto.displayName) outbound without it. Edit the node and set its Security to TLS."
+            default:
+                break
+            }
+            if profile.transport.type == .quic {
+                return "QUIC transport requires TLS; sing-box rejects a QUIC-transport outbound without it. Edit the node and set its Security to TLS."
+            }
+        }
         return nil
     }
 
@@ -239,19 +255,21 @@ struct SingBoxConfigBuilder {
         guard case let .wireGuard(options) = profile.options else {
             return nil
         }
+        var peer: [String: Any] = [
+            "address": profile.endpoint.host,
+            "port": profile.endpoint.port,
+            "public_key": options.peerPublicKey,
+            "allowed_ips": ["0.0.0.0/0", "::/0"],
+        ]
+        if let preSharedKey = options.preSharedKey, !preSharedKey.isEmpty {
+            peer["pre_shared_key"] = preSharedKey
+        }
         return [
             "type": "wireguard",
             "tag": tag,
             "address": options.localAddress.map(Self.normalizedHostPrefix),
             "private_key": options.privateKey,
-            "peers": [
-                [
-                    "address": profile.endpoint.host,
-                    "port": profile.endpoint.port,
-                    "public_key": options.peerPublicKey,
-                    "allowed_ips": ["0.0.0.0/0", "::/0"],
-                ] as [String: Any],
-            ],
+            "peers": [peer],
         ]
     }
 

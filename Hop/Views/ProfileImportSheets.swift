@@ -136,7 +136,7 @@ extension View {
 
 struct ImportTextSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var importText = ""
+    @State private var importText: String
     @State private var importResult: ImportResult?
     @State private var importError: String?
     @State private var detectedSubscriptionURL: URL?
@@ -145,6 +145,15 @@ struct ImportTextSheet: View {
 
     var importService: ProxyImportService
     var onSave: (ImportTextSaveResult) -> Void
+
+    /// `initialText` prefills the field (URL-scheme imports); the payload
+    /// still goes through the same preview and confirmation gates as pasted
+    /// text — prefilled is not pre-trusted.
+    init(importService: ProxyImportService, initialText: String = "", onSave: @escaping (ImportTextSaveResult) -> Void) {
+        self.importService = importService
+        self.onSave = onSave
+        _importText = State(initialValue: initialText)
+    }
 
     var body: some View {
         NavigationStack {
