@@ -232,7 +232,25 @@ struct ImportTextSheet: View {
                     save(importResult)
                 }
             }
+            .onAppear {
+                autoPreviewPrefill()
+            }
         }
+    }
+
+    /// Prefilled share links (a tapped vless://… link, a scanned QR) parse
+    /// locally, so preview them immediately — one tap less. Subscription URLs
+    /// are NOT auto-fetched: opening a link must never trigger a network
+    /// request to an arbitrary server without an explicit user action.
+    private func autoPreviewPrefill() {
+        let trimmed = importText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, importResult == nil, importError == nil, !isLoading else {
+            return
+        }
+        guard case .importText = ProfileImportPayloadDetector().detect(trimmed) else {
+            return
+        }
+        previewImport()
     }
 
     private func save(_ importResult: ImportResult) {

@@ -66,10 +66,22 @@ struct AppShellView: View {
         }
     }
 
-    /// `hop://import?url=<https-subscription>` or `hop://import?text=<payload>`.
-    /// The payload is attacker-controllable (any app can open the URL), so it
-    /// is never applied directly: it lands in the same preview-and-confirm
-    /// import sheet as pasted text, with every import gate intact.
+    /// Proxy share-link schemes Hop registers for (Info.plist
+    /// `CFBundleURLTypes`): tapping such a link in a browser or scanning a
+    /// share QR with the system Camera opens Hop with the whole link as the
+    /// import payload. Mirrors the schemes `ProxyImportService` parses, plus
+    /// `ssr` so those links produce a clear "unsupported" message instead of
+    /// nothing happening.
+    static let proxyLinkSchemes: Set<String> = [
+        "vless", "vmess", "trojan", "ss", "ssr", "hysteria2", "hy2", "tuic", "socks", "socks5",
+    ]
+
+    /// Accepts `hop://import?url=<https-subscription>`,
+    /// `hop://import?text=<payload>`, and bare proxy share links
+    /// (`vless://…`, `ss://…`, …). Payloads are attacker-controllable (any
+    /// app can open a URL), so they are never applied directly: each lands in
+    /// the same preview-and-confirm import sheet as pasted text, with every
+    /// import gate intact.
     private func handleExternalURL(_ url: URL) {
         guard let payload = Self.importPayload(from: url) else {
             return
@@ -79,7 +91,13 @@ struct AppShellView: View {
     }
 
     static func importPayload(from url: URL) -> String? {
-        guard url.scheme?.lowercased() == "hop",
+        guard let scheme = url.scheme?.lowercased() else {
+            return nil
+        }
+        if proxyLinkSchemes.contains(scheme) {
+            return url.absoluteString
+        }
+        guard scheme == "hop",
               url.host()?.lowercased() == "import",
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         else {

@@ -33,14 +33,22 @@ There is no App Store build. You sideload it.
 
    The IPA is ad-hoc fakesigned so each binary carries these entitlements for your signer to re-map. If the signer strips the appex or its entitlements — or your cert can't provide them — the VPN flips from connecting to disconnected immediately. That's the symptom.
 
-## URL scheme
+## URL schemes
+
+Hop registers as a handler for proxy share links, so tapping one in a browser or scanning a share QR with the Camera app opens it in Hop:
+
+```
+vless://  vmess://  trojan://  ss://  ssr://  hysteria2://  hy2://  tuic://  socks://  socks5://
+```
+
+plus its own scheme:
 
 ```
 hop://import?url=<https subscription url>
 hop://import?text=<percent-encoded links or config>
 ```
 
-Payloads open the import preview; nothing is applied without confirmation.
+Every payload opens the import preview; nothing is applied without confirmation, and subscription URLs are never fetched until you ask. (`ssr://` links are recognized but unsupported — you get a clear message instead of silence.)
 
 ## Build
 

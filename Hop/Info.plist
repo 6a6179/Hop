@@ -23,11 +23,23 @@
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
 			<key>CFBundleURLName</key>
 			<string>cat.string.hop</string>
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>hop</string>
+				<string>vless</string>
+				<string>vmess</string>
+				<string>trojan</string>
+				<string>ss</string>
+				<string>ssr</string>
+				<string>hysteria2</string>
+				<string>hy2</string>
+				<string>tuic</string>
+				<string>socks</string>
+				<string>socks5</string>
 			</array>
 		</dict>
 	</array>
