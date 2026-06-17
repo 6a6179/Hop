@@ -1,9 +1,20 @@
 .DS_Store
 DerivedData/
 build/
+tmp/
 *.xcuserstate
 xcuserdata/
 
+# Secrets and credentials
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.mobileprovision
+credentials.json
+service-account.json
+**/secrets/
+
 # sing-box engine — large GPL build artifact, rebuilt via scripts/build-libbox.sh
 Frameworks/*.xcframework
-

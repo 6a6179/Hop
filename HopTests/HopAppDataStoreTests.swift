@@ -53,6 +53,33 @@ final class HopAppDataStoreTests: XCTestCase {
         XCTAssertEqual(loaded.logs, ["one", "two"])
     }
 
+    func testSubscriptionURLIsStoredInKeychainNotStateFile() throws {
+        let url = tempStateURL()
+        let secretStore = SecretStore.inMemory()
+        let store = HopAppDataStore(url: url, secretStore: secretStore)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let subscription = SubscriptionSource(name: "Airport", url: "https://sub.example.com/path/token?target=hop")
+        let data = HopAppData(
+            profiles: [],
+            groups: [],
+            subscriptions: [subscription],
+            routingMode: .rule,
+            selectedTarget: nil,
+            settings: .defaults,
+            logs: [],
+            ruleConfigurations: SampleData.ruleConfigurations,
+            activeRuleConfigurationID: SampleData.defaultConfiguration.id,
+        )
+
+        store.save(data)
+
+        let raw = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertFalse(raw.contains("path/token"), "subscription bearer URL leaked into JSON")
+        XCTAssertEqual(secretStore.value(forKey: HopSecret.subscriptionURLKey(subscriptionID: subscription.id)), subscription.url)
+        XCTAssertEqual(try XCTUnwrap(store.load()).subscriptions, [subscription])
+    }
+
     func testKillSwitchSettingRoundTrips() throws {
         var settings = AppSettings.defaults
         XCTAssertFalse(settings.killSwitch, "kill switch must default off")
@@ -284,7 +311,6 @@ final class HopAppDataStoreTests: XCTestCase {
         let profile = ProxyProfile(
             name: "WG",
             endpoint: Endpoint(host: "wg.example.net", port: 51820),
-            proto: .wireGuard,
             options: .wireGuard(WireGuardOptions(
                 privateKey: "PRIVATEKEY",
                 peerPublicKey: "PEERPUBLICKEY",
@@ -301,7 +327,6 @@ final class HopAppDataStoreTests: XCTestCase {
         let profile = ProxyProfile(
             name: "WG",
             endpoint: Endpoint(host: "wg.example.net", port: 51820),
-            proto: .wireGuard,
             options: .wireGuard(WireGuardOptions(
                 privateKey: "PRIVATEKEY",
                 peerPublicKey: "PEERPUBLICKEY",
@@ -317,7 +342,6 @@ final class HopAppDataStoreTests: XCTestCase {
         let profile = ProxyProfile(
             name: "WG",
             endpoint: Endpoint(host: "wg.example.net", port: 51820),
-            proto: .wireGuard,
             options: .wireGuard(WireGuardOptions(
                 privateKey: "PRIVATEKEY",
                 peerPublicKey: "PEERPUBLICKEY",
@@ -338,7 +362,6 @@ final class HopAppDataStoreTests: XCTestCase {
         let profile = ProxyProfile(
             name: "WG",
             endpoint: Endpoint(host: "wg.example.net", port: 51820),
-            proto: .wireGuard,
             options: .wireGuard(WireGuardOptions(
                 privateKey: "PRIVATEKEY",
                 peerPublicKey: "PEERPUBLICKEY",
@@ -366,7 +389,6 @@ final class HopAppDataStoreTests: XCTestCase {
             id: profileID,
             name: "WG",
             endpoint: Endpoint(host: "wg.example.net", port: 51820),
-            proto: .wireGuard,
             options: .wireGuard(WireGuardOptions(
                 privateKey: "",
                 peerPublicKey: "PEERPUBLICKEY",
@@ -387,7 +409,6 @@ final class HopAppDataStoreTests: XCTestCase {
             id: id,
             name: name,
             endpoint: Endpoint(host: host, port: 443),
-            proto: .trojan,
             options: .trojan(TrojanOptions(password: password)),
             security: .tls(TLSOptions(serverName: host)),
         )

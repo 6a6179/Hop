@@ -21,6 +21,13 @@ enum HopSecret {
         "\(profileID.uuidString).\(fieldRaw)"
     }
 
+    /// Keychain account for a subscription URL. Subscription URLs commonly
+    /// carry bearer tokens in their path or query, so they are stored beside
+    /// profile credentials instead of in the on-disk app-state JSON.
+    static func subscriptionURLKey(subscriptionID: UUID) -> String {
+        "subscription.\(subscriptionID.uuidString).url"
+    }
+
     /// The placeholder embedded in a config in place of a secret value, bound
     /// to the current run's `nonce` so it cannot be forged from import data.
     static func token(forKey key: String, nonce: String) -> String {
@@ -79,12 +86,9 @@ enum SecretResolver {
     /// Encodes a string as a JSON string literal (including surrounding quotes),
     /// so arbitrary secret characters (quotes, backslashes) embed safely.
     static func jsonStringLiteral(_ value: String) -> String {
-        guard let data = try? JSONSerialization.data(withJSONObject: [value]),
-              let encoded = String(data: data, encoding: .utf8),
-              encoded.count >= 2
-        else {
-            return "\"\""
-        }
-        return String(encoded.dropFirst().dropLast()) // strip the array brackets
+        guard let data = try? JSONEncoder().encode(value),
+              let encoded = String(data: data, encoding: .utf8)
+        else { return "\"\"" }
+        return encoded
     }
 }

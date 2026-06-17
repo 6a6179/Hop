@@ -16,6 +16,9 @@ struct RuleConfiguration: Identifiable, Hashable, Codable {
 }
 
 extension RuleConfiguration {
+    static let defaultConfiguration = RuleConfiguration(name: "Default", rules: appleSystemBypassRules)
+    static let builtInConfigurations = [defaultConfiguration, china(), iran()]
+
     /// Apple system services are intentionally direct in built-in presets so
     /// APNs, iCloud, captive-portal checks, updates, and Apple CDNs keep working
     /// even when the selected proxy is slow, blocked, or incompatible.

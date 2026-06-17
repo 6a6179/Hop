@@ -140,7 +140,6 @@ final class SecretStoreTests: XCTestCase {
         let profile = ProxyProfile(
             name: "Encrypted VLESS",
             endpoint: Endpoint(host: "edge.example.net", port: 443),
-            proto: .vless,
             options: .vless(VLESSOptions(
                 uuid: "11111111-1111-4111-8111-111111111111",
                 flow: "xtls-rprx-vision",

@@ -33,7 +33,7 @@ final class TunnelController {
     /// and the live connection count.
     private(set) var isMonitoringConnections = false
 
-    init(logs: [String] = SampleData.logs, maximumLogEntries: Int = LogRetention.fiveHundred.rawValue) {
+    init(logs: [String] = [], maximumLogEntries: Int = LogRetention.fiveHundred.rawValue) {
         self.logs = logs
         self.maximumLogEntries = maximumLogEntries
         telemetryClient.onStatus = { [weak self] counters in
@@ -136,8 +136,15 @@ final class TunnelController {
             }
             // Ensure the command-server auth token exists before the extension
             // starts; the extension and telemetry client read the same shared
-            // Keychain value to gate/authenticate the command socket.
-            SecretStore.runtime.ensureCommandServerSecret()
+            // Keychain value to gate/authenticate the command socket. If it
+            // cannot be read back, fail before starting: the extension refuses
+            // to run an unauthenticated command server.
+            let commandServerSecret = SecretStore.runtime.ensureCommandServerSecret()
+            guard !commandServerSecret.isEmpty,
+                  SecretStore.runtime.commandServerSecret() == commandServerSecret
+            else {
+                throw TunnelControllerError.runtimeSecretUnavailable
+            }
             let secretNonce = UUID().uuidString
             let configContent = try configBuilder.build(
                 profiles: profiles.map { $0.tokenizingSecrets(nonce: secretNonce) },
@@ -570,6 +577,17 @@ final class TunnelController {
     func closeConnection(id: String) {
         telemetryClient.closeConnection(id: id)
         appendLog("Requested close for connection \(id)")
+    }
+}
+
+private enum TunnelControllerError: LocalizedError {
+    case runtimeSecretUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .runtimeSecretUnavailable:
+            "The command-server authentication token could not be saved to the shared Keychain. Verify the keychain-access-groups entitlement on both Hop.app and HopTunnel.appex."
+        }
     }
 }
 

@@ -2,7 +2,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(HopStore.self) private var store
-    @State private var showingSampleRestore = false
     @State private var showingSettingsReset = false
 
     var body: some View {
@@ -95,12 +94,6 @@ struct SettingsView: View {
 
             Section("Data") {
                 Button(role: .destructive) {
-                    showingSampleRestore = true
-                } label: {
-                    Text("Restore Sample Profiles & Rules")
-                }
-
-                Button(role: .destructive) {
                     showingSettingsReset = true
                 } label: {
                     Text("Reset Settings")
@@ -117,13 +110,6 @@ struct SettingsView: View {
         }
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog("Restore sample data?", isPresented: $showingSampleRestore, titleVisibility: .visible) {
-            Button("Restore Samples", role: .destructive) {
-                store.restoreSampleData()
-            }
-        } message: {
-            Text("This replaces the current profiles and rules with the built-in samples.")
-        }
         .confirmationDialog("Reset settings?", isPresented: $showingSettingsReset, titleVisibility: .visible) {
             Button("Reset Settings", role: .destructive) {
                 store.resetSettings()

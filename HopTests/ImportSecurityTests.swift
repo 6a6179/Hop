@@ -172,7 +172,7 @@ final class ImportSecurityTests: XCTestCase {
         XCTAssertEqual(group.testOptions.toleranceMilliseconds, ImportPolicy.maxURLTestToleranceMilliseconds)
     }
 
-    func testDisallowedURLTestURLReplacedWithDefault() throws {
+    func testImportedURLTestURLIgnoredAndReplacedWithDefault() throws {
         let conf = """
         [Proxy]
         Tokyo = trojan, t.example.net, 443, password=p, tls=true
@@ -184,7 +184,7 @@ final class ImportSecurityTests: XCTestCase {
         let result = try importService.importText(conf)
         let group = try XCTUnwrap(result.groups.first { $0.name == "Auto" })
         XCTAssertEqual(group.testOptions.url, ProxyGroupTestOptions.defaultURL)
-        XCTAssertTrue(result.warnings.contains { $0.message.contains("disallowed URL-test URL") })
+        XCTAssertTrue(result.warnings.contains { $0.message.contains("ignored imported URL-test URL") })
     }
 
     // MARK: - TLS downgrade warnings (finding 2)
@@ -348,7 +348,6 @@ final class ImportSecurityTests: XCTestCase {
         let profile = ProxyProfile(
             name: "Evil\u{202E}Name",
             endpoint: Endpoint(host: "example.com", port: 443),
-            proto: .trojan,
             options: .trojan(TrojanOptions(password: "p")),
             security: .tls(TLSOptions(serverName: "example.com")),
         )

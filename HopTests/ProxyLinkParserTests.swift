@@ -2,13 +2,12 @@
 import XCTest
 
 final class ProxyLinkParserTests: XCTestCase {
-    private let parser = ProxyLinkParser()
     private let importService = ProxyImportService()
     private let x25519Encryption = "mlkem768x25519plus.native.0rtt..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     private let mlkem768Encryption = "mlkem768x25519plus.native.0rtt..\(String(repeating: "A", count: 1579))"
 
     func testParsesVLESSRealityLink() throws {
-        let profile = try parser.parse("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&sni=www.cloudflare.com&fp=chrome&pbk=PUBLICKEY&sid=abcd&spx=%2F&type=tcp&flow=xtls-rprx-vision#Tokyo")
+        let profile = try parse("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&sni=www.cloudflare.com&fp=chrome&pbk=PUBLICKEY&sid=abcd&spx=%2F&type=tcp&flow=xtls-rprx-vision#Tokyo")
 
         XCTAssertEqual(profile.proto, .vless)
         XCTAssertEqual(profile.endpoint.host, "edge.example.net")
@@ -25,7 +24,7 @@ final class ProxyLinkParserTests: XCTestCase {
 
     func testParsesVLESSRealityAliasFieldsAndALPN() throws {
         let link = "vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&server-name=www.microsoft.com&fingerprint=firefox&public-key=PUBLICKEY&short-id=abcd&spider_x=%2Falias%3Fed%3D204&pqv=MLDSA65VERIFY&alpn=h2,http/1.1&type=tcp#Alias"
-        let profile = try parser.parse(link)
+        let profile = try parse(link)
 
         XCTAssertEqual(profile.security.layer, .reality)
         XCTAssertEqual(profile.security.tls?.serverName, "www.microsoft.com")
@@ -38,7 +37,7 @@ final class ProxyLinkParserTests: XCTestCase {
     }
 
     func testParsesVLESSEncryptionAuthLink() throws {
-        let profile = try parser.parse("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&encryption=\(x25519Encryption)#Tokyo")
+        let profile = try parse("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&encryption=\(x25519Encryption)#Tokyo")
 
         if case let .vless(options) = profile.options {
             XCTAssertEqual(options.encryption, x25519Encryption)
@@ -58,7 +57,7 @@ final class ProxyLinkParserTests: XCTestCase {
     }
 
     func testParsesTrojanTLSLink() throws {
-        let profile = try parser.parse("trojan://secret@de.example.net:443?security=tls&sni=de.example.net&alpn=h2,http/1.1#Frankfurt")
+        let profile = try parse("trojan://secret@de.example.net:443?security=tls&sni=de.example.net&alpn=h2,http/1.1#Frankfurt")
 
         XCTAssertEqual(profile.proto, .trojan)
         XCTAssertEqual(profile.security.layer, .tls)
@@ -67,7 +66,7 @@ final class ProxyLinkParserTests: XCTestCase {
     }
 
     func testParsesHysteria2TLSObfsLink() throws {
-        let profile = try parser.parse("hysteria2://secret@nyc.example.net:443?security=tls&sni=nyc.example.net&obfs=salamander&obfs-password=obfs-secret#NYC")
+        let profile = try parse("hysteria2://secret@nyc.example.net:443?security=tls&sni=nyc.example.net&obfs=salamander&obfs-password=obfs-secret#NYC")
 
         XCTAssertEqual(profile.proto, .hysteria2)
         XCTAssertEqual(profile.security.layer, .tls)
@@ -80,7 +79,7 @@ final class ProxyLinkParserTests: XCTestCase {
     }
 
     func testParsesTUICTLSLink() throws {
-        let profile = try parser.parse("tuic://22222222-2222-4222-8222-222222222222:secret@tuic.example.net:443?sni=tuic.example.net&congestion_control=bbr#TUIC")
+        let profile = try parse("tuic://22222222-2222-4222-8222-222222222222:secret@tuic.example.net:443?sni=tuic.example.net&congestion_control=bbr#TUIC")
 
         XCTAssertEqual(profile.proto, .tuic)
         XCTAssertEqual(profile.security.layer, .tls)
@@ -92,7 +91,7 @@ final class ProxyLinkParserTests: XCTestCase {
     }
 
     func testParsesShadowsocksSIP002AndLegacyBase64Links() throws {
-        let sip002 = try parser.parse("ss://YWVzLTI1Ni1nY206c2VjcmV0@ss.example.net:8388#SIP002")
+        let sip002 = try parse("ss://YWVzLTI1Ni1nY206c2VjcmV0@ss.example.net:8388#SIP002")
         XCTAssertEqual(sip002.proto, .shadowsocks)
         XCTAssertEqual(sip002.endpoint.host, "ss.example.net")
         if case let .shadowsocks(options) = sip002.options {
@@ -103,7 +102,7 @@ final class ProxyLinkParserTests: XCTestCase {
         }
 
         let legacyPayload = "aes-128-gcm:legacy-pass@legacy.example.net:8388".base64Encoded()
-        let legacy = try parser.parse("ss://\(legacyPayload)#Legacy")
+        let legacy = try parse("ss://\(legacyPayload)#Legacy")
         XCTAssertEqual(legacy.endpoint.host, "legacy.example.net")
         if case let .shadowsocks(options) = legacy.options {
             XCTAssertEqual(options.method, "aes-128-gcm")
@@ -132,7 +131,7 @@ final class ProxyLinkParserTests: XCTestCase {
         }
         """
 
-        let profile = try parser.parse("vmess://\(vmessJSON.base64Encoded())")
+        let profile = try parse("vmess://\(vmessJSON.base64Encoded())")
 
         XCTAssertEqual(profile.name, "VMess WS")
         XCTAssertEqual(profile.proto, .vmess)
@@ -151,7 +150,7 @@ final class ProxyLinkParserTests: XCTestCase {
         {"ps":"NoScy","add":"vmess.example.net","port":"443","id":"33333333-3333-4333-8333-333333333333","aid":"0","net":"tcp","type":"none"}
         """
 
-        let profile = try parser.parse("vmess://\(vmessJSON.base64Encoded())")
+        let profile = try parse("vmess://\(vmessJSON.base64Encoded())")
 
         if case let .vmess(options) = profile.options {
             XCTAssertEqual(options.security, "auto", "header type must not become the cipher")
@@ -166,14 +165,14 @@ final class ProxyLinkParserTests: XCTestCase {
             {"ps":"Bad","add":"vmess.example.net","port":\(badPort),"id":"33333333-3333-4333-8333-333333333333","net":"tcp"}
             """
             XCTAssertThrowsError(
-                try parser.parse("vmess://\(vmessJSON.base64Encoded())"),
+                try parse("vmess://\(vmessJSON.base64Encoded())"),
                 "VMess port \(badPort) must be rejected",
             )
         }
     }
 
     func testParsesVMessURLSecurityAsTLSAndEncryptionAsCipher() throws {
-        let profile = try parser.parse("vmess://33333333-3333-4333-8333-333333333333@vmess.example.net:443?security=tls&encryption=chacha20-poly1305&sni=vmess.example.net&alpn=h2,http/1.1&type=ws&path=%2Fws&host=cdn.example.net#VMess")
+        let profile = try parse("vmess://33333333-3333-4333-8333-333333333333@vmess.example.net:443?security=tls&encryption=chacha20-poly1305&sni=vmess.example.net&alpn=h2,http/1.1&type=ws&path=%2Fws&host=cdn.example.net#VMess")
 
         XCTAssertEqual(profile.security.layer, .tls)
         XCTAssertEqual(profile.security.tls?.serverName, "vmess.example.net")
@@ -220,14 +219,14 @@ final class ProxyLinkParserTests: XCTestCase {
 
     func testHysteria2WithoutSecurityParamDefaultsToTLS() throws {
         // No `security=` or `sni=` or `tls=` param — just the bare minimum
-        let profile = try parser.parse("hysteria2://pass@example.com:443#n")
+        let profile = try parse("hysteria2://pass@example.com:443#n")
         XCTAssertEqual(profile.security.layer, .tls, "hysteria2 with no security param must default to TLS")
         XCTAssertEqual(profile.security.tls?.serverName, "example.com", "server name must default to the host")
     }
 
     func testTUICWithoutSecurityParamDefaultsToTLS() throws {
         // tuic:// requires uuid:password in user info
-        let profile = try parser.parse("tuic://22222222-2222-4222-8222-222222222222:pass@example.com:443#n")
+        let profile = try parse("tuic://22222222-2222-4222-8222-222222222222:pass@example.com:443#n")
         XCTAssertEqual(profile.security.layer, .tls, "tuic with no security param must default to TLS")
         XCTAssertEqual(profile.security.tls?.serverName, "example.com", "server name must default to the host")
     }
@@ -259,7 +258,7 @@ final class ProxyLinkParserTests: XCTestCase {
             "trojan://secret@de.example.net:65536?security=tls#TooBig",
             "hysteria2://secret@nyc.example.net:99999#WayTooBig",
         ] {
-            XCTAssertThrowsError(try parser.parse(badLink), "\(badLink) must be rejected")
+            XCTAssertThrowsError(try parse(badLink), "\(badLink) must be rejected")
         }
     }
 
@@ -310,6 +309,13 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(result.profiles.first?.security.reality?.shortID, "abcd")
         XCTAssertEqual(result.profiles.first?.security.reality?.spiderX, "/shadow")
         XCTAssertEqual(result.profiles.first?.security.reality?.mldsa65Verify, "MLDSA65VERIFY")
+    }
+
+    private func parse(_ rawValue: String) throws -> ProxyProfile {
+        guard let profile = try importService.importText(rawValue).profiles.first else {
+            throw ProxyLinkParseError.noImportableItems
+        }
+        return profile
     }
 }
 

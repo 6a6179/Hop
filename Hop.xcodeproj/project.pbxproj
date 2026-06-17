@@ -57,12 +57,14 @@
 		9D3F5EB032DEE9DD4057E073 /* ActiveBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5FCAFB69C6699C719D4BBF9 /* ActiveBadge.swift */; };
 		9D665400C7AA86557E1617CB /* HopTunnel.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2F56D7492B7FE1C62E0D33C4 /* HopTunnel.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		9EEEB24C881C3C68E0352A2C /* TransportOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69C0C9005A0C151FA0DC2689 /* TransportOptions.swift */; };
+		9F968F2746226E0C71AA4AEA /* TunnelConfigAuthenticator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E06330102DC382967E53A68 /* TunnelConfigAuthenticator.swift */; };
 		9FB2271C955A485CAA0AFCFB /* ProtocolOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = F292E846B530A70604A3BCD3 /* ProtocolOptions.swift */; };
 		A57BC22CEDEA71F36A2FA71E /* ProfileImportPayloadDetectorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BAB96E3BCD490ABD070B250 /* ProfileImportPayloadDetectorTests.swift */; };
 		AAE7EED0088A0A41343A6655 /* ProxyProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D3E00168EA2AEF3116D3EC8 /* ProxyProtocol.swift */; };
 		AC74C8D9D2A6AD187A7C182D /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 63AAF67F67AFF0C9362B98CF /* libresolv.tbd */; };
 		AD240E6D07071E6DC56FB0E6 /* TunnelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */; };
 		AD5430672945FB6F2C5DF2F3 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BB6FA5218140CC9E14D3B74 /* LogsView.swift */; };
+		B49CDA4D0637BE4168E9C21F /* TunnelConfigAuthenticator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E06330102DC382967E53A68 /* TunnelConfigAuthenticator.swift */; };
 		B992175866E7587411D8B96F /* SubscriptionRefreshMerger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86A346D2391DE82BBC35BDEB /* SubscriptionRefreshMerger.swift */; };
 		BC129EDCE92BCE3DD864260E /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF668543CBA3F5DEE434ADEF /* SettingsView.swift */; };
 		BC23B6D0A4235D9BEF6B9CF5 /* ProxyLinkParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = F168B262ED2CE3C6812A5D8D /* ProxyLinkParser.swift */; };
@@ -122,6 +124,7 @@
 		2C0F39000C684AB2876861F2 /* RoutingModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoutingModels.swift; sourceTree = "<group>"; };
 		2C525BE7E4E464399AFB088D /* LatencyTester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyTester.swift; sourceTree = "<group>"; };
 		2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelController.swift; sourceTree = "<group>"; };
+		2E06330102DC382967E53A68 /* TunnelConfigAuthenticator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelConfigAuthenticator.swift; sourceTree = "<group>"; };
 		2F56D7492B7FE1C62E0D33C4 /* HopTunnel.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = HopTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		3533A427455D1019D363597D /* ProfileSecuritySummary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSecuritySummary.swift; sourceTree = "<group>"; };
 		3D8ACBB15D03BF2C2E97AFD2 /* ProfileImportPayloadDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileImportPayloadDetector.swift; sourceTree = "<group>"; };
@@ -335,6 +338,7 @@
 			children = (
 				4DB58A1962B36732A51D8BF8 /* SecretReference.swift */,
 				1E1B76DFDAC1976712EA1386 /* SecretStore.swift */,
+				2E06330102DC382967E53A68 /* TunnelConfigAuthenticator.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -581,6 +585,7 @@
 				0FC75EB6A71495371BC82BB0 /* SubscriptionFetcher.swift in Sources */,
 				B992175866E7587411D8B96F /* SubscriptionRefreshMerger.swift in Sources */,
 				9EEEB24C881C3C68E0352A2C /* TransportOptions.swift in Sources */,
+				B49CDA4D0637BE4168E9C21F /* TunnelConfigAuthenticator.swift in Sources */,
 				AD240E6D07071E6DC56FB0E6 /* TunnelController.swift in Sources */,
 				02332333A52B2D2D774707B7 /* TunnelModels.swift in Sources */,
 				66E7FE798EF7CF308F14BE30 /* TunnelTelemetryClient.swift in Sources */,
@@ -595,6 +600,7 @@
 				E85711D6F29ED59CCD026AA3 /* PlatformInterface.swift in Sources */,
 				6AF29EED002D33D2B3A140F4 /* SecretReference.swift in Sources */,
 				C401585B7F6AC399B4DB9679 /* SecretStore.swift in Sources */,
+				9F968F2746226E0C71AA4AEA /* TunnelConfigAuthenticator.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -14,7 +14,7 @@ final class RuleConfigurationTests: XCTestCase {
 
     func testDefaultConfigurationBypassesAppleSystemServices() throws {
         let rule = try XCTUnwrap(
-            SampleData.defaultConfiguration.rules.first {
+            RuleConfiguration.defaultConfiguration.rules.first {
                 $0.kind == .domainSuffix && $0.target == .direct && $0.value.contains("push.apple.com")
             },
         )
@@ -81,7 +81,7 @@ final class RuleConfigurationTests: XCTestCase {
         let store = HopStore(dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()))
 
         XCTAssertEqual(store.ruleConfigurations.count, 3)
-        XCTAssertEqual(store.activeRuleConfigurationID, SampleData.defaultConfiguration.id)
+        XCTAssertEqual(store.activeRuleConfigurationID, RuleConfiguration.defaultConfiguration.id)
 
         let china = try? XCTUnwrap(store.ruleConfigurations.first { $0.name == "China" })
         try store.selectRuleConfiguration(id: XCTUnwrap(china?.id))

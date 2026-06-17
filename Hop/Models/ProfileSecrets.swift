@@ -14,6 +14,41 @@ enum ProfileSecretField: String, CaseIterable {
     case realityMLDSA65Verify
 }
 
+extension SubscriptionSource {
+    var keychainURLItem: (key: String, value: String)? {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        return (HopSecret.subscriptionURLKey(subscriptionID: id), trimmed)
+    }
+
+    func redactingSecrets() -> SubscriptionSource {
+        var copy = self
+        copy.url = ""
+        return copy
+    }
+
+    func hydratingSecrets(from store: SecretStore) -> SubscriptionSource {
+        var copy = self
+        copy.url = store.value(forKey: HopSecret.subscriptionURLKey(subscriptionID: id)) ?? url
+        return copy
+    }
+
+    var redactedDisplayURL: String {
+        guard let components = URLComponents(string: url),
+              let scheme = components.scheme,
+              let host = components.host,
+              !host.isEmpty
+        else {
+            return url.isEmpty ? "Subscription URL unavailable" : "Subscription URL stored securely"
+        }
+
+        let port = components.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port) (stored securely)"
+    }
+}
+
 extension ProxyProfile {
     /// Non-empty secret values currently set on this profile.
     var secretFieldValues: [ProfileSecretField: String] {

@@ -44,6 +44,8 @@ struct DashboardView: View {
 
             Section("Outbound") {
                 Picker("Active", selection: $store.selectedTarget) {
+                    Text("Direct").tag(Optional(OutboundTarget.direct))
+
                     if !store.groups.isEmpty {
                         Section("Groups") {
                             ForEach(store.groups.filter(\.isEnabled)) { group in
@@ -142,14 +144,14 @@ private struct TrafficSummaryRows: View {
     }
 
     private var speedSummary: String {
-        let uplink = store.tunnel.counters.uplinkBytesPerSecond.formattedBytes
-        let downlink = store.tunnel.counters.downlinkBytesPerSecond.formattedBytes
+        let uplink = store.tunnel.counters.uplinkBytesPerSecond.formatted(.byteCount(style: .file))
+        let downlink = store.tunnel.counters.downlinkBytesPerSecond.formatted(.byteCount(style: .file))
         return "↑ \(uplink)/s · ↓ \(downlink)/s"
     }
 
     private var transferSummary: String {
-        let uplink = store.tunnel.counters.uplinkBytes.formattedBytes
-        let downlink = store.tunnel.counters.downlinkBytes.formattedBytes
+        let uplink = store.tunnel.counters.uplinkBytes.formatted(.byteCount(style: .file))
+        let downlink = store.tunnel.counters.downlinkBytes.formatted(.byteCount(style: .file))
         return "↑ \(uplink) · ↓ \(downlink)"
     }
 
@@ -157,12 +159,6 @@ private struct TrafficSummaryRows: View {
         // From the always-on status stream, not the connection list — the
         // per-connection event stream only runs while ConnectionsView is open.
         "\(store.tunnel.counters.activeConnections) active"
-    }
-}
-
-private extension Int64 {
-    var formattedBytes: String {
-        formatted(.byteCount(style: .file))
     }
 }
 

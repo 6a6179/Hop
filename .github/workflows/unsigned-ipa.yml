@@ -14,7 +14,7 @@ on:
       - "scripts/**"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -27,9 +27,12 @@ jobs:
 
     steps:
       # Third-party actions are pinned to commit SHAs (tag in the comment):
-      # mutable tags can be repointed, and this job's token has contents:write.
+      # mutable tags can be repointed. The build job has read-only contents
+      # permissions and checkout does not persist credentials into .git.
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          persist-credentials: false
 
       - name: Show Xcode and SDK versions
         run: |
@@ -54,13 +57,8 @@ jobs:
             brew install xcodegen
           fi
 
-          if ! command -v gh >/dev/null 2>&1; then
-            brew install gh
-          fi
-
           go version
           xcodegen --version
-          gh --version
 
       - name: Cache Go build artifacts
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
@@ -178,25 +176,6 @@ jobs:
           sha256="$(shasum -a 256 "$IPA" | awk '{print $1}')"
           printf '%s  %s\n' "$sha256" "Hop-unsigned.ipa" > build/UnsignedIPA/Hop-unsigned.ipa.sha256
           release_tag="unsigned-ipa-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
-          release_name="Hop unsigned IPA ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
-          release_notes="build/UnsignedIPA/release-notes.md"
-
-          {
-            echo "RELEASE_TAG=${release_tag}"
-            echo "RELEASE_NAME=${release_name}"
-            echo "RELEASE_NOTES=${release_notes}"
-          } >> "$GITHUB_ENV"
-
-          cat > "$release_notes" <<EOF
-          Unsigned IPA built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}.
-
-          - Branch/ref: ${GITHUB_REF_NAME}
-          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
-          - Size: ${size_bytes} bytes
-          - SHA-256: ${sha256}
-
-          This IPA is ad-hoc fakesigned: each binary carries its required entitlements (Packet Tunnel, App Groups, Keychain) with a placeholder XXXXXXXXXX. team prefix so sideload signers can re-map them. It still needs proper signing/provisioning before installation on a physical device. When re-signing, make sure your tool signs the embedded HopTunnel.appex with the Packet Tunnel entitlement — without it iOS kills the VPN extension at launch.
-          EOF
 
           {
             echo "### Unsigned IPA"
@@ -212,6 +191,7 @@ jobs:
       - name: Upload IPA artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          name: Hop-unsigned.ipa
           path: build/UnsignedIPA/Hop-unsigned.ipa
           archive: false
           if-no-files-found: error
@@ -220,10 +200,29 @@ jobs:
       - name: Upload checksum artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
+          name: Hop-unsigned.ipa.sha256
           path: build/UnsignedIPA/Hop-unsigned.ipa.sha256
           archive: false
           if-no-files-found: error
           retention-days: 14
+
+  publish-release:
+    name: Publish unsigned IPA release
+    needs: unsigned-ipa
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/UnsignedIPA
+          gh run download "$GITHUB_RUN_ID" --name Hop-unsigned.ipa --dir build/UnsignedIPA
+          gh run download "$GITHUB_RUN_ID" --name Hop-unsigned.ipa.sha256 --dir build/UnsignedIPA
 
       - name: Publish GitHub release
         env:
@@ -231,15 +230,37 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh release create "$RELEASE_TAG" \
-            "build/UnsignedIPA/Hop-unsigned.ipa#Hop-unsigned.ipa" \
-            "build/UnsignedIPA/Hop-unsigned.ipa.sha256#Hop-unsigned.ipa.sha256" \
+          IPA="build/UnsignedIPA/Hop-unsigned.ipa"
+          CHECKSUM="build/UnsignedIPA/Hop-unsigned.ipa.sha256"
+          test -f "$IPA"
+          test -f "$CHECKSUM"
+
+          size_bytes="$(stat -c '%s' "$IPA")"
+          sha256="$(awk '{print $1}' "$CHECKSUM")"
+          release_tag="unsigned-ipa-${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          release_name="Hop unsigned IPA ${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          release_notes="build/UnsignedIPA/release-notes.md"
+
+          cat > "$release_notes" <<EOF
+          Unsigned IPA built from ${GITHUB_REPOSITORY}@${GITHUB_SHA}.
+
+          - Branch/ref: ${GITHUB_REF_NAME}
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Size: ${size_bytes} bytes
+          - SHA-256: ${sha256}
+
+          This IPA is ad-hoc fakesigned: each binary carries its required entitlements (Packet Tunnel, App Groups, Keychain) with a placeholder XXXXXXXXXX. team prefix so sideload signers can re-map them. It still needs proper signing/provisioning before installation on a physical device. When re-signing, make sure your tool signs the embedded HopTunnel.appex with the Packet Tunnel entitlement — without it iOS kills the VPN extension at launch.
+          EOF
+
+          gh release create "$release_tag" \
+            "$IPA#Hop-unsigned.ipa" \
+            "$CHECKSUM#Hop-unsigned.ipa.sha256" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
-            --title "$RELEASE_NAME" \
-            --notes-file "$RELEASE_NOTES" \
+            --title "$release_name" \
+            --notes-file "$release_notes" \
             --prerelease \
             --latest=false
 
-          release_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          release_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${release_tag}"
           echo "- Release: ${release_url}" >> "$GITHUB_STEP_SUMMARY"

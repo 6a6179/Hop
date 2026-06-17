@@ -22,7 +22,6 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         let vless = ProxyProfile(
             name: "Tokyo",
             endpoint: Endpoint(host: "jp.example.com", port: 443),
-            proto: .vless,
             options: .vless(VLESSOptions(uuid: "u", flow: nil)),
             security: .none,
         )
@@ -323,7 +322,6 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         ProxyProfile(
             name: name,
             endpoint: Endpoint(host: host, port: 443),
-            proto: .trojan,
             options: .trojan(TrojanOptions(password: "secret")),
             security: .tls(TLSOptions(serverName: host)),
         )
@@ -333,7 +331,6 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         ProxyProfile(
             name: name,
             endpoint: Endpoint(host: "jp.example.com", port: 443),
-            proto: .trojan,
             options: .trojan(TrojanOptions(password: "secret")),
             security: .tls(TLSOptions(serverName: "jp.example.com", allowInsecure: true)),
         )

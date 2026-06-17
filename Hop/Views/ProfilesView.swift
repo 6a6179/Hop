@@ -6,14 +6,11 @@ struct ProfilesView: View {
     @State private var selectedSection: ProfilesSection = .nodes
     @State private var activeSheet: ProfilesSheet?
     @State private var importNotice: ProfileImportNotice?
-    @State private var isHandlingScannedPayload = false
     @State private var searchText = ""
-    /// An import held back because it would save allow-insecure nodes —
-    /// QR-scanned payloads and subscription refreshes that introduce new
-    /// insecure nodes; applied only after the user confirms (the sheet flows
-    /// gate themselves).
-    @State private var pendingInsecureScan: PendingInsecureScan?
-    @State private var showInsecureScanConfirmation = false
+    /// A refresh held back because it would add new allow-insecure nodes;
+    /// applied only after the user confirms.
+    @State private var pendingInsecureRefresh: PendingInsecureRefresh?
+    @State private var showInsecureRefreshConfirmation = false
     @State private var shareQRItem: ShareQRItem?
 
     private let importService = ProxyImportService()
@@ -27,17 +24,6 @@ struct ProfilesView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-            }
-
-            if isHandlingScannedPayload {
-                Section {
-                    HStack(spacing: 12) {
-                        ProgressView()
-                        Text("Importing scanned code...")
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 4)
-                }
             }
 
             switch selectedSection {
@@ -58,11 +44,8 @@ struct ProfilesView: View {
                         Button("Scan QR Code", systemImage: "qrcode.viewfinder") {
                             activeSheet = .scanner
                         }
-                        Button("Paste Links or Config", systemImage: "doc.on.clipboard") {
+                        Button("Paste Links, Config, or Subscription", systemImage: "doc.on.clipboard") {
                             activeSheet = .importText(prefill: "")
-                        }
-                        Button("Add Subscription URL", systemImage: "link.badge.plus") {
-                            activeSheet = .addSubscription
                         }
                     }
 
@@ -99,10 +82,6 @@ struct ProfilesView: View {
                     }
                     selectedSection = .nodes
                 }
-            case .addSubscription:
-                AddSubscriptionSheet(importService: importService) { subscription, result in
-                    saveImportedSubscription(subscription, result: result, addedTitle: "Subscription Added", confirmedInsecureNodes: true)
-                }
             case let .importText(prefill):
                 ImportTextSheet(importService: importService, initialText: prefill) { saveResult in
                     switch saveResult {
@@ -111,13 +90,15 @@ struct ProfilesView: View {
                         selectedSection = .nodes
                         importNotice = ProfileImportNotice(title: "Import Complete", message: result.summary)
                     case let .subscription(subscription, result):
-                        saveImportedSubscription(subscription, result: result, addedTitle: "Subscription URL Imported", confirmedInsecureNodes: true)
+                        saveImportedSubscription(subscription, result: result, addedTitle: "Subscription URL Imported")
                     }
                 }
             case .scanner:
                 QRCodeScannerSheet { payload in
                     activeSheet = nil
-                    handleScannedPayload(payload)
+                    DispatchQueue.main.async {
+                        activeSheet = .importText(prefill: payload)
+                    }
                 }
             }
         }
@@ -130,10 +111,10 @@ struct ProfilesView: View {
         }
         .searchable(text: $searchText, prompt: "Search nodes, groups, subscriptions")
         .insecureTLSImportConfirmation(
-            isPresented: $showInsecureScanConfirmation,
-            profileNames: pendingInsecureScan?.insecureProfileNames ?? [],
+            isPresented: $showInsecureRefreshConfirmation,
+            profileNames: pendingInsecureRefresh?.insecureProfileNames ?? [],
         ) {
-            applyPendingInsecureScan()
+            applyPendingInsecureRefresh()
         }
         .onAppear {
             consumePendingExternalImport()
@@ -315,7 +296,7 @@ struct ProfilesView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(subscription.name)
                                 .font(.body.weight(.semibold))
-                            Text(subscription.url)
+                            Text(subscription.redactedDisplayURL)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
@@ -370,103 +351,24 @@ struct ProfilesView: View {
         }
     }
 
-    private func handleScannedPayload(_ payload: String) {
-        let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            importNotice = ProfileImportNotice(title: "Empty Code", message: "The scanned code did not contain importable text.")
+    private func applyPendingInsecureRefresh() {
+        guard let pending = pendingInsecureRefresh else {
             return
         }
-
-        switch ProfileImportPayloadDetector().detect(trimmed) {
-        case let .subscription(url):
-            importScannedSubscription(url)
-        case let .importText(importText):
-            importScannedText(importText)
-        case nil:
-            importNotice = ProfileImportNotice(title: "Empty Code", message: "The scanned code did not contain importable text.")
-        }
+        pendingInsecureRefresh = nil
+        store.confirmInsecureSubscriptionRefresh(pending.result, for: pending.subscription)
+        selectedSection = .subscriptions
+        importNotice = ProfileImportNotice(title: "Subscription Updated", message: pending.result.summary)
     }
 
-    private func importScannedText(_ text: String) {
-        do {
-            let result = try importService.importText(text)
-            guard result.insecureTLSProfileNames.isEmpty else {
-                pendingInsecureScan = PendingInsecureScan(result: result, action: .importText)
-                showInsecureScanConfirmation = true
-                return
-            }
-            applyScannedImport(result)
-        } catch {
-            importNotice = ProfileImportNotice(title: "Could Not Import Code", message: error.localizedDescription)
-        }
-    }
-
-    private func applyScannedImport(_ result: ImportResult) {
-        store.applyImport(result)
-        selectedSection = .nodes
-        importNotice = ProfileImportNotice(title: "Scanned Import Complete", message: result.summary)
-    }
-
-    private func applyPendingInsecureScan() {
-        guard let pending = pendingInsecureScan else {
-            return
-        }
-        pendingInsecureScan = nil
-        switch pending.action {
-        case .importText:
-            applyScannedImport(pending.result)
-        case let .addSubscription(subscription, addedTitle):
-            addNewSubscription(subscription, result: pending.result, addedTitle: addedTitle)
-        case let .refreshSubscription(subscription):
-            store.confirmInsecureSubscriptionRefresh(pending.result, for: subscription)
-            selectedSection = .subscriptions
-            importNotice = ProfileImportNotice(title: "Subscription Updated", message: pending.result.summary)
-        }
-    }
-
-    private func importScannedSubscription(_ url: URL) {
-        isHandlingScannedPayload = true
-        Task {
-            do {
-                let result = try await importService.importSubscription(url: url)
-                let subscription = SubscriptionSource(
-                    name: url.host() ?? "Subscription",
-                    url: url.absoluteString,
-                    lastUpdatedAt: .now,
-                    lastImportSummary: result.summary,
-                )
-                await MainActor.run {
-                    saveImportedSubscription(subscription, result: result, addedTitle: "Scanned Subscription Added")
-                    isHandlingScannedPayload = false
-                }
-            } catch {
-                await MainActor.run {
-                    isHandlingScannedPayload = false
-                    importNotice = ProfileImportNotice(title: "Could Not Import Subscription", message: error.localizedDescription)
-                }
-            }
-        }
-    }
-
-    /// `confirmedInsecureNodes` is true for the sheet flows, which already ran
-    /// the allow-insecure confirmation before handing the result over; the
-    /// QR-scan path passes false so insecure nodes get gated here. The
-    /// existing-subscription branch is a refresh: matched nodes are protected
-    /// by the merger's downgrade guards, but *new* allow-insecure nodes still
-    /// need the blocking confirmation before they are saved.
-    private func saveImportedSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String, confirmedInsecureNodes: Bool = false) {
+    /// Sheet flows already ran the allow-insecure confirmation before handing
+    /// the result over; manual refreshes gate new insecure nodes separately.
+    private func saveImportedSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
         if let existing = store.subscriptions.first(where: { normalizedSubscriptionURL($0.url) == normalizedSubscriptionURL(subscription.url) }) {
             var refreshedSubscription = subscription
             refreshedSubscription.id = existing.id
             if isDefaultSubscriptionName(subscription.name, for: subscription.url) {
                 refreshedSubscription.name = existing.name
-            }
-
-            let newInsecureNames = SubscriptionRefreshMerger.newInsecureProfileNames(existing: store.profiles, imported: result.profiles)
-            guard confirmedInsecureNodes || newInsecureNames.isEmpty else {
-                pendingInsecureScan = PendingInsecureScan(result: result, action: .refreshSubscription(refreshedSubscription), insecureProfileNames: newInsecureNames)
-                showInsecureScanConfirmation = true
-                return
             }
 
             store.applySubscriptionRefresh(result, updating: refreshedSubscription)
@@ -475,11 +377,8 @@ struct ProfilesView: View {
                 title: "Subscription Updated",
                 message: "\(result.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
             )
-        } else if confirmedInsecureNodes || result.insecureTLSProfileNames.isEmpty {
-            addNewSubscription(subscription, result: result, addedTitle: addedTitle)
         } else {
-            pendingInsecureScan = PendingInsecureScan(result: result, action: .addSubscription(subscription, addedTitle: addedTitle))
-            showInsecureScanConfirmation = true
+            addNewSubscription(subscription, result: result, addedTitle: addedTitle)
         }
     }
 
@@ -516,8 +415,8 @@ struct ProfilesView: View {
             case let .applied(summary):
                 importNotice = ProfileImportNotice(title: "Subscription Refreshed", message: summary)
             case let .needsInsecureConfirmation(result, newInsecureNames):
-                pendingInsecureScan = PendingInsecureScan(result: result, action: .refreshSubscription(subscription), insecureProfileNames: newInsecureNames)
-                showInsecureScanConfirmation = true
+                pendingInsecureRefresh = PendingInsecureRefresh(result: result, subscription: subscription, insecureProfileNames: newInsecureNames)
+                showInsecureRefreshConfirmation = true
             case let .failed(message):
                 importNotice = ProfileImportNotice(title: "Could Not Refresh Subscription", message: message)
             }
@@ -528,7 +427,6 @@ struct ProfilesView: View {
         ProxyProfile(
             name: "New VLESS Node",
             endpoint: Endpoint(host: "example.com", port: 443),
-            proto: .vless,
             options: .vless(VLESSOptions(uuid: "", flow: nil)),
             security: .tls(TLSOptions(serverName: "example.com")),
         )
@@ -565,7 +463,6 @@ private enum ProfilesSection: String, CaseIterable, Identifiable {
 private enum ProfilesSheet: Identifiable {
     case profile(ProxyProfile)
     case group(ProxyGroup)
-    case addSubscription
     case importText(prefill: String)
     case scanner
 
@@ -575,8 +472,6 @@ private enum ProfilesSheet: Identifiable {
             "profile-\(profile.id.uuidString)"
         case let .group(group):
             "group-\(group.id.uuidString)"
-        case .addSubscription:
-            "add-subscription"
         case let .importText(prefill):
             // The prefill participates in identity so a hop:// payload arriving
             // while the sheet is already open re-presents it with the new text
@@ -588,28 +483,15 @@ private enum ProfilesSheet: Identifiable {
     }
 }
 
-/// An import parked behind the blocking allow-insecure confirmation: a
-/// QR-scanned payload, a scanned subscription, or a refresh that introduces
-/// new insecure nodes. `action` says how to apply it once confirmed.
-private struct PendingInsecureScan {
-    enum Action {
-        case importText
-        case addSubscription(SubscriptionSource, addedTitle: String)
-        case refreshSubscription(SubscriptionSource)
-    }
-
+/// A refresh parked behind the blocking allow-insecure confirmation because it
+/// introduces new insecure nodes.
+private struct PendingInsecureRefresh {
     var result: ImportResult
-    var action: Action
+    var subscription: SubscriptionSource
     /// Names shown in the confirmation. Refreshes list only the *newly*
     /// insecure nodes — matched nodes that were already allow-insecure are not
     /// a new decision.
     var insecureProfileNames: [String]
-
-    init(result: ImportResult, action: Action, insecureProfileNames: [String]? = nil) {
-        self.result = result
-        self.action = action
-        self.insecureProfileNames = insecureProfileNames ?? result.insecureTLSProfileNames
-    }
 }
 
 private struct ProfileImportNotice: Identifiable {
