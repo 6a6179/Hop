@@ -1,12 +1,12 @@
 import Foundation
 
-struct ProfileImportPayloadDetector {
+enum ProfileImportPayloadDetector {
     enum Payload: Equatable {
         case importText(String)
         case subscription(URL)
     }
 
-    func detect(_ rawValue: String) -> Payload? {
+    static func detect(_ rawValue: String) -> Payload? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return nil
@@ -19,7 +19,7 @@ struct ProfileImportPayloadDetector {
         return .importText(trimmed)
     }
 
-    private func subscriptionURL(from value: String) -> URL? {
+    private static func subscriptionURL(from value: String) -> URL? {
         guard let components = URLComponents(string: value),
               components.scheme?.lowercased() == "https",
               components.host?.isEmpty == false,

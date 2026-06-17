@@ -68,31 +68,31 @@ extension ProxyImportService {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Shadowsocks requires method and password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .shadowsocks, options: .shadowsocks(ShadowsocksOptions(method: method, password: password)), security: security)
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .shadowsocks(ShadowsocksOptions(method: method, password: password)), security: security)
         case "vmess":
             guard let password = keyed["password"] ?? values[safe: 3] else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): VMess requires password UUID."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .vmess, options: .vmess(VMessOptions(uuid: password, security: keyed["method"] ?? values[safe: 2] ?? "auto", alterID: Int(keyed["alterid"] ?? keyed["alter-id"] ?? "0") ?? 0)), security: security, transport: shadowrocketTransport(keyed: keyed))
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vmess(VMessOptions(uuid: password, security: keyed["method"] ?? values[safe: 2] ?? "auto", alterID: Int(keyed["alterid"] ?? keyed["alter-id"] ?? "0") ?? 0)), security: security, transport: shadowrocketTransport(keyed: keyed))
         case "vless":
             guard let password = keyed["password"] ?? keyed["uuid"] ?? values[safe: 2] else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): VLESS requires password UUID."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .vless, options: .vless(VLESSOptions(uuid: password, flow: keyed["flow"], encryption: keyed["encryption"])), security: security, transport: shadowrocketTransport(keyed: keyed))
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vless(VLESSOptions(uuid: password, flow: keyed["flow"], encryption: keyed["encryption"])), security: security, transport: shadowrocketTransport(keyed: keyed))
         case "trojan":
             guard let password = keyed["password"] ?? values[safe: 2] else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Trojan requires password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .trojan, options: .trojan(TrojanOptions(password: password)), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security, transport: shadowrocketTransport(keyed: keyed))
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .trojan(TrojanOptions(password: password)), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security, transport: shadowrocketTransport(keyed: keyed))
         case "hysteria", "hysteria2":
             guard let auth = keyed["auth"] ?? keyed["password"] ?? values[safe: 2] else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Hysteria2 requires auth/password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .hysteria2, options: .hysteria2(Hysteria2Options(password: auth, obfs: keyed["obfs"], obfsPassword: keyedValue(keyed, "obfsparam", "obfs-param", "obfs_password", "obfs-password"))), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .hysteria2(Hysteria2Options(password: auth, obfs: keyed["obfs"], obfsPassword: keyedValue(keyed, "obfsparam", "obfs-param", "obfs_password", "obfs-password"))), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
         case "tuic":
             guard let password = keyed["password"] ?? values[safe: 3],
                   let user = keyed["user"] ?? keyed["uuid"] ?? values[safe: 2]
@@ -100,11 +100,11 @@ extension ProxyImportService {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): TUIC requires user and password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .tuic, options: .tuic(TUICOptions(uuid: user, password: password, congestionControl: keyedValue(keyed, "congestion-control", "congestion_control", "congestioncontrol"))), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .tuic(TUICOptions(uuid: user, password: password, congestionControl: keyedValue(keyed, "congestion-control", "congestion_control", "congestioncontrol"))), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
         case "http", "https":
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .http, options: .http(HTTPOptions(username: values[safe: 2], password: values[safe: 3])), security: security)
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .http(HTTPOptions(username: values[safe: 2], password: values[safe: 3])), security: security)
         case "socks5", "socks5-tls":
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), proto: .socks, options: .socks(SOCKSOptions(username: values[safe: 2], password: values[safe: 3])), security: security)
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .socks(SOCKSOptions(username: values[safe: 2], password: values[safe: 3])), security: security)
         default:
             result.warnings.append(ImportWarning(message: "Imported unsupported proxy \(name) with type \(type) as a warning."))
             profile = nil
@@ -150,28 +150,31 @@ extension ProxyImportService {
             var resolvedMembers = members
             var groupWarning: String?
             if let filter = keyed["policy-regex-filter"] {
-                if ImportPolicy.isSafeRegexPattern(filter) {
+                let literalFilter = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !literalFilter.isEmpty, literalFilter.utf8.count <= ImportPolicy.maxRegexPatternLength {
                     if resolvedMembers.isEmpty {
+                        // Do not evaluate import-supplied regex with ICU here:
+                        // even conservative pattern checks miss ambiguous
+                        // alternations such as `(a|aa)+$`. Treat the imported
+                        // filter as a bounded literal substring instead.
                         resolvedMembers = result.profiles
-                            // Bound the input length too: the filter passed the
-                            // nested-quantifier check, but cap match cost regardless.
-                            .filter { $0.name.count <= 256 && $0.name.range(of: filter, options: .regularExpression) != nil }
+                            .filter { $0.name.count <= 256 && $0.name.localizedCaseInsensitiveContains(literalFilter) }
                             .map { .profile($0.id) }
                     }
-                    groupWarning = "Members matched by regex: \(filter)"
+                    groupWarning = "Members matched by literal filter: \(literalFilter)"
                 } else {
                     result.warnings.append(ImportWarning(message: "Group \(name): ignored unsafe policy-regex-filter."))
                     groupWarning = "Ignored unsafe policy-regex-filter."
                 }
             }
 
-            let requestedURL = keyed["url"] ?? ProxyGroupTestOptions.defaultURL
-            let probeURL: String
-            if ImportPolicy.isAllowedProbeURL(requestedURL) {
-                probeURL = requestedURL
-            } else {
-                probeURL = ProxyGroupTestOptions.defaultURL
-                result.warnings.append(ImportWarning(message: "Group \(name): replaced disallowed URL-test URL with the default."))
+            let probeURL = ProxyGroupTestOptions.defaultURL
+            if keyed["url"] != nil {
+                // A subscription/conf author controls this URL, and the engine
+                // resolves/probes it later. Pre-resolving here cannot defeat DNS
+                // rebinding, so imported custom probe URLs are ignored instead
+                // of becoming an SSRF/LAN-scan primitive in the tunnel.
+                result.warnings.append(ImportWarning(message: "Group \(name): ignored imported URL-test URL and used the default."))
             }
 
             result.groups.append(

@@ -19,7 +19,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "VLESS REALITY gRPC",
             endpoint: Endpoint(host: "edge.example.net", port: 443),
-            proto: .vless,
             options: .vless(VLESSOptions(uuid: "11111111-1111-4111-8111-111111111111", flow: "xtls-rprx-vision")),
             security: .reality(RealityOptions(publicKey: "REALITYPUBLICKEY", shortID: "abcd1234", serverName: "www.cloudflare.com")),
             transport: TransportOptions(type: .grpc, serviceName: "GrpcService"),
@@ -48,7 +47,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "VLESS TLS WS",
             endpoint: Endpoint(host: "ws.example.net", port: 443),
-            proto: .vless,
             options: .vless(VLESSOptions(uuid: "11111111-1111-4111-8111-111111111111")),
             security: .tls(TLSOptions(serverName: "ws.example.net")),
             transport: TransportOptions(type: .websocket, path: "/ws", host: "cdn.example.net"),
@@ -74,7 +72,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "Trojan TLS",
             endpoint: Endpoint(host: "de.example.net", port: 443),
-            proto: .trojan,
             options: .trojan(TrojanOptions(password: "s3cr3tpassword")),
             security: .tls(TLSOptions(serverName: "de.example.net", alpn: ["h2", "http/1.1"])),
         )
@@ -98,7 +95,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "Hysteria2 Obfs",
             endpoint: Endpoint(host: "nyc.example.net", port: 443),
-            proto: .hysteria2,
             options: .hysteria2(Hysteria2Options(password: "hy2password", obfs: "salamander", obfsPassword: "obfs-secret")),
             security: .tls(TLSOptions(serverName: "nyc.example.net")),
         )
@@ -123,7 +119,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "TUIC Node",
             endpoint: Endpoint(host: "tuic.example.net", port: 443),
-            proto: .tuic,
             options: .tuic(TUICOptions(uuid: "22222222-2222-4222-8222-222222222222", password: "tuicpassword", congestionControl: "bbr")),
             security: .tls(TLSOptions(serverName: "tuic.example.net", alpn: ["h3"])),
         )
@@ -149,7 +144,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "SS Special",
             endpoint: Endpoint(host: "ss.example.net", port: 8388),
-            proto: .shadowsocks,
             options: .shadowsocks(ShadowsocksOptions(method: "2022-blake3-aes-128-gcm", password: "p:a@s/s")),
             security: .none,
         )
@@ -172,7 +166,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "VMess WS TLS",
             endpoint: Endpoint(host: "vmess.example.net", port: 443),
-            proto: .vmess,
             options: .vmess(VMessOptions(uuid: "33333333-3333-4333-8333-333333333333", security: "auto", alterID: 0)),
             security: .tls(TLSOptions(serverName: "vmess.example.net")),
             transport: TransportOptions(type: .websocket, path: "/ws", host: "cdn.example.net"),
@@ -197,7 +190,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "Plain HTTP",
             endpoint: Endpoint(host: "http.example.net", port: 8080),
-            proto: .http,
             options: .http(HTTPOptions(username: "user", password: "pass")),
             security: .none,
         )
@@ -220,7 +212,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "SOCKS TLS",
             endpoint: Endpoint(host: "socks.example.net", port: 443),
-            proto: .socks,
             options: .socks(SOCKSOptions(username: "socks-user", password: "socks-pass")),
             security: .tls(TLSOptions(serverName: "socks.example.net")),
         )
@@ -246,7 +237,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "Tokyo 東京 Node",
             endpoint: Endpoint(host: "jp.example.net", port: 443),
-            proto: .trojan,
             options: .trojan(TrojanOptions(password: "secret")),
             security: .tls(TLSOptions(serverName: "jp.example.net")),
         )
@@ -262,7 +252,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "WG",
             endpoint: Endpoint(host: "wg.example.net", port: 51820),
-            proto: .wireGuard,
             options: .wireGuard(WireGuardOptions(
                 privateKey: "PRIVATEKEY",
                 peerPublicKey: "PEERPUBLICKEY",
@@ -277,7 +266,6 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "AnyTLS",
             endpoint: Endpoint(host: "anytls.example.net", port: 443),
-            proto: .anyTLS,
             options: .anyTLS(AnyTLSOptions(password: "secret")),
             security: .tls(TLSOptions(serverName: "anytls.example.net")),
         )
@@ -291,7 +279,6 @@ final class ProxyShareLinkTests: XCTestCase {
         var profile = ProxyProfile(
             name: "VLESS REALITY",
             endpoint: Endpoint(host: "edge.example.net", port: 443),
-            proto: .vless,
             options: .vless(VLESSOptions(uuid: "11111111-1111-4111-8111-111111111111")),
             security: .reality(RealityOptions(publicKey: "KEY", shortID: "sid")),
         )

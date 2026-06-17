@@ -52,11 +52,15 @@ struct HopAppDataStore {
             return nil
         }
 
-        // Legacy plaintext state (written before the Keychain migration) still
-        // carries inline secrets — detect that so we can migrate it in place.
-        let hadInlineSecrets = decoded.profiles.contains { !$0.secretFieldValues.isEmpty }
+        // Legacy/plaintext state (written before Keychain migration for
+        // profiles, or before subscription URLs were treated as bearer
+        // secrets) still carries inline values — detect that so we can migrate
+        // it in place.
+        let hadInlineProfileSecrets = decoded.profiles.contains { !$0.secretFieldValues.isEmpty }
+        let hadInlineSubscriptionURLs = decoded.subscriptions.contains { !$0.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         decoded.profiles = decoded.profiles.map { $0.hydratingSecrets(from: secretStore) }
-        if hadInlineSecrets {
+        decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: secretStore) }
+        if hadInlineProfileSecrets || hadInlineSubscriptionURLs {
             save(decoded) // move secrets to the Keychain and rewrite the JSON without them
         }
         return decoded
@@ -73,7 +77,7 @@ struct HopAppDataStore {
             // (log updates, settings, rule edits) change no secret at all.
             // The first save after launch always writes, so a Keychain that
             // drifted while the app was not running heals on next persist.
-            let secretItems = data.profiles.flatMap(\.keychainSecretItems)
+            let secretItems = data.profiles.flatMap(\.keychainSecretItems) + data.subscriptions.compactMap(\.keychainURLItem)
             if secretWriteCache.changedSinceLastWrite(secretItems) {
                 if !secretStore.replaceAll(with: secretItems) {
                     // A write failed inside the Keychain. Drop the cache so the
@@ -84,6 +88,7 @@ struct HopAppDataStore {
             }
             var redacted = data
             redacted.profiles = data.profiles.map { $0.redactingSecrets() }
+            redacted.subscriptions = data.subscriptions.map { $0.redactingSecrets() }
 
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoded = try JSONEncoder.hop.encode(redacted)

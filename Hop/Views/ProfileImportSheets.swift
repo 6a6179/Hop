@@ -8,113 +8,6 @@ enum ImportTextSaveResult {
     case subscription(SubscriptionSource, ImportResult)
 }
 
-struct AddSubscriptionSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var name = ""
-    @State private var urlString = ""
-    @State private var errorMessage: String?
-    @State private var isLoading = false
-    @State private var showInsecureTLSConfirmation = false
-    @State private var pendingSave: (subscription: SubscriptionSource, result: ImportResult)?
-
-    var importService: ProxyImportService
-    var onSave: (SubscriptionSource, ImportResult) -> Void
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    ProfileTextField("Name", text: $name, prompt: "Airport")
-                    ProfileTextField("URL", text: $urlString, prompt: "https://example.com/sub")
-                } header: {
-                    Text("Subscription")
-                } footer: {
-                    Text("HTTPS subscriptions are downloaded once now. Plain and base64 encoded payloads are supported.")
-                }
-
-                Section {
-                    Button {
-                        addSubscription()
-                    } label: {
-                        if isLoading {
-                            Label("Importing...", systemImage: "arrow.down.circle")
-                        } else {
-                            Label("Add Subscription & Import", systemImage: "link.badge.plus")
-                        }
-                    }
-                    .disabled(isLoading || subscriptionURL == nil)
-                }
-
-                if let errorMessage {
-                    Section {
-                        Text(errorMessage)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                    }
-                }
-            }
-            .navigationTitle("Add Subscription")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
-                        dismiss()
-                    }
-                    .disabled(isLoading)
-                }
-            }
-            .insecureTLSImportConfirmation(
-                isPresented: $showInsecureTLSConfirmation,
-                profileNames: pendingSave?.result.insecureTLSProfileNames ?? [],
-            ) {
-                if let pendingSave {
-                    onSave(pendingSave.subscription, pendingSave.result)
-                    dismiss()
-                }
-            }
-        }
-    }
-
-    private var subscriptionURL: URL? {
-        URL(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    private func addSubscription() {
-        guard let url = subscriptionURL else {
-            return
-        }
-        isLoading = true
-        errorMessage = nil
-        Task {
-            do {
-                let result = try await importService.importSubscription(url: url)
-                let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                let subscription = SubscriptionSource(
-                    name: trimmedName.isEmpty ? url.host() ?? "Subscription" : trimmedName,
-                    url: url.absoluteString,
-                    lastUpdatedAt: .now,
-                    lastImportSummary: result.summary,
-                )
-                await MainActor.run {
-                    if result.insecureTLSProfileNames.isEmpty {
-                        onSave(subscription, result)
-                        dismiss()
-                    } else {
-                        pendingSave = (subscription, result)
-                        isLoading = false
-                        showInsecureTLSConfirmation = true
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    errorMessage = error.localizedDescription
-                    isLoading = false
-                }
-            }
-        }
-    }
-}
-
 extension View {
     /// Blocking confirmation shown before saving imported nodes that disable
     /// TLS certificate verification. The preview's warning rows are advisory;
@@ -184,7 +77,7 @@ struct ImportTextSheet: View {
                     Section(detectedSubscriptionURL == nil ? "Import Preview" : "Subscription Preview") {
                         if let detectedSubscriptionURL {
                             LabeledContent("URL") {
-                                Text(detectedSubscriptionURL.absoluteString)
+                                Text(SubscriptionSource(name: "Subscription", url: detectedSubscriptionURL.absoluteString).redactedDisplayURL)
                                     .lineLimit(1)
                                     .truncationMode(.middle)
                             }
@@ -247,7 +140,7 @@ struct ImportTextSheet: View {
         guard !trimmed.isEmpty, importResult == nil, importError == nil, !isLoading else {
             return
         }
-        guard case .importText = ProfileImportPayloadDetector().detect(trimmed) else {
+        guard case .importText = ProfileImportPayloadDetector.detect(trimmed) else {
             return
         }
         previewImport()
@@ -272,7 +165,7 @@ struct ImportTextSheet: View {
 
     private func previewImport() {
         let trimmed = importText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let payload = ProfileImportPayloadDetector().detect(trimmed) else {
+        guard let payload = ProfileImportPayloadDetector.detect(trimmed) else {
             importResult = nil
             detectedSubscriptionURL = nil
             importError = ProxyLinkParseError.invalidURL.localizedDescription

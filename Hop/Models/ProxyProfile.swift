@@ -4,7 +4,6 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
     var id: UUID
     var name: String
     var endpoint: Endpoint
-    var proto: ProxyProtocol
     var options: ProtocolOptions
     var security: ProxySecurity
     var transport: TransportOptions
@@ -13,7 +12,6 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         id: UUID = UUID(),
         name: String,
         endpoint: Endpoint,
-        proto: ProxyProtocol,
         options: ProtocolOptions,
         security: ProxySecurity,
         transport: TransportOptions = .tcp,
@@ -21,10 +19,13 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         self.id = id
         self.name = name
         self.endpoint = endpoint
-        self.proto = proto
         self.options = options
         self.security = security
         self.transport = transport
+    }
+
+    var proto: ProxyProtocol {
+        options.proto
     }
 
     var displaySecurity: String {

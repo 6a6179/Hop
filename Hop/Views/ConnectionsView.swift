@@ -176,13 +176,13 @@ private struct ConnectionRow: View {
 
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("↑ \(connection.uplinkBytesPerSecond.formattedBytes)/s")
-                    Text("↓ \(connection.downlinkBytesPerSecond.formattedBytes)/s")
+                    Text("↑ \(connection.uplinkBytesPerSecond.formatted(.byteCount(style: .file)))/s")
+                    Text("↓ \(connection.downlinkBytesPerSecond.formatted(.byteCount(style: .file)))/s")
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Σ ↑ \(connection.uplinkTotalBytes.formattedBytes)")
-                    Text("Σ ↓ \(connection.downlinkTotalBytes.formattedBytes)")
+                    Text("Σ ↑ \(connection.uplinkTotalBytes.formatted(.byteCount(style: .file)))")
+                    Text("Σ ↓ \(connection.downlinkTotalBytes.formatted(.byteCount(style: .file)))")
                 }
 
                 Spacer()
@@ -223,10 +223,10 @@ private struct ConnectionDetailView: View {
             }
 
             Section("Traffic") {
-                LabeledContent("Upload Speed", value: "\(connection.uplinkBytesPerSecond.formattedBytes)/s")
-                LabeledContent("Download Speed", value: "\(connection.downlinkBytesPerSecond.formattedBytes)/s")
-                LabeledContent("Uploaded", value: connection.uplinkTotalBytes.formattedBytes)
-                LabeledContent("Downloaded", value: connection.downlinkTotalBytes.formattedBytes)
+                LabeledContent("Upload Speed", value: "\(connection.uplinkBytesPerSecond.formatted(.byteCount(style: .file)))/s")
+                LabeledContent("Download Speed", value: "\(connection.downlinkBytesPerSecond.formatted(.byteCount(style: .file)))/s")
+                LabeledContent("Uploaded", value: connection.uplinkTotalBytes.formatted(.byteCount(style: .file)))
+                LabeledContent("Downloaded", value: connection.downlinkTotalBytes.formatted(.byteCount(style: .file)))
             }
 
             Section("Timing") {
@@ -321,12 +321,6 @@ private extension TunnelConnectionSnapshot {
 
     var totalTrafficBytes: Int64 {
         uplinkTotalBytes + downlinkTotalBytes
-    }
-}
-
-private extension Int64 {
-    var formattedBytes: String {
-        formatted(.byteCount(style: .file))
     }
 }
 

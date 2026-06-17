@@ -126,7 +126,6 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         let profile = ProxyProfile(
             name: "TUIC TLS",
             endpoint: Endpoint(host: "tuic.example.net", port: 443),
-            proto: .tuic,
             options: .tuic(TUICOptions(uuid: "22222222-2222-4222-8222-222222222222", password: "secret", congestionControl: "bbr")),
             security: .tls(TLSOptions(serverName: "tuic.example.net", alpn: ["h3"])),
         )
@@ -562,7 +561,6 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         let profile = ProxyProfile(
             name: "Plain HTTP",
             endpoint: Endpoint(host: "proxy.example.net", port: 8080),
-            proto: .http,
             options: .http(HTTPOptions(username: nil, password: nil)),
             security: .none,
         )
@@ -589,7 +587,6 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         ProxyProfile(
             name: "WG Node",
             endpoint: Endpoint(host: "wg.example.net", port: 51820),
-            proto: .wireGuard,
             options: .wireGuard(WireGuardOptions(
                 privateKey: "PRIVATEKEY",
                 peerPublicKey: "PEERPUBLICKEY",
@@ -603,7 +600,6 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         ProxyProfile(
             name: "TUIC No TLS",
             endpoint: Endpoint(host: "tuic.example.net", port: 443),
-            proto: .tuic,
             options: .tuic(TUICOptions(uuid: "22222222-2222-4222-8222-222222222222", password: "secret", congestionControl: "bbr")),
             security: .none,
         )
@@ -613,7 +609,6 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         ProxyProfile(
             name: "Hysteria2 No TLS",
             endpoint: Endpoint(host: "hy2.example.net", port: 443),
-            proto: .hysteria2,
             options: .hysteria2(Hysteria2Options(password: "secret")),
             security: .none,
         )
@@ -623,7 +618,6 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         ProxyProfile(
             name: "AnyTLS No TLS",
             endpoint: Endpoint(host: "anytls.example.net", port: 443),
-            proto: .anyTLS,
             options: .anyTLS(AnyTLSOptions(password: "secret")),
             security: .none,
         )
@@ -633,7 +627,6 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         ProxyProfile(
             name: "VLESS QUIC No TLS",
             endpoint: Endpoint(host: "quic.example.net", port: 443),
-            proto: .vless,
             options: .vless(VLESSOptions(uuid: "11111111-1111-4111-8111-111111111111")),
             security: .none,
             transport: TransportOptions(type: .quic),
@@ -644,7 +637,6 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         ProxyProfile(
             name: "WG PSK Node",
             endpoint: Endpoint(host: "wg.example.net", port: 51820),
-            proto: .wireGuard,
             options: .wireGuard(WireGuardOptions(
                 privateKey: "PRIVATEKEY",
                 peerPublicKey: "PEERPUBLICKEY",
@@ -659,7 +651,6 @@ final class SingBoxConfigBuilderTests: XCTestCase {
         ProxyProfile(
             name: "PQC VLESS",
             endpoint: Endpoint(host: "edge.example.net", port: 443),
-            proto: .vless,
             options: .vless(VLESSOptions(
                 uuid: "11111111-1111-4111-8111-111111111111",
                 flow: "xtls-rprx-vision",

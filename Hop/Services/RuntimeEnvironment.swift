@@ -241,8 +241,33 @@ struct SharedTunnelConfigurationStore {
     func writeConfig(_ config: String) throws {
         let url = RuntimeEnvironment.configFileURL
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let data = Data(config.utf8)
+        let secret = SecretStore.runtime.ensureTunnelConfigAuthenticationSecret()
+        guard !secret.isEmpty,
+              SecretStore.runtime.tunnelConfigAuthenticationSecret() == secret,
+              let signature = TunnelConfigAuthenticator.signature(for: data, secret: secret)
+        else {
+            throw TunnelConfigStoreError.authenticationSecretUnavailable
+        }
+
         // Generated config carries nonce-bound secret references; protect at rest.
-        try Data(config.utf8).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        try Data(signature.utf8).write(
+            to: TunnelConfigAuthenticator.signatureURL(forConfigURL: url),
+            options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication],
+        )
+    }
+}
+
+private enum TunnelConfigStoreError: LocalizedError {
+    case authenticationSecretUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .authenticationSecretUnavailable:
+            "The tunnel config authentication key could not be saved to the shared Keychain. Verify the keychain-access-groups entitlement on both app targets."
+        }
     }
 }
 

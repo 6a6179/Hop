@@ -104,7 +104,7 @@ xcodebuild test -project Hop.xcodeproj -scheme Hop \
 
 The short version — full details in [`ImportPolicy.swift`](Hop/Services/ImportPolicy.swift), [`SecretStore.swift`](Shared/SecretStore.swift), and the invariants section of [`AGENTS.md`](AGENTS.md):
 
-- **Secrets never touch disk.** Passwords, UUIDs, and private keys live in the iOS Keychain. Persisted state is secret-free; the generated sing-box config carries nonce-bound secret *references* that only the tunnel extension can resolve — so credentials never cross IPC or land in provider configuration. Legacy plaintext state migrates automatically.
+- **Secrets never touch disk.** Passwords, UUIDs, private keys, and token-bearing subscription URLs live in the iOS Keychain. Persisted state is secret-free; in the normal shared-App-Group start path, the generated sing-box config carries nonce-bound secret *references* and an App-Group integrity check before the tunnel resolves them. Legacy plaintext state migrates automatically.
 - **Imports are treated as hostile.** Subscriptions are HTTPS-only with SSRF blocking (private / loopback / metadata hosts rejected, redirects re-validated), size / recursion / item caps, regex safety checks, clamped URL-test scheduling, and display-name sanitization. Saving any node that disables TLS verification — including new nodes arriving via subscription *refresh* — requires an explicit blocking confirmation, and refreshes can never silently downgrade an existing node's TLS posture.
 - **Logs can't be forged or leak credentials.** Every log write strips newlines, import warnings are redacted before logging, and the shared tunnel log is size-rotated and file-protected.
 

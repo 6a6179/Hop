@@ -11,6 +11,31 @@ enum ProtocolOptions: Hashable, Codable {
     case socks(SOCKSOptions)
     case wireGuard(WireGuardOptions)
     case anyTLS(AnyTLSOptions)
+
+    var proto: ProxyProtocol {
+        switch self {
+        case .vless:
+            .vless
+        case .trojan:
+            .trojan
+        case .hysteria2:
+            .hysteria2
+        case .tuic:
+            .tuic
+        case .shadowsocks:
+            .shadowsocks
+        case .vmess:
+            .vmess
+        case .http:
+            .http
+        case .socks:
+            .socks
+        case .wireGuard:
+            .wireGuard
+        case .anyTLS:
+            .anyTLS
+        }
+    }
 }
 
 struct VLESSOptions: Hashable, Codable {

@@ -183,8 +183,15 @@ struct SingBoxConfigBuilder {
         case .urlTest:
             // Enforce probe-destination and scheduling policy at the final
             // emit point so no import/editor path can schedule SSRF-style or
-            // runaway urltest probes in the privileged tunnel.
-            dictionary["url"] = ImportPolicy.isAllowedProbeURL(group.testOptions.url) ? group.testOptions.url : ProxyGroupTestOptions.defaultURL
+            // runaway urltest probes in the privileged tunnel. Imported groups
+            // always use the known default: validating their custom hostname at
+            // import time cannot prevent later DNS rebinding when sing-box
+            // performs the actual probe.
+            dictionary["url"] = if group.importedType != nil {
+                ProxyGroupTestOptions.defaultURL
+            } else {
+                ImportPolicy.isAllowedProbeURL(group.testOptions.url) ? group.testOptions.url : ProxyGroupTestOptions.defaultURL
+            }
             dictionary["interval"] = "\(ImportPolicy.clampURLTestInterval(group.testOptions.intervalSeconds))s"
             dictionary["tolerance"] = ImportPolicy.clampURLTestTolerance(group.testOptions.toleranceMilliseconds)
         case .unsupported:
@@ -292,7 +299,6 @@ struct SingBoxConfigBuilder {
 
         switch profile.options {
         case let .vless(options):
-            guard profile.proto == .vless else { throw SingBoxConfigError.unsupportedProfile("Mismatched VLESS profile.") }
             if options.normalizedEncryption != nil {
                 throw SingBoxConfigError.unsupportedProfile(
                     "\(options.encryptionAuthLabel) requires Xray VLESS Encryption/Auth; the bundled sing-box/libbox engine cannot run encrypted VLESS profiles yet.",
@@ -304,11 +310,9 @@ struct SingBoxConfigBuilder {
                 outbound["flow"] = flow
             }
         case let .trojan(options):
-            guard profile.proto == .trojan else { throw SingBoxConfigError.unsupportedProfile("Mismatched Trojan profile.") }
             outbound["type"] = "trojan"
             outbound["password"] = options.password
         case let .hysteria2(options):
-            guard profile.proto == .hysteria2 else { throw SingBoxConfigError.unsupportedProfile("Mismatched Hysteria2 profile.") }
             outbound["type"] = "hysteria2"
             outbound["password"] = options.password
             if let obfs = options.obfs, let obfsPassword = options.obfsPassword {
@@ -318,7 +322,6 @@ struct SingBoxConfigBuilder {
                 ]
             }
         case let .tuic(options):
-            guard profile.proto == .tuic else { throw SingBoxConfigError.unsupportedProfile("Mismatched TUIC profile.") }
             outbound["type"] = "tuic"
             outbound["uuid"] = options.uuid
             outbound["password"] = options.password
@@ -326,23 +329,19 @@ struct SingBoxConfigBuilder {
                 outbound["congestion_control"] = congestionControl
             }
         case let .shadowsocks(options):
-            guard profile.proto == .shadowsocks else { throw SingBoxConfigError.unsupportedProfile("Mismatched Shadowsocks profile.") }
             outbound["type"] = "shadowsocks"
             outbound["method"] = options.method
             outbound["password"] = options.password
         case let .vmess(options):
-            guard profile.proto == .vmess else { throw SingBoxConfigError.unsupportedProfile("Mismatched VMess profile.") }
             outbound["type"] = "vmess"
             outbound["uuid"] = options.uuid
             outbound["security"] = options.security
             outbound["alter_id"] = options.alterID
         case let .http(options):
-            guard profile.proto == .http else { throw SingBoxConfigError.unsupportedProfile("Mismatched HTTP profile.") }
             outbound["type"] = "http"
             outbound["username"] = options.username
             outbound["password"] = options.password
         case let .socks(options):
-            guard profile.proto == .socks else { throw SingBoxConfigError.unsupportedProfile("Mismatched SOCKS profile.") }
             outbound["type"] = "socks"
             outbound["username"] = options.username
             outbound["password"] = options.password
@@ -351,7 +350,6 @@ struct SingBoxConfigBuilder {
             // means a caller bypassed the endpoint split in `build`.
             throw SingBoxConfigError.unsupportedProfile("WireGuard profiles run as sing-box endpoints, not outbounds.")
         case let .anyTLS(options):
-            guard profile.proto == .anyTLS else { throw SingBoxConfigError.unsupportedProfile("Mismatched AnyTLS profile.") }
             outbound["type"] = "anytls"
             outbound["password"] = options.password
         }

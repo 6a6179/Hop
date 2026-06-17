@@ -510,7 +510,6 @@ private struct ProfileEditorDraft {
             id: id,
             name: trimmed(name),
             endpoint: Endpoint(host: trimmed(host), port: portNumber),
-            proto: proto,
             options: protocolOptions,
             security: securityOptions,
             transport: transportOptions,

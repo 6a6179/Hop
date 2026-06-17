@@ -38,17 +38,6 @@ enum ProxyLinkParseError: LocalizedError {
     }
 }
 
-struct ProxyLinkParser {
-    private let service = ProxyImportService()
-
-    func parse(_ rawValue: String) throws -> ProxyProfile {
-        guard let profile = try service.importText(rawValue).profiles.first else {
-            throw ProxyLinkParseError.noImportableItems
-        }
-        return profile
-    }
-}
-
 struct ProxyImportService {
     /// Session configuration for subscription fetches; tests substitute one
     /// with a stub `URLProtocol` to exercise the transfer policy offline.
@@ -164,7 +153,6 @@ struct ProxyImportService {
         return ProxyProfile(
             name: displayName(from: components, fallback: "VLESS \(endpoint.host)"),
             endpoint: endpoint,
-            proto: .vless,
             options: .vless(VLESSOptions(uuid: uuid, flow: query["flow"], encryption: query["encryption"])),
             security: security,
             transport: parseTransport(query: query),
@@ -180,7 +168,6 @@ struct ProxyImportService {
         return ProxyProfile(
             name: displayName(from: components, fallback: "Trojan \(endpoint.host)"),
             endpoint: endpoint,
-            proto: .trojan,
             options: .trojan(TrojanOptions(password: password)),
             security: security.layer == .none ? .tls(TLSOptions(serverName: endpoint.host)) : security,
             transport: parseTransport(query: query),
@@ -199,7 +186,6 @@ struct ProxyImportService {
         return ProxyProfile(
             name: displayName(from: components, fallback: "Hysteria2 \(endpoint.host)"),
             endpoint: endpoint,
-            proto: .hysteria2,
             options: .hysteria2(
                 Hysteria2Options(
                     password: password,
@@ -226,7 +212,6 @@ struct ProxyImportService {
         return ProxyProfile(
             name: displayName(from: components, fallback: "TUIC \(endpoint.host)"),
             endpoint: endpoint,
-            proto: .tuic,
             options: .tuic(
                 TUICOptions(
                     uuid: uuid,
@@ -257,7 +242,6 @@ struct ProxyImportService {
         return ProxyProfile(
             name: name,
             endpoint: endpoint,
-            proto: .shadowsocks,
             options: .shadowsocks(ShadowsocksOptions(method: parts[0], password: parts[1])),
             security: parseSecurity(query: query, fallbackServerName: endpoint.host),
             transport: .tcp,
@@ -295,7 +279,6 @@ struct ProxyImportService {
         return ProxyProfile(
             name: name,
             endpoint: Endpoint(host: server[0], port: port),
-            proto: .shadowsocks,
             options: .shadowsocks(ShadowsocksOptions(method: credentials[0], password: credentials[1])),
             security: .none,
             transport: .tcp,
@@ -329,7 +312,6 @@ struct ProxyImportService {
             return ProxyProfile(
                 name: (object["ps"] as? String)?.nilIfEmpty ?? "VMess \(host)",
                 endpoint: Endpoint(host: host, port: port),
-                proto: .vmess,
                 options: .vmess(
                     VMessOptions(
                         uuid: uuid,
@@ -352,7 +334,6 @@ struct ProxyImportService {
         return try ProxyProfile(
             name: displayName(from: components, fallback: "VMess \(endpoint.host)"),
             endpoint: endpoint,
-            proto: .vmess,
             options: .vmess(
                 VMessOptions(
                     uuid: requiredUser(components),
@@ -372,7 +353,6 @@ struct ProxyImportService {
         return ProxyProfile(
             name: displayName(from: components, fallback: "\(isTLS ? "HTTPS" : "HTTP") \(endpoint.host)"),
             endpoint: endpoint,
-            proto: .http,
             options: .http(HTTPOptions(username: username, password: password)),
             security: isTLS ? .tls(TLSOptions(serverName: endpoint.host)) : .none,
         )
@@ -385,7 +365,6 @@ struct ProxyImportService {
         return ProxyProfile(
             name: displayName(from: components, fallback: "SOCKS \(endpoint.host)"),
             endpoint: endpoint,
-            proto: .socks,
             options: .socks(SOCKSOptions(username: username, password: password)),
             security: isTLS ? .tls(TLSOptions(serverName: endpoint.host)) : .none,
         )

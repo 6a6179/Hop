@@ -108,9 +108,9 @@ final class HopStore {
         self.dataStore = dataStore
 
         let loaded = dataStore.load()
-        self.profiles = profiles ?? loaded?.profiles ?? SampleData.profiles
-        self.groups = groups ?? loaded?.groups ?? SampleData.groups
-        self.subscriptions = subscriptions ?? loaded?.subscriptions ?? SampleData.subscriptions
+        self.profiles = profiles ?? loaded?.profiles ?? []
+        self.groups = groups ?? loaded?.groups ?? []
+        self.subscriptions = subscriptions ?? loaded?.subscriptions ?? []
 
         // Resolve named rule configurations, migrating legacy single-list state
         // (and always seeding the auto-generated China/Iran configs).
@@ -123,9 +123,9 @@ final class HopStore {
         self.activeRuleConfigurationID = resolved.activeID
 
         self.routingMode = routingMode ?? loaded?.routingMode ?? .rule
-        self.selectedTarget = selectedTarget ?? loaded?.selectedTarget ?? .group(SampleData.proxyGroup.id)
+        self.selectedTarget = selectedTarget ?? loaded?.selectedTarget
         self.settings = settings ?? loaded?.settings ?? .defaults
-        self.tunnel = tunnel ?? TunnelController(logs: loaded?.logs ?? SampleData.logs)
+        self.tunnel = tunnel ?? TunnelController(logs: loaded?.logs ?? [])
         self.tunnel.maximumLogEntries = self.settings.logRetention.rawValue
         self.tunnel.onLogsChanged = { [weak self] in
             self?.scheduleLogPersist()
@@ -158,7 +158,7 @@ final class HopStore {
             let custom = RuleConfiguration(name: "Custom", rules: legacy)
             return ([custom, .china(), .iran()], custom.id, true)
         }
-        return (SampleData.ruleConfigurations, SampleData.defaultConfiguration.id, false)
+        return (RuleConfiguration.builtInConfigurations, RuleConfiguration.defaultConfiguration.id, false)
     }
 
     private static func migrateGeneratedConfigurations(
@@ -547,19 +547,6 @@ final class HopStore {
         tunnel.clearLogs()
     }
 
-    func restoreSampleData() {
-        withBatchedPersist {
-            profiles = SampleData.profiles
-            groups = SampleData.groups
-            subscriptions = SampleData.subscriptions
-            ruleConfigurations = SampleData.ruleConfigurations
-            activeRuleConfigurationID = SampleData.defaultConfiguration.id
-            routingMode = .rule
-            selectedTarget = .group(SampleData.proxyGroup.id)
-        }
-        tunnel.appendLog("Sample profiles, groups, subscriptions, and rules restored")
-    }
-
     func resetSettings() {
         settings = .defaults
         tunnel.appendLog("Settings reset to defaults")
@@ -626,6 +613,9 @@ final class HopStore {
     /// persisting again here (notably from `init` on every launch) would only
     /// rewrite the state file and Keychain with identical content.
     private func normalizeSelectedTarget() {
+        guard selectedTarget != nil else {
+            return
+        }
         if !isValid(target: selectedTarget) {
             selectedTarget = defaultTarget
         }
@@ -647,16 +637,22 @@ final class HopStore {
         }
     }
 
-    static let preview = HopStore(
-        profiles: SampleData.profiles,
-        groups: SampleData.groups,
-        subscriptions: SampleData.subscriptions,
-        ruleConfigurations: SampleData.ruleConfigurations,
-        activeRuleConfigurationID: SampleData.defaultConfiguration.id,
-        routingMode: .rule,
-        selectedTarget: .group(SampleData.proxyGroup.id),
-        settings: .defaults,
-        tunnel: TunnelController(),
-        dataStore: HopAppDataStore(url: URL(fileURLWithPath: "/tmp/hop-preview.json")),
-    )
+    static let preview: HopStore = {
+        #if DEBUG
+            return HopStore(
+                profiles: SampleData.profiles,
+                groups: SampleData.groups,
+                subscriptions: SampleData.subscriptions,
+                ruleConfigurations: SampleData.ruleConfigurations,
+                activeRuleConfigurationID: SampleData.defaultConfiguration.id,
+                routingMode: .rule,
+                selectedTarget: .group(SampleData.proxyGroup.id),
+                settings: .defaults,
+                tunnel: TunnelController(),
+                dataStore: HopAppDataStore(url: URL(fileURLWithPath: "/tmp/hop-preview.json")),
+            )
+        #else
+            return HopStore(dataStore: HopAppDataStore(url: URL(fileURLWithPath: "/tmp/hop-preview.json")))
+        #endif
+    }()
 }

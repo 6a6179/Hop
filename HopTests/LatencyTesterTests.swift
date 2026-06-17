@@ -57,7 +57,6 @@ final class LatencyTesterTests: XCTestCase {
         let profile = ProxyProfile(
             name: "Encoded Loopback",
             endpoint: Endpoint(host: "127.1", port: 443),
-            proto: .trojan,
             options: .trojan(TrojanOptions(password: "secret")),
             security: .tls(TLSOptions(serverName: "example.com")),
         )

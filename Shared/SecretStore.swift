@@ -98,11 +98,9 @@ struct SecretStore {
     /// The shared command-server secret, or `""` if none has been stored yet.
     /// Read by the tunnel extension (command *server*) and the app's telemetry
     /// client (command *client*); both hand it to `LibboxSetup` so the unix
-    /// command socket rejects callers that can't present it. Empty on both
-    /// sides degrades to the prior unauthenticated behavior; empty on only one
-    /// side (shared Keychain unreachable, e.g. a re-sign dropped the
-    /// keychain-access-groups entitlement) makes the server reject the app's
-    /// telemetry client — the extension logs a warning naming that case.
+    /// command socket rejects callers that can't present it. The tunnel refuses
+    /// to start the command server when this is empty rather than falling back
+    /// to an unauthenticated local socket.
     func commandServerSecret() -> String {
         value(forKey: Self.commandServerSecretKey) ?? ""
     }
@@ -115,12 +113,42 @@ struct SecretStore {
     /// socket — still can't read the token without the keychain-access-group.
     @discardableResult
     func ensureCommandServerSecret() -> String {
-        if let existing = value(forKey: Self.commandServerSecretKey), !existing.isEmpty {
+        ensureRuntimeSecret(forKey: Self.commandServerSecretKey)
+    }
+
+    /// Keychain account for the HMAC key that authenticates the App Group
+    /// tunnel config file before the extension resolves secret tokens from it.
+    static let tunnelConfigAuthenticationKey = "tunnel-config-authentication-key"
+
+    func tunnelConfigAuthenticationSecret() -> String {
+        value(forKey: Self.tunnelConfigAuthenticationKey) ?? ""
+    }
+
+    @discardableResult
+    func ensureTunnelConfigAuthenticationSecret() -> String {
+        ensureRuntimeSecret(forKey: Self.tunnelConfigAuthenticationKey)
+    }
+
+    private func ensureRuntimeSecret(forKey key: String) -> String {
+        if let existing = value(forKey: key), !existing.isEmpty {
             return existing
         }
-        let secret = UUID().uuidString + UUID().uuidString
-        setValue(secret, forKey: Self.commandServerSecretKey)
+        let secret = Self.randomSecret()
+        setValue(secret, forKey: key)
         return secret
+    }
+
+    private static func randomSecret() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = bytes.withUnsafeMutableBytes { buffer in
+            SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
+        }
+        if status == errSecSuccess {
+            return Data(bytes).base64EncodedString()
+        }
+        // Extremely unlikely fallback if the system RNG call fails; still
+        // unpredictable enough for a local auth token / MAC key.
+        return UUID().uuidString + UUID().uuidString
     }
 
     // MARK: - Access-group resolution

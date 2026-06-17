@@ -144,12 +144,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             // process with only App Group container access (enough to reach the
             // unix socket) still can't drive the tunnel without it.
             let commandServerSecret = SecretStore.runtime.commandServerSecret()
-            if commandServerSecret.isEmpty {
-                // The app side generates this before starting the tunnel, so an
-                // empty read here means the shared Keychain is unreachable — the
-                // server will then reject the app's authenticated telemetry
-                // client. Name the root cause instead of failing silently.
-                writeTunnelLog("WARNING: command-server secret not readable from the shared Keychain; telemetry will be rejected. Check the keychain-access-groups entitlement on both Hop.app and HopTunnel.appex.")
+            guard !commandServerSecret.isEmpty else {
+                throw TunnelProviderError.missingCommandServerSecret
             }
             setup.commandServerSecret = commandServerSecret
 
@@ -253,7 +249,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                 throw TunnelProviderError.configPathOutsideContainer
             }
             writeTunnelLog("Reading tunnel settings from shared storage")
-            return try String(contentsOfFile: configPath, encoding: .utf8)
+            return try readAuthenticatedConfig(at: URL(fileURLWithPath: configPath))
         }
 
         if let configContent = request.providerConfigContent {
@@ -266,17 +262,35 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                 throw TunnelProviderError.configPathOutsideContainer
             }
             writeTunnelLog("Reading tunnel settings from provider configuration")
-            return try String(contentsOfFile: configPath, encoding: .utf8)
+            return try readAuthenticatedConfig(at: URL(fileURLWithPath: configPath))
         }
 
         if let appGroup = request.appGroup,
            let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
         {
             writeTunnelLog("Reading tunnel settings from App Group container")
-            return try String(contentsOf: container.appendingPathComponent("hop-sing-box.json"), encoding: .utf8)
+            return try readAuthenticatedConfig(at: container.appendingPathComponent("hop-sing-box.json"))
         }
 
         throw TunnelProviderError.missingConfig
+    }
+
+    private func readAuthenticatedConfig(at url: URL) throws -> String {
+        let data = try Data(contentsOf: url)
+        let secret = SecretStore.runtime.tunnelConfigAuthenticationSecret()
+        guard !secret.isEmpty else {
+            throw TunnelProviderError.missingConfigAuthenticationSecret
+        }
+        let signatureURL = TunnelConfigAuthenticator.signatureURL(forConfigURL: url)
+        guard let signature = try? String(contentsOf: signatureURL, encoding: .utf8),
+              TunnelConfigAuthenticator.isValidSignature(signature, for: data, secret: secret)
+        else {
+            throw TunnelProviderError.configAuthenticationFailed
+        }
+        guard let config = String(data: data, encoding: .utf8) else {
+            throw TunnelProviderError.missingConfig
+        }
+        return config
     }
 
     private func appGroupContainer(request: TunnelStartRequest) -> URL {
@@ -417,6 +431,9 @@ private enum TunnelProviderError: LocalizedError {
     case missingConfig
     case missingSecretNonce
     case configPathOutsideContainer
+    case missingConfigAuthenticationSecret
+    case configAuthenticationFailed
+    case missingCommandServerSecret
     case unresolvedSecrets(Int)
     case libboxUnavailable
 
@@ -428,6 +445,12 @@ private enum TunnelProviderError: LocalizedError {
             "The Hop tunnel extension received no secret nonce, so credentials cannot be resolved safely. Reconnect from the app."
         case .configPathOutsideContainer:
             "The Hop tunnel extension was handed a config path outside the shared App Group container and refused to read it."
+        case .missingConfigAuthenticationSecret:
+            "The Hop tunnel extension could not read the tunnel config authentication key from the shared Keychain. Verify the keychain-access-groups entitlement is present on both the app and the tunnel extension."
+        case .configAuthenticationFailed:
+            "The Hop tunnel extension refused to load tunnel settings because their App Group integrity check failed. Reconnect from the app to rewrite the config."
+        case .missingCommandServerSecret:
+            "The Hop tunnel extension could not read the command-server authentication token from the shared Keychain, so it refused to start an unauthenticated command socket. Verify the keychain-access-groups entitlement is present on both the app and the tunnel extension."
         case let .unresolvedSecrets(count):
             "\(count) credential reference(s) could not be resolved from the shared Keychain. Verify the keychain-access-groups entitlement is present on both the app and the tunnel extension."
         case .libboxUnavailable:
