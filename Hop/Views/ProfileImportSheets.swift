@@ -36,8 +36,8 @@ struct ImportTextSheet: View {
     @State private var isLoading = false
     @State private var showInsecureTLSConfirmation = false
 
-    var importService: ProxyImportService
-    var onSave: (ImportTextSaveResult) -> Void
+    let importService: ProxyImportService
+    let onSave: (ImportTextSaveResult) -> Void
 
     /// `initialText` prefills the field (URL-scheme imports); the payload
     /// still goes through the same preview and confirmation gates as pasted
@@ -66,7 +66,8 @@ struct ImportTextSheet: View {
                             Label("Preview Import", systemImage: "eye")
                         }
                     }
-                    .disabled(isLoading || importText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .buttonStyle(.glass)
+                    .disabled(isLoading || trimmedImportText.isEmpty)
                 } header: {
                     Text("Paste Import")
                 } footer: {
@@ -136,7 +137,7 @@ struct ImportTextSheet: View {
     /// are NOT auto-fetched: opening a link must never trigger a network
     /// request to an arbitrary server without an explicit user action.
     private func autoPreviewPrefill() {
-        let trimmed = importText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = trimmedImportText
         guard !trimmed.isEmpty, importResult == nil, importError == nil, !isLoading else {
             return
         }
@@ -164,7 +165,7 @@ struct ImportTextSheet: View {
     }
 
     private func previewImport() {
-        let trimmed = importText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = trimmedImportText
         guard let payload = ProfileImportPayloadDetector.detect(trimmed) else {
             importResult = nil
             detectedSubscriptionURL = nil
@@ -202,10 +203,14 @@ struct ImportTextSheet: View {
             }
         }
     }
+
+    private var trimmedImportText: String {
+        importText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 private struct ImportPreviewView: View {
-    var result: ImportResult
+    let result: ImportResult
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -227,7 +232,7 @@ private struct ImportPreviewView: View {
 struct QRCodeScannerSheet: View {
     @Environment(\.dismiss) private var dismiss
 
-    var onPayload: (String) -> Void
+    let onPayload: (String) -> Void
 
     var body: some View {
         NavigationStack {
@@ -260,7 +265,7 @@ struct QRCodeScannerSheet: View {
 }
 
 private struct QRCodeScannerRepresentable: UIViewControllerRepresentable {
-    var onPayload: (String) -> Void
+    let onPayload: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onPayload: onPayload)

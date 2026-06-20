@@ -4,8 +4,16 @@ struct LogsView: View {
     @Environment(HopStore.self) private var store
 
     var body: some View {
+        let logs = store.tunnel.logs
+        let exportText = """
+        Hop Logs
+        Exported: \(Date.now.formatted(date: .abbreviated, time: .standard))
+
+        \(logs.joined(separator: "\n"))
+        """
+
         Group {
-            if store.tunnel.logs.isEmpty {
+            if logs.isEmpty {
                 ContentUnavailableView("No Logs", systemImage: "doc.plaintext", description: Text("Connect the tunnel to see activity here."))
             } else {
                 // A lazy List virtualizes rows, so only the visible lines are laid
@@ -14,8 +22,8 @@ struct LogsView: View {
                 List {
                     // Indices avoid materializing a fresh `Array(enumerated())`
                     // copy of the whole log on every append-triggered render.
-                    ForEach(store.tunnel.logs.indices, id: \.self) { index in
-                        Text(store.tunnel.logs[index])
+                    ForEach(logs.indices, id: \.self) { index in
+                        Text(logs[index])
                             .font(.system(.footnote, design: .monospaced))
                             .textSelection(.enabled)
                             .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
@@ -39,24 +47,17 @@ struct LogsView: View {
                 } label: {
                     Label("Refresh Logs", systemImage: "arrow.clockwise")
                 }
+                .buttonStyle(.glass)
             }
 
             ToolbarItem(placement: .topBarTrailing) {
                 ShareLink(item: exportText) {
                     Label("Export Logs", systemImage: "square.and.arrow.up")
                 }
-                .disabled(store.tunnel.logs.isEmpty)
+                .buttonStyle(.glass)
+                .disabled(logs.isEmpty)
             }
         }
-    }
-
-    private var exportText: String {
-        """
-        Hop Logs
-        Exported: \(Date.now.formatted(date: .abbreviated, time: .standard))
-
-        \(store.tunnel.logs.joined(separator: "\n"))
-        """
     }
 }
 

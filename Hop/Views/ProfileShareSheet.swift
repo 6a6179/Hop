@@ -7,13 +7,19 @@ import SwiftUI
 struct ProfileShareQRSheet: View {
     @Environment(\.dismiss) private var dismiss
 
-    var profileName: String
-    var link: String
+    let profileName: String
+    private let qrImage: UIImage?
+    private static let qrContext = CIContext()
+
+    init(profileName: String, link: String) {
+        self.profileName = profileName
+        qrImage = Self.qrImage(for: link)
+    }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 20) {
-                if let image = Self.qrImage(for: link) {
+                if let image = qrImage {
                     Image(uiImage: image)
                         .interpolation(.none)
                         .resizable()
@@ -32,7 +38,9 @@ struct ProfileShareQRSheet: View {
 
                 Label("This code contains the node's credentials. Anyone who scans it can use — and inspect — this node.", systemImage: "exclamationmark.triangle")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.orange)
+                    .padding(12)
+                    .glassEffect(.regular.tint(.orange.opacity(0.12)), in: .rect(cornerRadius: 16))
                     .padding(.horizontal)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -43,6 +51,7 @@ struct ProfileShareQRSheet: View {
                     Button("Done") {
                         dismiss()
                     }
+                    .buttonStyle(.glass)
                 }
             }
         }
@@ -58,7 +67,7 @@ struct ProfileShareQRSheet: View {
         }
         // Scale the tiny module matrix up without smoothing.
         let scaled = output.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
-        guard let cgImage = CIContext().createCGImage(scaled, from: scaled.extent) else {
+        guard let cgImage = qrContext.createCGImage(scaled, from: scaled.extent) else {
             return nil
         }
         return UIImage(cgImage: cgImage)

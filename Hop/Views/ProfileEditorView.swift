@@ -6,7 +6,7 @@ struct ProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft: ProfileEditorDraft
 
-    var onSave: (ProxyProfile) -> Void
+    let onSave: (ProxyProfile) -> Void
 
     init(profile: ProxyProfile, onSave: @escaping (ProxyProfile) -> Void) {
         _draft = State(initialValue: ProfileEditorDraft(profile: profile))
@@ -19,7 +19,7 @@ struct ProfileEditorView: View {
                 Section("Basics") {
                     ProfileTextField("Name", text: $draft.name, capitalization: .words, autocorrectionDisabled: false)
                     Picker("Protocol", selection: $draft.proto) {
-                        ForEach(ProxyProtocol.allCases) { proto in
+                        ForEach(ProxyProtocol.allCases, id: \.self) { proto in
                             Text(proto.displayName).tag(proto)
                         }
                     }
@@ -69,12 +69,6 @@ struct ProfileEditorView: View {
                 // they get the same SecureField treatment as passwords.
                 ProfileTextField("UUID", text: $draft.vlessUUID, isSecure: true)
                 ProfileTextField("Flow", text: $draft.vlessFlow, prompt: "xtls-rprx-vision")
-                ProfileTextField("Encryption/Auth", text: $draft.vlessEncryption, prompt: "none", isSecure: true)
-                if draft.hasVLESSEncryption {
-                    Label("\(draft.vlessEncryptionAuthLabel) is saved for compatibility, but Hop's current sing-box/libbox engine cannot run non-none VLESS Encryption/Auth yet.", systemImage: "exclamationmark.triangle.fill")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                }
             case .trojan:
                 ProfileTextField("Password", text: $draft.trojanPassword, isSecure: true)
             case .hysteria2:
@@ -112,7 +106,7 @@ struct ProfileEditorView: View {
     private var securitySection: some View {
         Section("Security") {
             Picker("Security", selection: $draft.securityLayer) {
-                ForEach(SecurityLayer.allCases) { layer in
+                ForEach(SecurityLayer.allCases, id: \.self) { layer in
                     Text(layer.displayName).tag(layer)
                 }
             }
@@ -135,13 +129,6 @@ struct ProfileEditorView: View {
                 ProfileTextField("Public Key", text: $draft.realityPublicKey)
                 ProfileTextField("Short ID", text: $draft.realityShortID)
                 ProfileTextField("SNI", text: $draft.realityServerName, prompt: "camouflage domain")
-                ProfileTextField("SpiderX (spx)", text: $draft.realitySpiderX, prompt: "/")
-                ProfileTextField("ML-DSA-65 Verify", text: $draft.realityMLDSA65Verify)
-                if draft.hasRealityMLDSA65Verify {
-                    Label("pqv / ML-DSA-65 is preserved in this profile, but Hop's bundled sing-box/libbox engine cannot enforce it yet.", systemImage: "exclamationmark.triangle.fill")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
-                }
                 MultiSelectMenu("ALPN", options: ProfileEditorChoices.alpn, selection: $draft.tlsALPN)
                 UTLSFingerprintPicker(selection: $draft.realityFingerprint)
             }
@@ -151,7 +138,7 @@ struct ProfileEditorView: View {
     private var transportSection: some View {
         Section("Transport") {
             Picker("Type", selection: $draft.transportType) {
-                ForEach(TransportType.allCases) { type in
+                ForEach(TransportType.allCases, id: \.self) { type in
                     Text(type.displayName).tag(type)
                 }
             }
@@ -172,13 +159,13 @@ struct ProfileEditorView: View {
 /// Trailing-aligned labeled text field shared by the profile, group, and
 /// import forms.
 struct ProfileTextField: View {
-    var title: String
+    let title: String
     @Binding var text: String
-    var prompt: String
-    var keyboardType: UIKeyboardType
-    var capitalization: TextInputAutocapitalization
-    var autocorrectionDisabled: Bool
-    var isSecure: Bool
+    let prompt: String
+    let keyboardType: UIKeyboardType
+    let capitalization: TextInputAutocapitalization
+    let autocorrectionDisabled: Bool
+    let isSecure: Bool
 
     init(
         _ title: String,
@@ -207,26 +194,22 @@ struct ProfileTextField: View {
         HStack(spacing: 12) {
             Text(title)
                 .fixedSize(horizontal: true, vertical: false)
-            field
-                .multilineTextAlignment(.trailing)
-                .keyboardType(keyboardType)
-                .textInputAutocapitalization(capitalization)
-                .autocorrectionDisabled(autocorrectionDisabled)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-    }
 
-    /// Passwords and private keys render as `SecureField` so they stay masked
-    /// on screen — and out of screenshots, screen recordings, screen sharing,
-    /// and the keyboard's QuickType/learned-words cache.
-    @ViewBuilder
-    private var field: some View {
-        if isSecure {
-            SecureField(prompt, text: $text)
-        } else {
-            TextField(prompt, text: $text)
+            // Passwords and private keys render as `SecureField` so they stay masked.
+            Group {
+                if isSecure {
+                    SecureField(prompt, text: $text)
+                } else {
+                    TextField(prompt, text: $text)
+                }
+            }
+            .multilineTextAlignment(.trailing)
+            .keyboardType(keyboardType)
+            .textInputAutocapitalization(capitalization)
+            .autocorrectionDisabled(autocorrectionDisabled)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
 }
@@ -235,25 +218,24 @@ private struct UTLSFingerprintPicker: View {
     @Binding var selection: String
 
     var body: some View {
+        let current = selection.trimmingCharacters(in: .whitespacesAndNewlines)
+        let options = if !current.isEmpty, !ProfileEditorChoices.utlsFingerprints.contains(current) {
+            [current] + ProfileEditorChoices.utlsFingerprints
+        } else {
+            ProfileEditorChoices.utlsFingerprints
+        }
+
         Picker("uTLS Fingerprint", selection: $selection) {
             ForEach(options, id: \.self) { option in
                 Text(ProfileEditorChoices.utlsFingerprintTitle(option)).tag(option)
             }
         }
     }
-
-    private var options: [String] {
-        let current = selection.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !current.isEmpty, !ProfileEditorChoices.utlsFingerprints.contains(current) else {
-            return ProfileEditorChoices.utlsFingerprints
-        }
-        return [current] + ProfileEditorChoices.utlsFingerprints
-    }
 }
 
 private struct MultiSelectMenu: View {
-    var title: String
-    var options: [String]
+    let title: String
+    let options: [String]
     @Binding var selection: Set<String>
 
     init(_ title: String, options: [String], selection: Binding<Set<String>>) {
@@ -263,6 +245,9 @@ private struct MultiSelectMenu: View {
     }
 
     var body: some View {
+        let selected = options.filter { selection.contains($0) }
+        let summary = selected.isEmpty ? "None" : selected.joined(separator: ", ")
+
         Menu {
             ForEach(options, id: \.self) { option in
                 Toggle(option, isOn: binding(for: option))
@@ -278,11 +263,6 @@ private struct MultiSelectMenu: View {
             }
         }
         .buttonStyle(.plain)
-    }
-
-    private var summary: String {
-        let selected = options.filter { selection.contains($0) }
-        return selected.isEmpty ? "None" : selected.joined(separator: ", ")
     }
 
     private func binding(for option: String) -> Binding<Bool> {
@@ -327,7 +307,7 @@ private enum ProfileEditorChoices {
 }
 
 private struct ProfileEditorDraft {
-    var id: UUID
+    let id: UUID
     var name: String
     var proto: ProxyProtocol
     var host: String
@@ -335,7 +315,6 @@ private struct ProfileEditorDraft {
 
     var vlessUUID = ""
     var vlessFlow = ""
-    var vlessEncryption = ""
     var trojanPassword = ""
     var hysteriaPassword = ""
     var hysteriaObfs = ""
@@ -366,8 +345,6 @@ private struct ProfileEditorDraft {
     var realityPublicKey = ""
     var realityShortID = ""
     var realityServerName = ""
-    var realitySpiderX = ""
-    var realityMLDSA65Verify = ""
     var realityFingerprint = "chrome"
 
     var transportType: TransportType
@@ -388,7 +365,6 @@ private struct ProfileEditorDraft {
         case let .vless(options):
             vlessUUID = options.uuid
             vlessFlow = options.flow ?? ""
-            vlessEncryption = options.encryption ?? ""
         case let .trojan(options):
             trojanPassword = options.password
         case let .hysteria2(options):
@@ -432,8 +408,6 @@ private struct ProfileEditorDraft {
             realityPublicKey = reality.publicKey
             realityShortID = reality.shortID ?? ""
             realityServerName = reality.serverName ?? ""
-            realitySpiderX = reality.spiderX ?? ""
-            realityMLDSA65Verify = reality.mldsa65Verify ?? ""
             realityFingerprint = reality.utlsFingerprint
         }
 
@@ -519,7 +493,7 @@ private struct ProfileEditorDraft {
     private var protocolOptions: ProtocolOptions {
         switch proto {
         case .vless:
-            .vless(VLESSOptions(uuid: trimmed(vlessUUID), flow: optional(vlessFlow), encryption: optional(vlessEncryption)))
+            .vless(VLESSOptions(uuid: trimmed(vlessUUID), flow: optional(vlessFlow)))
         case .trojan:
             .trojan(TrojanOptions(password: trimmed(trojanPassword)))
         case .hysteria2:
@@ -529,7 +503,7 @@ private struct ProfileEditorDraft {
         case .shadowsocks:
             .shadowsocks(ShadowsocksOptions(method: trimmed(shadowsocksMethod), password: trimmed(shadowsocksPassword)))
         case .vmess:
-            .vmess(VMessOptions(uuid: trimmed(vmessUUID), security: trimmed(vmessSecurity).isEmpty ? "auto" : trimmed(vmessSecurity), alterID: Int(trimmed(vmessAlterID)) ?? 0))
+            .vmess(VMessOptions(uuid: trimmed(vmessUUID), security: optional(vmessSecurity) ?? "auto", alterID: Int(trimmed(vmessAlterID)) ?? 0))
         case .http:
             .http(HTTPOptions(username: optional(httpUsername), password: optional(httpPassword)))
         case .socks:
@@ -553,8 +527,6 @@ private struct ProfileEditorDraft {
                     publicKey: trimmed(realityPublicKey),
                     shortID: optional(realityShortID),
                     serverName: optional(realityServerName),
-                    spiderX: optional(realitySpiderX),
-                    mldsa65Verify: optional(realityMLDSA65Verify),
                     utlsFingerprint: optional(realityFingerprint) ?? "chrome",
                 ),
                 alpn: selectedALPN,
@@ -578,18 +550,6 @@ private struct ProfileEditorDraft {
     private func optional(_ value: String) -> String? {
         let value = trimmed(value)
         return value.isEmpty ? nil : value
-    }
-
-    var hasVLESSEncryption: Bool {
-        VLESSOptions(uuid: "", flow: nil, encryption: vlessEncryption).normalizedEncryption != nil
-    }
-
-    var vlessEncryptionAuthLabel: String {
-        VLESSOptions(uuid: "", flow: nil, encryption: vlessEncryption).encryptionAuthLabel
-    }
-
-    var hasRealityMLDSA65Verify: Bool {
-        !trimmed(realityMLDSA65Verify).isEmpty
     }
 
     private func list(from value: String) -> [String] {

@@ -6,49 +6,45 @@ struct DashboardView: View {
 
     var body: some View {
         @Bindable var store = store
-        let visualState = TunnelVisualState(store.tunnel.state)
+        let state = store.tunnel.state
+        let enabledGroups = store.groups.filter(\.isEnabled)
+        let connectionActionDisabled = state.isInFlight || store.profiles.isEmpty
 
         Form {
             Section {
-                VStack(spacing: 12) {
-                    ConnectionStatusRow(
-                        state: store.tunnel.state,
-                        profileName: store.selectedTargetDisplayName,
-                    )
-
-                    Button {
-                        Task {
-                            if store.tunnel.state.isConnected {
-                                await store.tunnel.disconnect()
-                            } else {
-                                await store.tunnel.connect(
-                                    target: store.selectedTarget ?? store.defaultTarget,
-                                    profiles: store.profiles,
-                                    groups: store.groups,
-                                    routingMode: store.routingMode,
-                                    rules: store.rules,
-                                    settings: store.settings,
-                                )
-                            }
+                ConnectWidget(
+                    state: state,
+                    profileName: store.selectedTargetDisplayName,
+                    routingMode: store.routingMode,
+                    isDisabled: connectionActionDisabled,
+                    isMissingProfiles: store.profiles.isEmpty,
+                ) {
+                    Task {
+                        if store.tunnel.state.isConnected {
+                            await store.tunnel.disconnect()
+                        } else {
+                            await store.tunnel.connect(
+                                target: store.selectedTarget ?? store.defaultTarget,
+                                profiles: store.profiles,
+                                groups: store.groups,
+                                routingMode: store.routingMode,
+                                rules: store.rules,
+                                settings: store.settings,
+                            )
                         }
-                    } label: {
-                        ConnectButtonLabel(visualState: visualState)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-                    .tint(visualState.buttonTint)
-                    .disabled(visualState.isInFlight || store.profiles.isEmpty)
                 }
-                .listRowInsets(EdgeInsets(top: 16, leading: 16, bottom: 16, trailing: 16))
+                .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
+                .listRowBackground(Color.clear)
             }
 
             Section("Outbound") {
                 Picker("Active", selection: $store.selectedTarget) {
                     Text("Direct").tag(Optional(OutboundTarget.direct))
 
-                    if !store.groups.isEmpty {
+                    if !enabledGroups.isEmpty {
                         Section("Groups") {
-                            ForEach(store.groups.filter(\.isEnabled)) { group in
+                            ForEach(enabledGroups) { group in
                                 Text(group.name).tag(Optional(OutboundTarget.group(group.id)))
                             }
                         }
@@ -87,7 +83,7 @@ struct DashboardView: View {
 
             Section("Routing & Traffic") {
                 Picker("Mode", selection: $store.routingMode) {
-                    ForEach(RoutingMode.allCases) { mode in
+                    ForEach(RoutingMode.allCases, id: \.self) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
@@ -99,7 +95,21 @@ struct DashboardView: View {
                 TrafficSummaryRows()
             }
         }
-        .animation(reduceMotion ? nil : .default, value: visualState)
+        .contentMargins(.top, 8, for: .scrollContent)
+        .listSectionSpacing(.compact)
+        .scrollContentBackground(.hidden)
+        .background {
+            LinearGradient(
+                colors: [
+                    state.accent.opacity(0.16),
+                    Color(uiColor: .systemGroupedBackground),
+                ],
+                startPoint: .top,
+                endPoint: .center,
+            )
+            .ignoresSafeArea()
+        }
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: state)
         .navigationTitle("Hop")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -111,6 +121,10 @@ private struct TrafficSummaryRows: View {
     @Environment(HopStore.self) private var store
 
     var body: some View {
+        let counters = store.tunnel.counters
+        let speedSummary = "↑ \(counters.uplinkBytesPerSecond.formatted(.byteCount(style: .file)))/s · ↓ \(counters.downlinkBytesPerSecond.formatted(.byteCount(style: .file)))/s"
+        let transferSummary = "↑ \(counters.uplinkBytes.formatted(.byteCount(style: .file))) · ↓ \(counters.downlinkBytes.formatted(.byteCount(style: .file)))"
+
         LabeledContent("Speed") {
             Text(speedSummary)
                 .monospacedDigit()
@@ -131,7 +145,7 @@ private struct TrafficSummaryRows: View {
             ConnectionsView()
         } label: {
             LabeledContent("Connections") {
-                Text(connectionsSummary)
+                Text("\(counters.activeConnections) active")
                     .foregroundStyle(.secondary)
             }
         }
@@ -142,48 +156,9 @@ private struct TrafficSummaryRows: View {
                 .foregroundStyle(.orange)
         }
     }
-
-    private var speedSummary: String {
-        let uplink = store.tunnel.counters.uplinkBytesPerSecond.formatted(.byteCount(style: .file))
-        let downlink = store.tunnel.counters.downlinkBytesPerSecond.formatted(.byteCount(style: .file))
-        return "↑ \(uplink)/s · ↓ \(downlink)/s"
-    }
-
-    private var transferSummary: String {
-        let uplink = store.tunnel.counters.uplinkBytes.formatted(.byteCount(style: .file))
-        let downlink = store.tunnel.counters.downlinkBytes.formatted(.byteCount(style: .file))
-        return "↑ \(uplink) · ↓ \(downlink)"
-    }
-
-    private var connectionsSummary: String {
-        // From the always-on status stream, not the connection list — the
-        // per-connection event stream only runs while ConnectionsView is open.
-        "\(store.tunnel.counters.activeConnections) active"
-    }
 }
 
-private enum TunnelVisualState: Equatable {
-    case disconnected
-    case connecting
-    case connected
-    case disconnecting
-    case failed
-
-    init(_ state: TunnelConnectionState) {
-        switch state {
-        case .disconnected:
-            self = .disconnected
-        case .connecting:
-            self = .connecting
-        case .connected:
-            self = .connected
-        case .disconnecting:
-            self = .disconnecting
-        case .failed:
-            self = .failed
-        }
-    }
-
+private extension TunnelConnectionState {
     var accent: Color {
         switch self {
         case .connected:
@@ -206,21 +181,14 @@ private enum TunnelVisualState: Equatable {
         case .connecting:
             "Connecting"
         case .disconnecting:
-            "Disconnecting"
+            "Stopping"
         case .failed, .disconnected:
             "Connect"
         }
     }
 
     var buttonSymbol: String {
-        switch self {
-        case .connected, .disconnecting:
-            "stop.circle.fill"
-        case .connecting:
-            "ellipsis.circle.fill"
-        case .failed, .disconnected:
-            "play.circle.fill"
-        }
+        "power"
     }
 
     var buttonTint: Color {
@@ -250,130 +218,159 @@ private enum TunnelVisualState: Equatable {
     var isInFlight: Bool {
         self == .connecting || self == .disconnecting
     }
+
+    var buttonAccessibilityLabel: String {
+        switch self {
+        case .connected:
+            "Disconnect from selected profile"
+        case .connecting:
+            "Connecting to selected profile"
+        case .disconnecting:
+            "Disconnecting from selected profile"
+        case .failed, .disconnected:
+            "Connect to selected profile"
+        }
+    }
 }
 
-private struct ConnectionStatusRow: View {
-    var state: TunnelConnectionState
-    var profileName: String
+private struct ConnectWidget: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let state: TunnelConnectionState
+    let profileName: String
+    let routingMode: RoutingMode
+    let isDisabled: Bool
+    let isMissingProfiles: Bool
+    let action: () -> Void
 
     var body: some View {
-        HStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(state.title)
-                    .font(.title2.weight(.semibold))
-                    .lineLimit(1)
-                    .allowsTightening(true)
-                    .truncationMode(.tail)
-                Text(profileName)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .center, spacing: 14) {
+                ConnectionStatusGlyph(state: state, size: 50)
+
+                ConnectionStatusText(
+                    state: state,
+                    profileName: profileName,
+                    routingMode: routingMode,
+                )
             }
-            .layoutPriority(1)
 
-            Spacer(minLength: 12)
+            Button(action: action) {
+                ConnectButtonLabel(state: state)
+            }
+            .buttonStyle(.plain)
+            .background(state.buttonTint.opacity(isDisabled ? 0.55 : 1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .disabled(isDisabled)
+            .accessibilityLabel(Text(state.buttonAccessibilityLabel))
 
-            TunnelStateIcon(state: state)
+            if isMissingProfiles {
+                Label("Import a profile before connecting.", systemImage: "server.rack")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
+        .padding(16)
+        .background {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            state.accent.opacity(state == .disconnected ? 0.10 : 0.18),
+                            Color(uiColor: .secondarySystemGroupedBackground),
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing,
+                    ),
+                )
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(state.accent.opacity(state == .disconnected ? 0.12 : 0.22))
+        }
+        .shadow(color: state.accent.opacity(0.08), radius: 14, y: 8)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: state)
+    }
+}
+
+private struct ConnectionStatusText: View {
+    let state: TunnelConnectionState
+    let profileName: String
+    let routingMode: RoutingMode
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(state.title)
+                .font(.title2.weight(.semibold))
+                .lineLimit(1)
+                .allowsTightening(true)
+                .minimumScaleFactor(0.85)
+                .truncationMode(.tail)
+            Text(profileName)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text("\(routingMode.title) routing")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(state.accent)
+                .lineLimit(1)
+        }
+        .layoutPriority(1)
         .accessibilityElement(children: .combine)
     }
 }
 
-private struct TunnelStateIcon: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var state: TunnelConnectionState
+private struct ConnectionStatusGlyph: View {
+    let state: TunnelConnectionState
+    let size: CGFloat
 
-    private var visualState: TunnelVisualState {
-        TunnelVisualState(state)
+    init(state: TunnelConnectionState, size: CGFloat = 24) {
+        self.state = state
+        self.size = size
     }
 
     var body: some View {
-        ZStack {
-            if visualState.isInFlight, !reduceMotion {
-                ActivityHalo(color: visualState.accent)
-                    .transition(.opacity)
-            } else {
-                Circle()
-                    .strokeBorder(visualState.accent.opacity(visualState == .connected ? 0.42 : 0.22), lineWidth: 2)
-                    .scaleEffect(visualState == .connected ? 1.04 : 0.94)
-                    .opacity(visualState == .disconnected ? 0.55 : 1)
-            }
+        let badgeSize = max(11, size * 0.46)
 
+        ZStack {
             Circle()
-                .fill(visualState.accent.opacity(visualState == .disconnected ? 0.08 : 0.14))
+                .fill(state.accent.opacity(state == .disconnected ? 0.10 : 0.16))
 
             Image(systemName: "shield.lefthalf.filled")
-                .font(.system(size: 30, weight: .semibold))
-                .foregroundStyle(visualState.accent.opacity(visualState == .disconnected ? 0.66 : 0.92))
+                .font(.system(size: size * 0.58, weight: .semibold))
+                .foregroundStyle(state.accent.opacity(state == .disconnected ? 0.56 : 0.86))
                 .symbolRenderingMode(.hierarchical)
-                .scaleEffect(visualState == .connected ? 1.04 : 0.96)
-
-            StatusBadge(visualState: visualState)
-                .id(visualState.badgeSymbol)
-                .offset(x: 19, y: 19)
-                .transition(.scale(scale: 0.62).combined(with: .opacity))
         }
-        .frame(width: 60, height: 60)
+        .frame(width: size, height: size)
+        .overlay(alignment: .bottomTrailing) {
+            Circle()
+                .fill(state.accent)
+                .frame(width: badgeSize, height: badgeSize)
+                .overlay {
+                    Image(systemName: state.badgeSymbol)
+                        .font(.system(size: badgeSize * 0.52, weight: .black, design: .rounded))
+                        .foregroundStyle(.white)
+                }
+                .offset(x: size * 0.08, y: size * 0.08)
+        }
         .contentShape(.circle)
-        .accessibilityLabel(Text(state.title))
-        .animation(reduceMotion ? nil : .spring(response: 0.42, dampingFraction: 0.82), value: visualState)
-    }
-}
-
-private struct ActivityHalo: View {
-    var color: Color
-
-    var body: some View {
-        TimelineView(.animation) { context in
-            let degrees = context.date.timeIntervalSinceReferenceDate * 190
-
-            Circle()
-                .trim(from: 0.12, to: 0.82)
-                .stroke(
-                    AngularGradient(
-                        colors: [
-                            color.opacity(0.08),
-                            color.opacity(0.94),
-                            color.opacity(0.08),
-                        ],
-                        center: .center,
-                    ),
-                    style: StrokeStyle(lineWidth: 3, lineCap: .round),
-                )
-                .rotationEffect(.degrees(degrees))
-        }
-    }
-}
-
-private struct StatusBadge: View {
-    var visualState: TunnelVisualState
-
-    var body: some View {
-        ZStack {
-            Circle()
-                .fill(visualState.accent)
-
-            Image(systemName: visualState.badgeSymbol)
-                .font(.system(size: 11, weight: .black, design: .rounded))
-                .foregroundStyle(.white)
-                .symbolRenderingMode(.monochrome)
-        }
-        .frame(width: 22, height: 22)
+        .accessibilityHidden(true)
     }
 }
 
 private struct ConnectButtonLabel: View {
-    var visualState: TunnelVisualState
+    let state: TunnelConnectionState
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: visualState.buttonSymbol)
-                .imageScale(.large)
-            Text(visualState.buttonTitle)
-                .fontWeight(.semibold)
+        HStack(spacing: 6) {
+            Image(systemName: state.buttonSymbol)
+                .font(.caption.weight(.semibold))
+            Text(state.buttonTitle)
         }
-        .font(.headline)
-        .frame(maxWidth: .infinity, minHeight: 42)
+        .font(.headline.weight(.semibold))
+        .foregroundStyle(.white)
+        .lineLimit(1)
+        .padding(.horizontal, 16)
+        .frame(maxWidth: .infinity, minHeight: 50)
         .contentShape(.rect)
     }
 }

@@ -7,7 +7,7 @@ struct ProxyGroupEditorView: View {
     @Environment(HopStore.self) private var store
     @State private var draft: ProxyGroupEditorDraft
 
-    var onSave: (ProxyGroup) -> Void
+    let onSave: (ProxyGroup) -> Void
 
     init(group: ProxyGroup, onSave: @escaping (ProxyGroup) -> Void) {
         _draft = State(initialValue: ProxyGroupEditorDraft(group: group))
@@ -15,6 +15,9 @@ struct ProxyGroupEditorView: View {
     }
 
     var body: some View {
+        let selectableGroups = store.groups.filter { $0.id != draft.id }
+        let savedGroup = draft.group
+
         NavigationStack {
             Form {
                 Section("Basics") {
@@ -34,7 +37,7 @@ struct ProxyGroupEditorView: View {
                         Toggle(profile.name, isOn: memberBinding(for: .profile(profile.id)))
                     }
 
-                    ForEach(store.groups.filter { $0.id != draft.id }) { group in
+                    ForEach(selectableGroups) { group in
                         Toggle(group.name, isOn: memberBinding(for: .group(group.id)))
                     }
                 } header: {
@@ -77,13 +80,13 @@ struct ProxyGroupEditorView: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        guard let group = draft.group else {
+                        guard let group = savedGroup else {
                             return
                         }
                         onSave(group)
                         dismiss()
                     }
-                    .disabled(draft.group == nil)
+                    .disabled(savedGroup == nil)
                 }
             }
         }
@@ -106,7 +109,7 @@ struct ProxyGroupEditorView: View {
 }
 
 private struct ProxyGroupEditorDraft {
-    var id: UUID
+    let id: UUID
     var name: String
     var type: ProxyGroupType
     var members: [OutboundTarget]
@@ -135,16 +138,16 @@ private struct ProxyGroupEditorDraft {
     }
 
     var group: ProxyGroup? {
-        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedName = trimmed(name)
         guard !trimmedName.isEmpty,
               !members.isEmpty,
-              let interval = Int(intervalSeconds.trimmingCharacters(in: .whitespacesAndNewlines)),
-              let tolerance = Int(toleranceMilliseconds.trimmingCharacters(in: .whitespacesAndNewlines))
+              let interval = Int(trimmed(intervalSeconds)),
+              let tolerance = Int(trimmed(toleranceMilliseconds))
         else {
             return nil
         }
 
-        let trimmedURL = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedURL = trimmed(url)
 
         return ProxyGroup(
             id: id,
@@ -165,5 +168,9 @@ private struct ProxyGroupEditorDraft {
             warning: warning,
             lastLatencyMilliseconds: lastLatencyMilliseconds,
         )
+    }
+
+    private func trimmed(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

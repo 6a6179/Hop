@@ -19,7 +19,7 @@ struct ProfilesView: View {
         List {
             Section {
                 Picker("Profile Section", selection: $selectedSection) {
-                    ForEach(ProfilesSection.allCases) { section in
+                    ForEach(ProfilesSection.allCases, id: \.self) { section in
                         Text(section.title).tag(section)
                     }
                 }
@@ -60,6 +60,7 @@ struct ProfilesView: View {
                 } label: {
                     Label("Add", systemImage: "plus.circle")
                 }
+                .buttonStyle(.glass)
             }
         }
         .sheet(item: $activeSheet) { sheet in
@@ -149,34 +150,49 @@ struct ProfilesView: View {
 
     /// Case-insensitive match against the trimmed search text; an empty search
     /// shows everything.
-    private func matchesSearch(_ candidates: String...) -> Bool {
-        let needle = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !needle.isEmpty else {
-            return true
-        }
-        return candidates.contains { $0.lowercased().contains(needle) }
+    private var searchNeedle: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private var visibleProfiles: [ProxyProfile] {
-        store.profiles.filter { matchesSearch($0.name, $0.endpoint.host) }
+        let needle = searchNeedle
+        guard !needle.isEmpty else {
+            return store.profiles
+        }
+        return store.profiles.filter {
+            $0.name.localizedCaseInsensitiveContains(needle)
+                || $0.endpoint.host.localizedCaseInsensitiveContains(needle)
+        }
     }
 
     private var visibleGroups: [ProxyGroup] {
-        store.groups.filter { matchesSearch($0.name) }
+        let needle = searchNeedle
+        guard !needle.isEmpty else {
+            return store.groups
+        }
+        return store.groups.filter { $0.name.localizedCaseInsensitiveContains(needle) }
     }
 
     private var visibleSubscriptions: [SubscriptionSource] {
-        store.subscriptions.filter { matchesSearch($0.name, $0.url) }
+        let needle = searchNeedle
+        guard !needle.isEmpty else {
+            return store.subscriptions
+        }
+        return store.subscriptions.filter {
+            $0.name.localizedCaseInsensitiveContains(needle)
+                || $0.url.localizedCaseInsensitiveContains(needle)
+        }
     }
 
     private var nodesSection: some View {
-        Section {
+        let profiles = visibleProfiles
+        return Section {
             if store.profiles.isEmpty {
                 ContentUnavailableView("No Nodes", systemImage: "server.rack", description: Text("Import or add a proxy node."))
-            } else if visibleProfiles.isEmpty {
+            } else if profiles.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             } else {
-                ForEach(visibleProfiles) { profile in
+                ForEach(profiles) { profile in
                     ProfileRow(profile: profile, isSelected: store.selectedTarget == .profile(profile.id), latency: store.nodeLatencies[profile.id])
                         .contentShape(Rectangle())
                         .onTapGesture {
@@ -226,12 +242,14 @@ struct ProfilesView: View {
             HStack {
                 Text("Nodes")
                 Spacer()
-                if visibleProfiles.count > 1 {
+                if profiles.count > 1 {
                     // Tests what the (possibly searched) list shows, so the
                     // button never probes nodes the user can't see.
                     Button("Test All") {
-                        Task { await store.testAllLatencies(visibleProfiles) }
+                        Task { await store.testAllLatencies(profiles) }
                     }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
                     .font(.caption)
                     .disabled(store.nodeLatencies.values.contains(.testing))
                 }
@@ -242,13 +260,14 @@ struct ProfilesView: View {
     }
 
     private var groupsSection: some View {
-        Section {
+        let groups = visibleGroups
+        return Section {
             if store.groups.isEmpty {
                 ContentUnavailableView("No Groups", systemImage: "rectangle.stack", description: Text("Create a manual or URL-tested proxy group."))
-            } else if visibleGroups.isEmpty {
+            } else if groups.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             } else {
-                ForEach(visibleGroups) { group in
+                ForEach(groups) { group in
                     ProxyGroupRow(group: group, isSelected: store.selectedTarget == .group(group.id))
                         .contentShape(Rectangle())
                         .onTapGesture {
@@ -280,17 +299,18 @@ struct ProfilesView: View {
     }
 
     private var subscriptionsSection: some View {
-        Section {
+        let subscriptions = visibleSubscriptions
+        return Section {
             if store.subscriptions.isEmpty {
                 ContentUnavailableView(
                     "No Subscriptions",
                     systemImage: "link",
                     description: Text("Use + to add a subscription URL or scan a QR code."),
                 )
-            } else if visibleSubscriptions.isEmpty {
+            } else if subscriptions.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             } else {
-                ForEach(visibleSubscriptions) { subscription in
+                ForEach(subscriptions) { subscription in
                     let isRefreshing = store.refreshingSubscriptionIDs.contains(subscription.id)
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 3) {
@@ -320,7 +340,8 @@ struct ProfilesView: View {
                                 Label("Refresh", systemImage: "arrow.clockwise")
                                     .labelStyle(.iconOnly)
                             }
-                            .buttonStyle(.borderless)
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
                             .accessibilityLabel("Refresh \(subscription.name)")
                         }
                     }
@@ -371,12 +392,11 @@ struct ProfilesView: View {
                 refreshedSubscription.name = existing.name
             }
 
-            let safeResult = result.markingProfiles(subscriptionID: refreshedSubscription.id)
-            store.applySubscriptionRefresh(safeResult, updating: refreshedSubscription)
+            store.applySubscriptionRefresh(result, updating: refreshedSubscription)
             selectedSection = .subscriptions
             importNotice = ProfileImportNotice(
                 title: "Subscription Updated",
-                message: "\(safeResult.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
+                message: "\(result.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
             )
         } else {
             addNewSubscription(subscription, result: result, addedTitle: addedTitle)
@@ -384,11 +404,10 @@ struct ProfilesView: View {
     }
 
     private func addNewSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
-        let safeResult = result.markingProfiles(subscriptionID: subscription.id).droppingRules()
-        store.applyImport(safeResult)
+        store.applyImport(result)
         store.addSubscription(subscription)
         selectedSection = .subscriptions
-        importNotice = ProfileImportNotice(title: addedTitle, message: safeResult.summary)
+        importNotice = ProfileImportNotice(title: addedTitle, message: result.summary)
     }
 
     private func normalizedSubscriptionURL(_ value: String) -> String {
@@ -444,13 +463,9 @@ struct ProfilesView: View {
     }
 }
 
-private enum ProfilesSection: String, CaseIterable, Identifiable {
+private enum ProfilesSection: CaseIterable {
     case nodes
     case subscriptions
-
-    var id: String {
-        rawValue
-    }
 
     var title: String {
         switch self {
@@ -488,18 +503,18 @@ private enum ProfilesSheet: Identifiable {
 /// A refresh parked behind the blocking allow-insecure confirmation because it
 /// introduces new insecure nodes.
 private struct PendingInsecureRefresh {
-    var result: ImportResult
-    var subscription: SubscriptionSource
+    let result: ImportResult
+    let subscription: SubscriptionSource
     /// Names shown in the confirmation. Refreshes list only the *newly*
     /// insecure nodes — matched nodes that were already allow-insecure are not
     /// a new decision.
-    var insecureProfileNames: [String]
+    let insecureProfileNames: [String]
 }
 
 private struct ProfileImportNotice: Identifiable {
-    var id = UUID()
-    var title: String
-    var message: String
+    let id = UUID()
+    let title: String
+    let message: String
 }
 
 private struct ShareQRItem: Identifiable {
@@ -507,37 +522,43 @@ private struct ShareQRItem: Identifiable {
         link
     }
 
-    var profileName: String
-    var link: String
+    let profileName: String
+    let link: String
 }
 
 private struct ProfileRow: View {
-    var profile: ProxyProfile
-    var isSelected: Bool
-    var latency: NodeLatencyResult?
+    let profile: ProxyProfile
+    let isSelected: Bool
+    let latency: NodeLatencyResult?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(profile.name)
-                    .font(.body.weight(.semibold))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer()
-                if let latency {
-                    LatencyBadge(result: latency)
+        GlassEffectContainer(spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(profile.name)
+                        .font(.body.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer()
+                    if latency != nil || isSelected {
+                        HStack(spacing: 8) {
+                            if let latency {
+                                LatencyBadge(result: latency)
+                            }
+                            if isSelected {
+                                ActiveBadge()
+                            }
+                        }
+                    }
                 }
-                if isSelected {
-                    ActiveBadge()
+                ProfileSecuritySummary(profile: profile)
+                ForEach(profile.importRuntimeWarnings, id: \.self) { warning in
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-            }
-            ProfileSecuritySummary(profile: profile)
-            ForEach(profile.importRuntimeWarnings, id: \.self) { warning in
-                Label(warning, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.vertical, 2)
@@ -546,7 +567,7 @@ private struct ProfileRow: View {
 }
 
 private struct LatencyBadge: View {
-    var result: NodeLatencyResult
+    let result: NodeLatencyResult
 
     var body: some View {
         switch result {
@@ -558,74 +579,63 @@ private struct LatencyBadge: View {
                     .font(.caption2.weight(.semibold))
             }
             .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .glassEffect(.regular.tint(Color.secondary.opacity(0.14)), in: .capsule)
             .accessibilityLabel("Testing latency")
         case let .success(milliseconds):
-            badge(text: "\(milliseconds) ms", color: color(for: milliseconds), systemImage: "bolt.horizontal.fill")
+            let color: Color = switch milliseconds {
+            case ..<150:
+                .green
+            case ..<400:
+                .orange
+            default:
+                .red
+            }
+
+            StatusPill("\(milliseconds) ms", tint: color, systemImage: "bolt.horizontal.fill")
                 .accessibilityLabel("Latency \(milliseconds) milliseconds")
         case .failure:
-            badge(text: "Failed", color: .red, systemImage: "exclamationmark.triangle.fill")
+            StatusPill("Failed", tint: .red, systemImage: "exclamationmark.triangle.fill")
                 .accessibilityLabel("Latency test failed")
-        }
-    }
-
-    private func badge(text: String, color: Color, systemImage: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: systemImage)
-                .font(.caption2)
-            Text(text)
-                .font(.caption2.weight(.semibold))
-        }
-        .foregroundStyle(color)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background(color.opacity(0.14), in: Capsule())
-    }
-
-    private func color(for milliseconds: Int) -> Color {
-        switch milliseconds {
-        case ..<150:
-            .green
-        case ..<400:
-            .orange
-        default:
-            .red
         }
     }
 }
 
 private struct ProxyGroupRow: View {
-    var group: ProxyGroup
-    var isSelected: Bool
+    let group: ProxyGroup
+    let isSelected: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text(group.name)
-                    .font(.body.weight(.semibold))
-                    .lineLimit(1)
-                Spacer()
-                if isSelected {
-                    ActiveBadge()
+        GlassEffectContainer(spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(group.name)
+                        .font(.body.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer()
+                    if isSelected {
+                        ActiveBadge()
+                    }
                 }
-            }
 
-            HStack(spacing: 6) {
-                Text(group.type.displayName)
-                Text("·")
-                Text("\(group.members.count) members")
-                if let latency = group.lastLatencyMilliseconds {
+                HStack(spacing: 6) {
+                    Text(group.type.displayName)
                     Text("·")
-                    Text("\(latency) ms")
+                    Text("\(group.members.count) members")
+                    if let latency = group.lastLatencyMilliseconds {
+                        StatusPill("\(latency) ms", tint: .secondary, systemImage: "bolt.horizontal.fill")
+                    }
                 }
-            }
-            .font(.subheadline)
-            .foregroundStyle(group.isEnabled ? Color.secondary : Color.orange)
+                .font(.subheadline)
+                .foregroundStyle(group.isEnabled ? Color.secondary : Color.orange)
 
-            if let warning = group.warning {
-                Text(warning)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .lineLimit(1)
+                if let warning = group.warning {
+                    Text(warning)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                }
             }
         }
         .padding(.vertical, 2)

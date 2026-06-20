@@ -1,43 +1,21 @@
 import SwiftUI
 
 struct ProfileSecuritySummary: View {
-    var profile: ProxyProfile
+    let profile: ProxyProfile
 
     var body: some View {
         HStack(spacing: 10) {
-            ProtocolBadge(proto: profile.proto)
+            StatusPill(profile.proto.displayName, tint: profile.proto.badgeTint, font: .caption.weight(.semibold))
 
             Spacer(minLength: 8)
 
-            Text(endpointText)
+            Text("\(profile.endpoint.host):\(profile.endpoint.port)")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .multilineTextAlignment(.trailing)
         }
-    }
-
-    private var endpointText: String {
-        "\(profile.endpoint.host):\(profile.endpoint.port)"
-    }
-}
-
-private struct ProtocolBadge: View {
-    var proto: ProxyProtocol
-
-    var body: some View {
-        Text(proto.displayName)
-            .font(.caption.weight(.semibold))
-            .lineLimit(1)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .foregroundStyle(proto.badgeTint)
-            .background(proto.badgeTint.opacity(0.14), in: Capsule())
-            .overlay {
-                Capsule()
-                    .strokeBorder(proto.badgeTint.opacity(0.18), lineWidth: 0.5)
-            }
     }
 }
 
