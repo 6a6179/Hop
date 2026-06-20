@@ -221,8 +221,33 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build/UnsignedIPA
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name Hop-unsigned.ipa --dir build/UnsignedIPA
-          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name Hop-unsigned.ipa.sha256 --dir build/UnsignedIPA
+
+          download_artifact() {
+            name="$1"
+            output="$2"
+            artifact_id="$(gh api \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+              --jq ".artifacts[] | select(.name == \"${name}\" and .expired == false) | .id" \
+              | head -n 1)"
+
+            if [[ -z "$artifact_id" ]]; then
+              echo "::error title=Artifact not found::${name}"
+              exit 1
+            fi
+
+            curl --fail --location --show-error \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/octet-stream" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              --output "$output"
+            test -s "$output"
+          }
+
+          download_artifact "Hop-unsigned.ipa" "build/UnsignedIPA/Hop-unsigned.ipa"
+          download_artifact "Hop-unsigned.ipa.sha256" "build/UnsignedIPA/Hop-unsigned.ipa.sha256"
 
       - name: Publish GitHub release
         env:
