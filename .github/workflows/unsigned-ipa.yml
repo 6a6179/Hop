@@ -221,8 +221,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build/UnsignedIPA
-          gh run download "$GITHUB_RUN_ID" --name Hop-unsigned.ipa --dir build/UnsignedIPA
-          gh run download "$GITHUB_RUN_ID" --name Hop-unsigned.ipa.sha256 --dir build/UnsignedIPA
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name Hop-unsigned.ipa --dir build/UnsignedIPA
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name Hop-unsigned.ipa.sha256 --dir build/UnsignedIPA
 
       - name: Publish GitHub release
         env:
