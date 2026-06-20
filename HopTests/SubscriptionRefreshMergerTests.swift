@@ -260,6 +260,35 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         XCTAssertEqual(names, ["Evil"], "a brand-new allow-insecure profile must be flagged")
     }
 
+    func testNewInsecureProfileNamesSanitizesNamesForConfirmationAlert() {
+        let rawName = "Safe\u{202E}" + String(repeating: "x", count: ImportPolicy.maxImportedNameLength + 20)
+        let names = SubscriptionRefreshMerger.newInsecureProfileNames(existing: [], imported: [insecureTrojanProfile(name: rawName)])
+
+        XCTAssertEqual(names, [ImportPolicy.sanitizeImportedName(rawName, fallback: "Imported Node")])
+        XCTAssertFalse(names[0].unicodeScalars.contains { $0 == "\u{202E}" })
+        XCTAssertLessThanOrEqual(names[0].count, ImportPolicy.maxImportedNameLength)
+    }
+
+    @MainActor
+    func testConfirmedInsecureRefreshSanitizesProfileNamesBeforeSaving() throws {
+        let rawName = "Saved\u{202E}" + String(repeating: "x", count: ImportPolicy.maxImportedNameLength + 20)
+        let subscription = SubscriptionSource(name: "Sub", url: "https://example.com/sub")
+        let store = HopStore(
+            subscriptions: [subscription],
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
+        )
+
+        store.confirmInsecureSubscriptionRefresh(
+            ImportResult(profiles: [insecureTrojanProfile(name: rawName, subscriptionID: subscription.id)]),
+            for: subscription,
+        )
+
+        let savedName = try XCTUnwrap(store.profiles.first?.name)
+        XCTAssertEqual(savedName, ImportPolicy.sanitizeImportedName(rawName, fallback: "Imported Node"))
+        XCTAssertFalse(savedName.unicodeScalars.contains { $0 == "\u{202E}" })
+        XCTAssertLessThanOrEqual(savedName.count, ImportPolicy.maxImportedNameLength)
+    }
+
     func testNewInsecureProfileNamesDoesNotFlagProfileMatchingExistingInsecureByIdentity() {
         let existing = insecureTrojanProfile(name: "Tokyo")
         // exact refresh identity: same name/host/port/proto/options/security/transport

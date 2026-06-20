@@ -368,6 +368,7 @@ final class HopStore {
     }
 
     func applySubscriptionRefresh(_ result: ImportResult, updating subscription: SubscriptionSource? = nil) {
+        let result = result.sanitizingNames()
         guard !result.isEmpty else {
             tunnel.appendLog("Subscription refresh skipped: no runnable items found")
             return
@@ -426,7 +427,9 @@ final class HopStore {
 
         let result: ImportResult
         do {
-            result = try await importService.importSubscription(url: url).markingProfiles(subscriptionID: subscription.id)
+            result = try await importService.importSubscription(url: url)
+                .markingProfiles(subscriptionID: subscription.id)
+                .sanitizingNames()
         } catch {
             return .failed(message: error.localizedDescription)
         }

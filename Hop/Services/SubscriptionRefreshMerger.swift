@@ -46,7 +46,7 @@ struct SubscriptionRefreshMerger {
                         (profile.subscriptionID != nil && NameAndProtocol($0) == NameAndProtocol(profile))
                 }
             }
-            .map(\.name)
+            .map { ImportPolicy.sanitizeImportedName($0.name, fallback: "Imported Node") }
     }
 
     // MARK: - Profiles
