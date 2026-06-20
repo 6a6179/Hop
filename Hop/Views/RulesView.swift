@@ -48,6 +48,7 @@ struct RulesView: View {
                 } label: {
                     Label("Add Configuration", systemImage: "plus")
                 }
+                .buttonStyle(.glass)
             }
         }
         .sheet(item: $editor) { state in
@@ -63,10 +64,12 @@ struct RulesView: View {
 }
 
 private struct ConfigRow: View {
-    var configuration: RuleConfiguration
-    var isActive: Bool
+    let configuration: RuleConfiguration
+    let isActive: Bool
 
     var body: some View {
+        let count = configuration.rules.count
+
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Text(configuration.name)
@@ -77,31 +80,29 @@ private struct ConfigRow: View {
                     ActiveBadge()
                 }
             }
-            Text(summary)
+            Text(count == 0 ? "No rules · proxies all matched traffic" : "\(count) rule\(count == 1 ? "" : "s")")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
         .animation(.snappy, value: isActive)
     }
-
-    private var summary: String {
-        let count = configuration.rules.count
-        return count == 0 ? "No rules · proxies all matched traffic" : "\(count) rule\(count == 1 ? "" : "s")"
-    }
 }
 
 private struct ConfigurationEditorState: Identifiable {
-    var id: UUID
-    var configuration: RuleConfiguration
-    var isNew: Bool
+    let configuration: RuleConfiguration
+    let isNew: Bool
+
+    var id: RuleConfiguration.ID {
+        configuration.id
+    }
 
     static var add: ConfigurationEditorState {
-        ConfigurationEditorState(id: UUID(), configuration: RuleConfiguration(name: "New Configuration"), isNew: true)
+        ConfigurationEditorState(configuration: RuleConfiguration(name: "New Configuration"), isNew: true)
     }
 
     static func edit(_ configuration: RuleConfiguration) -> ConfigurationEditorState {
-        ConfigurationEditorState(id: configuration.id, configuration: configuration, isNew: false)
+        ConfigurationEditorState(configuration: configuration, isNew: false)
     }
 }
 
@@ -112,7 +113,7 @@ private struct ConfigurationEditorView: View {
     @State private var ruleEditor: RuleEditorState?
 
     let isNew: Bool
-    var onSave: (RuleConfiguration) -> Void
+    let onSave: (RuleConfiguration) -> Void
 
     init(configuration: RuleConfiguration, isNew: Bool, onSave: @escaping (RuleConfiguration) -> Void) {
         _draft = State(initialValue: configuration)
@@ -149,6 +150,8 @@ private struct ConfigurationEditorView: View {
                     } label: {
                         Label("Add Rule", systemImage: "plus")
                     }
+                    .buttonStyle(.glass)
+                    .controlSize(.small)
                 } header: {
                     Text("Rules")
                 } footer: {
@@ -166,6 +169,7 @@ private struct ConfigurationEditorView: View {
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
+                        draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
                         onSave(draft)
                         dismiss()
                     }
@@ -186,8 +190,8 @@ private struct ConfigurationEditorView: View {
 }
 
 private struct RuleRow: View {
-    var rule: RoutingRule
-    var targetName: String
+    let rule: RoutingRule
+    let targetName: String
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -205,20 +209,22 @@ private struct RuleRow: View {
 }
 
 private struct RuleEditorState: Identifiable {
-    var id: UUID
-    var rule: RoutingRule
-    var isNew: Bool
+    let rule: RoutingRule
+    let isNew: Bool
+
+    var id: RoutingRule.ID {
+        rule.id
+    }
 
     static var add: RuleEditorState {
         RuleEditorState(
-            id: UUID(),
             rule: RoutingRule(kind: .domainSuffix, value: "", target: .selectedProxy),
             isNew: true,
         )
     }
 
     static func edit(_ rule: RoutingRule) -> RuleEditorState {
-        RuleEditorState(id: rule.id, rule: rule, isNew: false)
+        RuleEditorState(rule: rule, isNew: false)
     }
 }
 
@@ -227,8 +233,8 @@ private struct RuleEditorView: View {
     @Environment(HopStore.self) private var store
     @State private var draft: RuleEditorDraft
 
-    var state: RuleEditorState
-    var onSave: (RoutingRule) -> Void
+    let state: RuleEditorState
+    let onSave: (RoutingRule) -> Void
 
     init(state: RuleEditorState, onSave: @escaping (RoutingRule) -> Void) {
         self.state = state
@@ -237,11 +243,13 @@ private struct RuleEditorView: View {
     }
 
     var body: some View {
+        let enabledGroups = store.groups.filter(\.isEnabled)
+
         NavigationStack {
             Form {
                 Section {
                     Picker("Type", selection: $draft.kind) {
-                        ForEach(RoutingRuleKind.allCases) { kind in
+                        ForEach(RoutingRuleKind.allCases, id: \.self) { kind in
                             Text(kind.displayName).tag(kind)
                         }
                     }
@@ -265,9 +273,9 @@ private struct RuleEditorView: View {
                         Text("Direct").tag(OutboundTarget.direct)
                         Text("Reject").tag(OutboundTarget.reject)
 
-                        if !store.groups.isEmpty {
+                        if !enabledGroups.isEmpty {
                             Section("Groups") {
-                                ForEach(store.groups.filter(\.isEnabled)) { group in
+                                ForEach(enabledGroups) { group in
                                     Text(group.name).tag(OutboundTarget.group(group.id))
                                 }
                             }
@@ -309,7 +317,7 @@ private struct RuleEditorView: View {
 }
 
 private struct RuleEditorDraft {
-    var id: RoutingRule.ID
+    let id: RoutingRule.ID
     var kind: RoutingRuleKind
     var value: String
     var target: OutboundTarget
@@ -325,13 +333,17 @@ private struct RuleEditorDraft {
         RoutingRule(
             id: id,
             kind: kind,
-            value: value.trimmingCharacters(in: .whitespacesAndNewlines),
+            value: trimmedValue,
             target: target,
         )
     }
 
+    private var trimmedValue: String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     var isValid: Bool {
-        !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !trimmedValue.isEmpty
     }
 }
 

@@ -11,31 +11,58 @@ struct ConnectionsView: View {
         // about every second while this view is visible, and `body` references
         // the visible list twice (empty check + ForEach).
         let visibleConnections = visibleConnections
-        return List {
+        let activeCount = store.tunnel.connections.count(where: \.isActive)
+        let footerText = if !store.tunnel.state.isConnected {
+            "Connect the tunnel to receive live connection events."
+        } else if let error = store.tunnel.telemetryError {
+            "Telemetry unavailable: \(error)"
+        } else if store.tunnel.telemetryIsConnected {
+            "\(activeCount) active · \(store.tunnel.connections.count) total observed"
+        } else {
+            "Waiting for live telemetry from the tunnel."
+        }
+        let emptyTitle = if !searchNeedle.isEmpty {
+            "No Matches"
+        } else {
+            switch filter {
+            case .active:
+                "No Active Connections"
+            case .closed:
+                "No Closed Connections"
+            case .all:
+                "No Connections"
+            }
+        }
+
+        List {
             Section {
                 Picker("Filter", selection: $filter) {
-                    ForEach(ConnectionFilter.allCases) { filter in
+                    ForEach(ConnectionFilter.allCases, id: \.self) { filter in
                         Text(filter.title).tag(filter)
                     }
                 }
                 .pickerStyle(.segmented)
 
                 Picker("Sort", selection: $sort) {
-                    ForEach(ConnectionSort.allCases) { sort in
+                    ForEach(ConnectionSort.allCases, id: \.self) { sort in
                         Text(sort.title).tag(sort)
                     }
                 }
             } footer: {
-                if store.tunnel.state.isConnected {
-                    Text(statusText)
-                } else {
-                    Text("Connect the tunnel to receive live connection events.")
-                }
+                Text(footerText)
             }
 
             Section("Connections") {
                 if visibleConnections.isEmpty {
-                    ContentUnavailableView(emptyTitle, systemImage: "link", description: Text(emptyDescription))
+                    let emptyDescription = store.tunnel.state.isConnected
+                        ? "Traffic will appear here after apps use the tunnel."
+                        : "Connect the tunnel first."
+
+                    ContentUnavailableView(
+                        emptyTitle,
+                        systemImage: "link",
+                        description: Text(emptyDescription),
+                    )
                 } else {
                     ForEach(visibleConnections) { connection in
                         NavigationLink {
@@ -73,26 +100,29 @@ struct ConnectionsView: View {
                 Button("Close All", role: .destructive) {
                     store.tunnel.closeAllConnections()
                 }
-                .disabled(activeConnectionCount == 0)
+                .buttonStyle(.glass)
+                .disabled(activeCount == 0)
             }
         }
     }
 
+    private var searchNeedle: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private var visibleConnections: [TunnelConnectionSnapshot] {
-        let needle = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let needle = searchNeedle
         return store.tunnel.connections
             .filter { connection in
-                switch filter {
+                let matchesSearch = needle.isEmpty || connection.searchableText.localizedCaseInsensitiveContains(needle)
+                return switch filter {
                 case .active:
-                    connection.isActive
+                    connection.isActive && matchesSearch
                 case .closed:
-                    !connection.isActive
+                    !connection.isActive && matchesSearch
                 case .all:
-                    true
+                    matchesSearch
                 }
-            }
-            .filter { connection in
-                needle.isEmpty || connection.searchableText.contains(needle)
             }
             .sorted { lhs, rhs in
                 switch sort {
@@ -105,48 +135,10 @@ struct ConnectionsView: View {
                 }
             }
     }
-
-    private var activeConnectionCount: Int {
-        store.tunnel.connections.filter(\.isActive).count
-    }
-
-    private var statusText: String {
-        let active = activeConnectionCount
-        let total = store.tunnel.connections.count
-        if let error = store.tunnel.telemetryError {
-            return "Telemetry unavailable: \(error)"
-        }
-        if store.tunnel.telemetryIsConnected {
-            return "\(active) active · \(total) total observed"
-        }
-        return "Waiting for live telemetry from the tunnel."
-    }
-
-    private var emptyTitle: String {
-        if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "No Matches"
-        }
-        return switch filter {
-        case .active:
-            "No Active Connections"
-        case .closed:
-            "No Closed Connections"
-        case .all:
-            "No Connections"
-        }
-    }
-
-    private var emptyDescription: String {
-        if store.tunnel.state.isConnected {
-            "Traffic will appear here after apps use the tunnel."
-        } else {
-            "Connect the tunnel first."
-        }
-    }
 }
 
 private struct ConnectionRow: View {
-    var connection: TunnelConnectionSnapshot
+    let connection: TunnelConnectionSnapshot
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -158,12 +150,10 @@ private struct ConnectionRow: View {
 
                 Spacer()
 
-                Text(connection.isActive ? "Active" : "Closed")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(connection.isActive ? .green : .secondary)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background((connection.isActive ? Color.green : Color.secondary).opacity(0.14), in: Capsule())
+                StatusPill(
+                    connection.isActive ? "Active" : "Closed",
+                    tint: connection.isActive ? .green : .secondary,
+                )
             }
 
             HStack(spacing: 10) {
@@ -196,7 +186,7 @@ private struct ConnectionRow: View {
 }
 
 private struct ConnectionDetailView: View {
-    var connection: TunnelConnectionSnapshot
+    let connection: TunnelConnectionSnapshot
 
     var body: some View {
         List {
@@ -247,14 +237,10 @@ private struct ConnectionDetailView: View {
     }
 }
 
-private enum ConnectionFilter: String, CaseIterable, Identifiable {
+private enum ConnectionFilter: CaseIterable {
     case active
     case closed
     case all
-
-    var id: String {
-        rawValue
-    }
 
     var title: String {
         switch self {
@@ -268,14 +254,10 @@ private enum ConnectionFilter: String, CaseIterable, Identifiable {
     }
 }
 
-private enum ConnectionSort: String, CaseIterable, Identifiable {
+private enum ConnectionSort: CaseIterable {
     case recent
     case currentTraffic
     case totalTraffic
-
-    var id: String {
-        rawValue
-    }
 
     var title: String {
         switch self {

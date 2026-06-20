@@ -10,7 +10,7 @@ struct SettingsView: View {
         Form {
             Section("Appearance") {
                 Picker("Theme", selection: $store.settings.appearance) {
-                    ForEach(AppAppearance.allCases) { appearance in
+                    ForEach(AppAppearance.allCases, id: \.self) { appearance in
                         Text(appearance.displayName).tag(appearance)
                     }
                 }
@@ -37,13 +37,13 @@ struct SettingsView: View {
 
             Section {
                 Picker("Resolver", selection: $store.settings.dnsPreset) {
-                    ForEach(DNSPreset.allCases) { resolver in
+                    ForEach(DNSPreset.allCases, id: \.self) { resolver in
                         Text(resolver.displayName).tag(resolver)
                     }
                 }
 
                 Picker("Strategy", selection: $store.settings.dnsStrategy) {
-                    ForEach(DNSStrategy.allCases) { strategy in
+                    ForEach(DNSStrategy.allCases, id: \.self) { strategy in
                         Text(strategy.displayName).tag(strategy)
                     }
                 }
@@ -58,13 +58,13 @@ struct SettingsView: View {
 
             Section {
                 Picker("Level", selection: $store.settings.logLevel) {
-                    ForEach(ConfigLogLevel.allCases) { level in
+                    ForEach(ConfigLogLevel.allCases, id: \.self) { level in
                         Text(level.displayName).tag(level)
                     }
                 }
 
                 Picker("Keep", selection: $store.settings.logRetention) {
-                    ForEach(LogRetention.allCases) { retention in
+                    ForEach(LogRetention.allCases, id: \.self) { retention in
                         Text(retention.displayName).tag(retention)
                     }
                 }
@@ -82,7 +82,7 @@ struct SettingsView: View {
 
             Section {
                 Picker("Method", selection: $store.settings.latencyTestMethod) {
-                    ForEach(LatencyTestMethod.allCases) { method in
+                    ForEach(LatencyTestMethod.allCases, id: \.self) { method in
                         Text(method.displayName).tag(method)
                     }
                 }
