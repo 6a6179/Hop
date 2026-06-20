@@ -230,7 +230,7 @@ final class SecretStoreTests: XCTestCase {
     func testStateFileContainsNoPlaintextSecrets() throws {
         let url = makeTempStateURL()
         let store = makeStore()
-        let dataStore = HopAppDataStore(url: url, secretStore: store)
+        let dataStore = HopAppDataStore(url: url, secretStore: store, authenticationStore: store)
         defer {
             store.removeAll()
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -274,7 +274,7 @@ final class SecretStoreTests: XCTestCase {
         try encoder.encode(legacy).write(to: url)
         XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("replace-me"))
 
-        let dataStore = HopAppDataStore(url: url, secretStore: store)
+        let dataStore = HopAppDataStore(url: url, secretStore: store, authenticationStore: store)
         let loaded = try XCTUnwrap(dataStore.load())
 
         XCTAssertEqual(loaded.profiles, [SampleData.trojanTLS], "secrets must survive migration")

@@ -27,15 +27,21 @@ info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 command -v shasum >/dev/null 2>&1 || err "shasum is required."
 [[ -d "$xcframework" ]] || err "Frameworks/Libbox.xcframework not found. Run scripts/build-libbox.sh first."
 
-# Deterministic digest over every regular file in the xcframework: hash each
-# file (with its relative path), sort stably, then hash the combined list.
+# Deterministic digest over every regular file and symlink in the xcframework:
+# hash file contents and record symlink targets, then hash the combined list.
 # Spurious filesystem noise (.DS_Store, AppleDouble) is excluded.
 compute_digest() {
   ( cd "$frameworks_dir" \
-      && find "Libbox.xcframework" -type f \
+      && find "Libbox.xcframework" \( -type f -o -type l \) \
            -not -name '.DS_Store' -not -name '._*' -print0 \
       | LC_ALL=C sort -z \
-      | xargs -0 shasum -a 256 ) \
+      | while IFS= read -r -d '' path; do
+          if [[ -L "$path" ]]; then
+            printf 'L %s -> %s\n' "$path" "$(readlink "$path")"
+          else
+            printf 'F %s %s\n' "$(shasum -a 256 "$path" | awk '{print $1}')" "$path"
+          fi
+        done ) \
     | shasum -a 256 \
     | awk '{print $1}'
 }

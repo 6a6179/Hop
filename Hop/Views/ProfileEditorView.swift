@@ -69,7 +69,7 @@ struct ProfileEditorView: View {
                 // they get the same SecureField treatment as passwords.
                 ProfileTextField("UUID", text: $draft.vlessUUID, isSecure: true)
                 ProfileTextField("Flow", text: $draft.vlessFlow, prompt: "xtls-rprx-vision")
-                ProfileTextField("Encryption/Auth", text: $draft.vlessEncryption, prompt: "none")
+                ProfileTextField("Encryption/Auth", text: $draft.vlessEncryption, prompt: "none", isSecure: true)
                 if draft.hasVLESSEncryption {
                     Label("\(draft.vlessEncryptionAuthLabel) is saved for compatibility, but Hop's current sing-box/libbox engine cannot run non-none VLESS Encryption/Auth yet.", systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)

@@ -99,12 +99,36 @@ enum ImportPolicy {
     /// differently at connect time); the subscription fetcher's redirect
     /// re-validation is the companion control.
     static func resolvedAddressesAreDisallowed(_ host: String) -> Bool {
+        guard let addresses = resolvedAddresses(host) else {
+            return false
+        }
+        return addresses.contains(where: isPrivateOrReservedAddress)
+    }
+
+    /// Resolves once and returns the concrete public IP address latency probes
+    /// should use. Binding the probe to this address closes the DNS-rebinding
+    /// gap between a precheck and the later TCP/TLS/ICMP connection.
+    static func resolvedPublicAddressForProbe(_ host: String) -> String? {
+        guard !isDisallowedRemoteHost(host),
+              let addresses = resolvedAddresses(host),
+              !addresses.isEmpty,
+              !addresses.contains(where: isPrivateOrReservedAddress)
+        else {
+            return nil
+        }
+        return addresses.first
+    }
+
+    private static func resolvedAddresses(_ host: String) -> [String]? {
         var trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("["), trimmed.hasSuffix("]") {
             trimmed = String(trimmed.dropFirst().dropLast())
         }
         guard !trimmed.isEmpty else {
-            return true
+            return []
+        }
+        if isPrivateOrReservedAddress(trimmed) {
+            return [trimmed]
         }
 
         var hints = addrinfo()
@@ -112,10 +136,11 @@ enum ImportPolicy {
         hints.ai_socktype = SOCK_STREAM
         var info: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(trimmed, nil, &hints, &info) == 0 else {
-            return false
+            return nil
         }
         defer { freeaddrinfo(info) }
 
+        var result: [String] = []
         var node = info
         while let current = node {
             defer { node = current.pointee.ai_next }
@@ -128,20 +153,20 @@ enum ImportPolicy {
                     var address = sin.pointee.sin_addr
                     _ = inet_ntop(AF_INET, &address, &buffer, socklen_t(buffer.count))
                 }
-                if isPrivateOrReservedIPv4(string(fromNullTerminatedBuffer: buffer)) {
-                    return true
-                }
+                result.append(string(fromNullTerminatedBuffer: buffer))
             } else if current.pointee.ai_family == AF_INET6 {
                 sockaddrPointer.withMemoryRebound(to: sockaddr_in6.self, capacity: 1) { sin6 in
                     var address = sin6.pointee.sin6_addr
                     _ = inet_ntop(AF_INET6, &address, &buffer, socklen_t(buffer.count))
                 }
-                if isPrivateOrReservedIPv6(string(fromNullTerminatedBuffer: buffer)) {
-                    return true
-                }
+                result.append(string(fromNullTerminatedBuffer: buffer))
             }
         }
-        return false
+        return result
+    }
+
+    private static func isPrivateOrReservedAddress(_ address: String) -> Bool {
+        isPrivateOrReservedIPv4(address) || isPrivateOrReservedIPv6(address)
     }
 
     private static func string(fromNullTerminatedBuffer buffer: [CChar]) -> String {

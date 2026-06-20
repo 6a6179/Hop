@@ -6,17 +6,29 @@ import XCTest
 /// extraction exists for.
 final class SubscriptionRefreshMergerTests: XCTestCase {
     func testNameAndProtocolMatchUpdatesProfileInPlace() {
-        let existing = trojanProfile(name: "Tokyo", host: "old.example.com")
+        let subscriptionID = UUID()
+        let existing = trojanProfile(name: "Tokyo", host: "old.example.com", subscriptionID: subscriptionID)
         var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
 
-        merger.merge(ImportResult(profiles: [trojanProfile(name: " tokyo ", host: "new.example.com")]))
+        merger.merge(ImportResult(profiles: [trojanProfile(name: " tokyo ", host: "new.example.com", subscriptionID: subscriptionID)]))
 
         XCTAssertEqual(merger.profiles.map(\.id), [existing.id], "name match is trimmed + case-insensitive")
         XCTAssertEqual(merger.profiles.first?.endpoint.host, "new.example.com")
     }
 
+    func testNameAndProtocolMatchRequiresSameSubscription() {
+        let existing = trojanProfile(name: "Tokyo", host: "manual.example.com")
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        merger.merge(ImportResult(profiles: [trojanProfile(name: "Tokyo", host: "subscription.example.com", subscriptionID: UUID())]))
+
+        XCTAssertEqual(merger.profiles.count, 2)
+        XCTAssertTrue(merger.profiles.contains { $0.id == existing.id && $0.endpoint.host == "manual.example.com" })
+    }
+
     func testNameMatchRequiresSameProtocol() {
-        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        let subscriptionID = UUID()
+        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
 
         let vless = ProxyProfile(
@@ -24,6 +36,7 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
             endpoint: Endpoint(host: "jp.example.com", port: 443),
             options: .vless(VLESSOptions(uuid: "u", flow: nil)),
             security: .none,
+            subscriptionID: subscriptionID,
         )
         merger.merge(ImportResult(profiles: [vless]))
 
@@ -83,8 +96,9 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     /// an existing node by name must not silently disable its certificate
     /// verification.
     func testRefreshCannotSilentlyEnableAllowInsecure() throws {
-        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
-        var weakened = trojanProfile(name: "Tokyo", host: "new.example.com")
+        let subscriptionID = UUID()
+        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
+        var weakened = trojanProfile(name: "Tokyo", host: "new.example.com", subscriptionID: subscriptionID)
         weakened.security.tls?.allowInsecure = true
         var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
 
@@ -98,8 +112,9 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     }
 
     func testRefreshCannotSilentlyStripTLSLayer() throws {
-        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
-        var stripped = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        let subscriptionID = UUID()
+        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
+        var stripped = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         stripped.security = .none
         var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
 
@@ -114,9 +129,10 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     /// verification still on) is a downgrade a subscription must not push
     /// silently.
     func testRefreshCannotSilentlyDemoteRealityToTLS() throws {
-        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        let subscriptionID = UUID()
+        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         existing.security = .reality(RealityOptions(publicKey: "PUBLICKEY", shortID: "abcd", serverName: "jp.example.com"))
-        let demoted = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        let demoted = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
 
         merger.merge(ImportResult(profiles: [demoted]))
@@ -134,9 +150,10 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     }
 
     func testRefreshStillAppliesLegitimateSecurityUpgrade() throws {
-        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        let subscriptionID = UUID()
+        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         existing.security.tls?.allowInsecure = true
-        let hardened = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        let hardened = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
 
         merger.merge(ImportResult(profiles: [hardened]))
@@ -180,7 +197,7 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
             profiles: [trojanProfile(name: "Existing", host: "e.example.com")],
             groups: [],
             subscriptions: [],
-            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: SecretStore(backend: backend)),
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: SecretStore(backend: backend), authenticationStore: .inMemory()),
         )
         // init may normalize the selected target, which enqueues a save of its
         // own; settle it before taking the baseline.
@@ -206,7 +223,7 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
             profiles: [trojanProfile(name: "Existing", host: "e.example.com")],
             groups: [],
             subscriptions: [],
-            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()),
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
         )
         let rulesBefore = store.ruleConfigurations.map(\.rules)
 
@@ -222,7 +239,7 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     func testInitWithCleanStateDoesNotPersist() {
         let backend = InMemorySecretBackend()
         let url = tempStateURL()
-        let store = HopStore(dataStore: HopAppDataStore(url: url, secretStore: SecretStore(backend: backend)))
+        let store = HopStore(dataStore: HopAppDataStore(url: url, secretStore: SecretStore(backend: backend), authenticationStore: .inMemory()))
         store.flushPendingPersists()
 
         XCTAssertEqual(backend.allKeysCount, 0, "launching with consistent state must not rewrite it")
@@ -252,8 +269,9 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     }
 
     func testNewInsecureProfileNamesDoesNotFlagProfileMatchingExistingInsecureByNameAndProto() {
-        let existing = insecureTrojanProfile(name: "Tokyo")
-        var changed = insecureTrojanProfile(name: " tokyo ") // same name (trimmed+lowercased), same proto, different host
+        let subscriptionID = UUID()
+        let existing = insecureTrojanProfile(name: "Tokyo", subscriptionID: subscriptionID)
+        var changed = insecureTrojanProfile(name: " tokyo ", subscriptionID: subscriptionID) // same name (trimmed+lowercased), same proto, different host
         changed.endpoint = Endpoint(host: "new.example.com", port: 443)
         let names = SubscriptionRefreshMerger.newInsecureProfileNames(existing: [existing], imported: [changed])
         XCTAssertTrue(names.isEmpty, "name+proto match against an existing already-insecure profile must not be flagged")
@@ -272,8 +290,9 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     /// refusal), so no node ends up newly insecure and prompting the user would
     /// describe an outcome that cannot happen.
     func testNewInsecureProfileNamesDoesNotFlagImportedInsecureWhenExistingMatchIsSecure() throws {
-        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
-        var imported = insecureTrojanProfile(name: "Tokyo") // name matches existing (secure)
+        let subscriptionID = UUID()
+        let existing = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
+        var imported = insecureTrojanProfile(name: "Tokyo", subscriptionID: subscriptionID) // name matches existing (secure)
         imported.endpoint = Endpoint(host: "new.example.com", port: 443)
         let names = SubscriptionRefreshMerger.newInsecureProfileNames(existing: [existing], imported: [imported])
         XCTAssertTrue(names.isEmpty, "a name+proto match is flip-guarded by the merge, so it is not a NEW insecure node")
@@ -289,9 +308,10 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     // MARK: - REALITY public-key change warning
 
     func testRealityPublicKeyChangeAppliesNewKeyAndAppendsWarning() throws {
-        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        let subscriptionID = UUID()
+        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         existing.security = .reality(RealityOptions(publicKey: "OLDKEY", shortID: "abcd"))
-        var imported = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        var imported = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         imported.security = .reality(RealityOptions(publicKey: "NEWKEY", shortID: "abcd"))
         var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
 
@@ -305,9 +325,10 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     }
 
     func testRealityPublicKeyUnchangedProducesNoWarning() {
-        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        let subscriptionID = UUID()
+        var existing = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         existing.security = .reality(RealityOptions(publicKey: "SAMEKEY", shortID: "abcd"))
-        var imported = trojanProfile(name: "Tokyo", host: "jp.example.com")
+        var imported = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         imported.security = .reality(RealityOptions(publicKey: "SAMEKEY", shortID: "abcd"))
         var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
 
@@ -318,21 +339,23 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
 
     // MARK: - Helpers
 
-    private func trojanProfile(name: String, host: String) -> ProxyProfile {
+    private func trojanProfile(name: String, host: String, subscriptionID: UUID? = nil) -> ProxyProfile {
         ProxyProfile(
             name: name,
             endpoint: Endpoint(host: host, port: 443),
             options: .trojan(TrojanOptions(password: "secret")),
             security: .tls(TLSOptions(serverName: host)),
+            subscriptionID: subscriptionID,
         )
     }
 
-    private func insecureTrojanProfile(name: String) -> ProxyProfile {
+    private func insecureTrojanProfile(name: String, subscriptionID: UUID? = nil) -> ProxyProfile {
         ProxyProfile(
             name: name,
             endpoint: Endpoint(host: "jp.example.com", port: 443),
             options: .trojan(TrojanOptions(password: "secret")),
             security: .tls(TLSOptions(serverName: "jp.example.com", allowInsecure: true)),
+            subscriptionID: subscriptionID,
         )
     }
 }

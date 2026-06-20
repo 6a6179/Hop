@@ -133,7 +133,7 @@ extension ProxyImportService {
         let values = Array(parts.dropFirst())
         let keyed = keyedOptions(values)
         let memberNames = values.filter { !$0.contains("=") }
-        let members = memberNames.map { OutboundTarget.named($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        let members = memberNames.map { shadowrocketTarget($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
 
         switch importedType {
         case "select":
@@ -142,7 +142,7 @@ extension ProxyImportService {
                     name: name,
                     type: .select,
                     members: members,
-                    defaultTarget: keyed["policy-select-name"].map(OutboundTarget.named) ?? members.first,
+                    defaultTarget: keyed["policy-select-name"].map(shadowrocketTarget) ?? members.first,
                     importedType: importedType,
                 ),
             )

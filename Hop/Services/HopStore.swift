@@ -426,7 +426,7 @@ final class HopStore {
 
         let result: ImportResult
         do {
-            result = try await importService.importSubscription(url: url)
+            result = try await importService.importSubscription(url: url).markingProfiles(subscriptionID: subscription.id)
         } catch {
             return .failed(message: error.localizedDescription)
         }
@@ -503,15 +503,14 @@ final class HopStore {
         // otherwise turn the "test latency" action into a LAN scanner. This
         // mirrors the SSRF policy applied to subscription fetches.
         let host = profile.endpoint.host
-        guard !ImportPolicy.isDisallowedRemoteHost(host),
-              !ImportPolicy.resolvedAddressesAreDisallowed(host)
+        guard let probeHost = ImportPolicy.resolvedPublicAddressForProbe(host)
         else {
             nodeLatencies[profile.id] = .failure("Endpoint host is not permitted for latency testing")
             return
         }
         nodeLatencies[profile.id] = .testing
         let result = await latencyTester.measure(
-            host: host,
+            host: probeHost,
             port: profile.endpoint.port,
             serverName: profile.security.tls?.serverName ?? host,
             usesTLS: profile.security.layer != .none,

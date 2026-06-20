@@ -10,7 +10,7 @@ final class HopAppDataStoreTests: XCTestCase {
 
     func testRoundTripsProfilesGroupsSubscriptionsRulesSettingsAndLogs() throws {
         let url = tempStateURL()
-        let store = HopAppDataStore(url: url, secretStore: .inMemory())
+        let store = HopAppDataStore(url: url, secretStore: .inMemory(), authenticationStore: .inMemory())
         let data = HopAppData(
             profiles: SampleData.profiles,
             groups: SampleData.groups,
@@ -56,7 +56,7 @@ final class HopAppDataStoreTests: XCTestCase {
     func testSubscriptionURLIsStoredInKeychainNotStateFile() throws {
         let url = tempStateURL()
         let secretStore = SecretStore.inMemory()
-        let store = HopAppDataStore(url: url, secretStore: secretStore)
+        let store = HopAppDataStore(url: url, secretStore: secretStore, authenticationStore: .inMemory())
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
         let subscription = SubscriptionSource(name: "Airport", url: "https://sub.example.com/path/token?target=hop")
@@ -78,6 +78,34 @@ final class HopAppDataStoreTests: XCTestCase {
         XCTAssertFalse(raw.contains("path/token"), "subscription bearer URL leaked into JSON")
         XCTAssertEqual(secretStore.value(forKey: HopSecret.subscriptionURLKey(subscriptionID: subscription.id)), subscription.url)
         XCTAssertEqual(try XCTUnwrap(store.load()).subscriptions, [subscription])
+    }
+
+    func testStateAuthenticationRejectsTamperedStateBeforeHydratingSecrets() throws {
+        let url = tempStateURL()
+        let secretStore = SecretStore.inMemory()
+        let authStore = SecretStore.inMemory()
+        let store = HopAppDataStore(url: url, secretStore: secretStore, authenticationStore: authStore)
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let profile = trojanProfile(id: UUID(), name: "Tokyo", host: "safe.example.com", password: "secret")
+        let data = HopAppData(
+            profiles: [profile],
+            groups: [],
+            subscriptions: [],
+            routingMode: .global,
+            selectedTarget: .profile(profile.id),
+            settings: .defaults,
+            logs: [],
+        )
+
+        store.save(data)
+        XCTAssertEqual(try XCTUnwrap(store.load()).profiles.first?.endpoint.host, "safe.example.com")
+
+        let tampered = try String(contentsOf: url, encoding: .utf8)
+            .replacingOccurrences(of: "safe.example.com", with: "evil.example.com")
+        try tampered.write(to: url, atomically: true, encoding: .utf8)
+
+        XCTAssertNil(store.load(), "state tamper must fail before Keychain-backed secrets are rebound")
     }
 
     func testKillSwitchSettingRoundTrips() throws {
@@ -104,7 +132,7 @@ final class HopAppDataStoreTests: XCTestCase {
         let subscription = SubscriptionSource(name: "Airport", url: "https://example.com/sub")
         let store = HopStore(
             subscriptions: [subscription],
-            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()),
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
         )
 
         var updated = subscription
@@ -118,23 +146,26 @@ final class HopAppDataStoreTests: XCTestCase {
 
     @MainActor
     func testSubscriptionRefreshUpdatesMatchingProfileInsteadOfDuplicating() throws {
+        let subscriptionID = UUID()
         let existing = trojanProfile(
             id: UUID(),
             name: "Tokyo",
             host: "old.example.com",
             password: "old-password",
+            subscriptionID: subscriptionID,
         )
         let refreshed = trojanProfile(
             id: UUID(),
             name: "Tokyo",
             host: "new.example.com",
             password: "new-password",
+            subscriptionID: subscriptionID,
         )
         let store = HopStore(
             profiles: [existing],
             groups: [],
             subscriptions: [],
-            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()),
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
         )
 
         store.applySubscriptionRefresh(ImportResult(profiles: [refreshed]))
@@ -170,7 +201,7 @@ final class HopAppDataStoreTests: XCTestCase {
             groups: [existingGroup],
             subscriptions: [],
             selectedTarget: .group(existingGroup.id),
-            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()),
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
         )
 
         store.applySubscriptionRefresh(ImportResult(profiles: [importedProfile], groups: [importedGroup]))
@@ -189,7 +220,7 @@ final class HopAppDataStoreTests: XCTestCase {
     func testSecondSaveWithIdenticalProfilesDoesNotWriteSecretsAgain() {
         let backend = InMemorySecretBackend()
         let url = tempStateURL()
-        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend))
+        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend), authenticationStore: .inMemory())
 
         let profile = trojanProfile(id: UUID(), name: "Tokyo", host: "jp.example.com", password: "secret")
         let data = HopAppData(
@@ -215,7 +246,7 @@ final class HopAppDataStoreTests: XCTestCase {
     func testFailedSecretWriteIsRetriedOnNextSave() {
         let backend = FailOnceSecretBackend()
         let url = tempStateURL()
-        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend))
+        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend), authenticationStore: .inMemory())
 
         let profile = trojanProfile(id: UUID(), name: "Tokyo", host: "jp.example.com", password: "secret")
         let data = HopAppData(
@@ -246,7 +277,7 @@ final class HopAppDataStoreTests: XCTestCase {
     func testMutatedPasswordCausesSecretWrite() {
         let backend = InMemorySecretBackend()
         let url = tempStateURL()
-        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend))
+        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend), authenticationStore: .inMemory())
 
         let profileID = UUID()
         let original = trojanProfile(id: profileID, name: "Tokyo", host: "jp.example.com", password: "old-password")
@@ -283,7 +314,7 @@ final class HopAppDataStoreTests: XCTestCase {
     func testKeychainEndsWithCorrectPasswordAfterIdenticalSaves() {
         let backend = InMemorySecretBackend()
         let url = tempStateURL()
-        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend))
+        let store = HopAppDataStore(url: url, secretStore: SecretStore(backend: backend), authenticationStore: .inMemory())
         let secretStore = SecretStore(backend: backend)
 
         let profileID = UUID()
@@ -404,13 +435,14 @@ final class HopAppDataStoreTests: XCTestCase {
         XCTAssertEqual(opts.preSharedKey, "PRESHAREDKEY", "hydratingSecrets must restore preSharedKey from the Keychain")
     }
 
-    private func trojanProfile(id: UUID, name: String, host: String, password: String) -> ProxyProfile {
+    private func trojanProfile(id: UUID, name: String, host: String, password: String, subscriptionID: UUID? = nil) -> ProxyProfile {
         ProxyProfile(
             id: id,
             name: name,
             endpoint: Endpoint(host: host, port: 443),
             options: .trojan(TrojanOptions(password: password)),
             security: .tls(TLSOptions(serverName: host)),
+            subscriptionID: subscriptionID,
         )
     }
 }

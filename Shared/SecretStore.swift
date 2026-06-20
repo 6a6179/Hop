@@ -129,6 +129,17 @@ struct SecretStore {
         ensureRuntimeSecret(forKey: Self.tunnelConfigAuthenticationKey)
     }
 
+    static let appStateAuthenticationKey = "app-state-authentication-key"
+
+    func appStateAuthenticationSecret() -> String {
+        value(forKey: Self.appStateAuthenticationKey) ?? ""
+    }
+
+    @discardableResult
+    func ensureAppStateAuthenticationSecret() -> String {
+        ensureRuntimeSecret(forKey: Self.appStateAuthenticationKey)
+    }
+
     private func ensureRuntimeSecret(forKey key: String) -> String {
         if let existing = value(forKey: key), !existing.isEmpty {
             return existing
