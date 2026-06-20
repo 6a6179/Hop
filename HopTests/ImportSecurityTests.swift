@@ -70,6 +70,12 @@ final class ImportSecurityTests: XCTestCase {
         }
     }
 
+    func testLatencyProbeHostBindsToResolvedPublicAddress() {
+        XCTAssertNil(ImportPolicy.resolvedPublicAddressForProbe("127.1"))
+        XCTAssertNil(ImportPolicy.resolvedPublicAddressForProbe("localhost"))
+        XCTAssertEqual(ImportPolicy.resolvedPublicAddressForProbe("1.1.1.1"), "1.1.1.1")
+    }
+
     func testSubscriptionURLRejectsAlternateLoopbackEncodings() throws {
         for raw in ["https://2130706433/sub", "https://127.1/sub", "https://0x7f000001/sub", "https://localhost./sub"] {
             guard let url = URL(string: raw), url.host != nil else {
@@ -95,6 +101,20 @@ final class ImportSecurityTests: XCTestCase {
         XCTAssertFalse(ImportPolicy.isAllowedProbeURL("https://169.254.169.254/latest"))
         XCTAssertFalse(ImportPolicy.isAllowedProbeURL("ftp://example.com/x"))
         XCTAssertFalse(ImportPolicy.isAllowedProbeURL("not a url"))
+    }
+
+    func testSubscriptionImportResultDropsRulesAndMarksProfiles() {
+        let subscriptionID = UUID()
+        let result = ImportResult(
+            profiles: [SampleData.trojanTLS],
+            rules: [RoutingRule(kind: .domainSuffix, value: "bank.example", target: .direct)],
+        )
+        .markingProfiles(subscriptionID: subscriptionID)
+        .droppingRules()
+
+        XCTAssertEqual(result.profiles.first?.subscriptionID, subscriptionID)
+        XCTAssertTrue(result.rules.isEmpty)
+        XCTAssertTrue(result.warnings.contains { $0.message.contains("Ignored 1 routing rule") })
     }
 
     // MARK: - Regex safety (findings 7, 8)

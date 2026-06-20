@@ -40,15 +40,34 @@ struct HopAppData: Codable {
 }
 
 struct HopAppDataStore {
-    var url: URL = RuntimeEnvironment.stateFileURL
-    var secretStore: SecretStore = .shared
+    var url: URL
+    var secretStore: SecretStore
+    var authenticationStore: SecretStore
     /// Shared across value copies of this store; see `SecretWriteCache`.
     private let secretWriteCache = SecretWriteCache()
 
+    init(
+        url: URL = RuntimeEnvironment.stateFileURL,
+        secretStore: SecretStore = .shared,
+        authenticationStore: SecretStore = .runtime,
+    ) {
+        self.url = url
+        self.secretStore = secretStore
+        self.authenticationStore = authenticationStore
+    }
+
     func load() -> HopAppData? {
-        guard let data = try? Data(contentsOf: url),
-              var decoded = try? JSONDecoder.hop.decode(HopAppData.self, from: data)
-        else {
+        guard let data = try? Data(contentsOf: url) else {
+            return nil
+        }
+
+        let hadAuthenticationSecret = !authenticationStore.appStateAuthenticationSecret().isEmpty
+        guard !hadAuthenticationSecret || isAuthenticated(data) else {
+            NSLog("Hop: app state authentication failed")
+            return nil
+        }
+
+        guard var decoded = try? JSONDecoder.hop.decode(HopAppData.self, from: data) else {
             return nil
         }
 
@@ -60,7 +79,7 @@ struct HopAppDataStore {
         let hadInlineSubscriptionURLs = decoded.subscriptions.contains { !$0.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         decoded.profiles = decoded.profiles.map { $0.hydratingSecrets(from: secretStore) }
         decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: secretStore) }
-        if hadInlineProfileSecrets || hadInlineSubscriptionURLs {
+        if !hadAuthenticationSecret || hadInlineProfileSecrets || hadInlineSubscriptionURLs {
             save(decoded) // move secrets to the Keychain and rewrite the JSON without them
         }
         return decoded
@@ -92,11 +111,38 @@ struct HopAppDataStore {
 
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoded = try JSONEncoder.hop.encode(redacted)
+            guard let signature = signature(for: encoded) else {
+                NSLog("Hop: unable to authenticate app state; skipping save")
+                return
+            }
             // Defense-in-depth: protect the (now secret-free) state at rest too.
             try encoded.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            try Data(signature.utf8).write(to: signatureURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         } catch {
             assertionFailure("Unable to persist Hop app data: \(error)")
         }
+    }
+
+    private var signatureURL: URL {
+        TunnelConfigAuthenticator.signatureURL(forConfigURL: url)
+    }
+
+    private func signature(for data: Data) -> String? {
+        let secret = authenticationStore.ensureAppStateAuthenticationSecret()
+        guard !secret.isEmpty, authenticationStore.appStateAuthenticationSecret() == secret else {
+            return nil
+        }
+        return TunnelConfigAuthenticator.signature(for: data, secret: secret)
+    }
+
+    private func isAuthenticated(_ data: Data) -> Bool {
+        let secret = authenticationStore.appStateAuthenticationSecret()
+        guard !secret.isEmpty,
+              let signature = try? String(contentsOf: signatureURL, encoding: .utf8)
+        else {
+            return false
+        }
+        return TunnelConfigAuthenticator.isValidSignature(signature, for: data, secret: secret)
     }
 }
 

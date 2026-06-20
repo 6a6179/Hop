@@ -6,10 +6,11 @@ import Foundation
 /// of appending duplicates.
 ///
 /// Matching is two-tier: exact identity (everything but the ID) first, then
-/// name + protocol, so a node whose host or credentials changed is still
-/// recognized as the same logical node. When several existing items match, the
-/// selected one is preferred, then one referenced by a group, and surviving
-/// duplicates are collapsed with their references remapped.
+/// same-subscription name + protocol, so a node whose host or credentials
+/// changed is still recognized as the same logical node without letting a
+/// provider overwrite unrelated/manual nodes. When several existing items
+/// match, the selected one is preferred, then one referenced by a group, and
+/// surviving duplicates are collapsed with their references remapped.
 ///
 /// Operates on value copies: every mutation of `HopStore.profiles`/`groups`
 /// triggers a full state persist and Keychain rewrite, so the store applies a
@@ -29,18 +30,22 @@ struct SubscriptionRefreshMerger {
 
     /// Names of imported nodes that would *newly* disable TLS certificate
     /// verification if this refresh were applied: allow-insecure nodes with no
-    /// name+protocol match among the existing profiles. A matched node is
-    /// never newly insecure — if the existing profile is already insecure
-    /// nothing changes, and if it is secure `securityPreservingDowngrades`
-    /// blocks the flip (and logs the refusal). Only genuinely new nodes are
-    /// inserted verbatim, so refresh flows must run the blocking insecure-TLS
-    /// confirmation for these, same as initial imports (see the AGENTS.md
-    /// import-gate invariant).
+    /// exact or same-subscription name+protocol match among the existing
+    /// profiles. A matched node is never newly insecure — if the existing
+    /// profile is already insecure nothing changes, and if it is secure
+    /// `securityPreservingDowngrades` blocks the flip (and logs the refusal).
+    /// Only genuinely new nodes are inserted verbatim, so refresh flows must
+    /// run the blocking insecure-TLS confirmation for these, same as initial
+    /// imports (see the AGENTS.md import-gate invariant).
     static func newInsecureProfileNames(existing: [ProxyProfile], imported: [ProxyProfile]) -> [String] {
-        let existingNameAndProtocols = Set(existing.map { NameAndProtocol($0) })
-        return imported
+        imported
             .filter { $0.security.tls?.allowInsecure == true }
-            .filter { !existingNameAndProtocols.contains(NameAndProtocol($0)) }
+            .filter { profile in
+                !existing.contains {
+                    SubscriptionProfileRefreshIdentity($0) == SubscriptionProfileRefreshIdentity(profile) ||
+                        (profile.subscriptionID != nil && NameAndProtocol($0) == NameAndProtocol(profile))
+                }
+            }
             .map(\.name)
     }
 
@@ -147,9 +152,14 @@ struct SubscriptionRefreshMerger {
     }
 
     private func profileIndices(matchingNameAndProtocolOf profile: ProxyProfile) -> [Int] {
+        guard profile.subscriptionID != nil else {
+            return []
+        }
         let normalizedName = normalizedImportName(profile.name)
         return profiles.indices.filter {
-            normalizedImportName(profiles[$0].name) == normalizedName && profiles[$0].proto == profile.proto
+            profiles[$0].subscriptionID == profile.subscriptionID &&
+                normalizedImportName(profiles[$0].name) == normalizedName &&
+                profiles[$0].proto == profile.proto
         }
     }
 
@@ -313,13 +323,16 @@ struct SubscriptionRefreshMerger {
 }
 
 /// The merger's second-tier match key: a refreshed node is "the same node" as
-/// an existing one when name and protocol agree, even if host or credentials
-/// moved. Used by `newInsecureProfileNames` to mirror the merge's matching.
+/// an existing one when subscription ownership, name, and protocol agree, even
+/// if host or credentials moved. Used by `newInsecureProfileNames` to mirror
+/// the merge's matching.
 private struct NameAndProtocol: Hashable {
+    var subscriptionID: UUID?
     var name: String
     var proto: ProxyProtocol
 
     init(_ profile: ProxyProfile) {
+        subscriptionID = profile.subscriptionID
         name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         proto = profile.proto
     }

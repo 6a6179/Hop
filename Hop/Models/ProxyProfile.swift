@@ -7,6 +7,7 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
     var options: ProtocolOptions
     var security: ProxySecurity
     var transport: TransportOptions
+    var subscriptionID: UUID?
 
     init(
         id: UUID = UUID(),
@@ -15,6 +16,7 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         options: ProtocolOptions,
         security: ProxySecurity,
         transport: TransportOptions = .tcp,
+        subscriptionID: UUID? = nil,
     ) {
         self.id = id
         self.name = name
@@ -22,6 +24,7 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         self.options = options
         self.security = security
         self.transport = transport
+        self.subscriptionID = subscriptionID
     }
 
     var proto: ProxyProtocol {

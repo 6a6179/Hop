@@ -311,6 +311,22 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(result.profiles.first?.security.reality?.mldsa65Verify, "MLDSA65VERIFY")
     }
 
+    func testShadowrocketGroupBuiltinsDoNotResolveAsNames() throws {
+        let conf = """
+        [Proxy]
+        PROXY = trojan, proxy.example.net, 443, secret, tls=true
+
+        [Proxy Group]
+        Builtins = select, DIRECT, REJECT, PROXY, policy-select-name=REJECT
+        """
+
+        let result = try importService.importText(conf)
+        let group = try XCTUnwrap(result.groups.first { $0.name == "Builtins" })
+
+        XCTAssertEqual(group.members, [.direct, .reject, .selectedProxy])
+        XCTAssertEqual(group.defaultTarget, .reject)
+    }
+
     private func parse(_ rawValue: String) throws -> ProxyProfile {
         guard let profile = try importService.importText(rawValue).profiles.first else {
             throw ProxyLinkParseError.noImportableItems

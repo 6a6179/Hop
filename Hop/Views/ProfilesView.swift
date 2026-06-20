@@ -371,11 +371,12 @@ struct ProfilesView: View {
                 refreshedSubscription.name = existing.name
             }
 
-            store.applySubscriptionRefresh(result, updating: refreshedSubscription)
+            let safeResult = result.markingProfiles(subscriptionID: refreshedSubscription.id)
+            store.applySubscriptionRefresh(safeResult, updating: refreshedSubscription)
             selectedSection = .subscriptions
             importNotice = ProfileImportNotice(
                 title: "Subscription Updated",
-                message: "\(result.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
+                message: "\(safeResult.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
             )
         } else {
             addNewSubscription(subscription, result: result, addedTitle: addedTitle)
@@ -383,10 +384,11 @@ struct ProfilesView: View {
     }
 
     private func addNewSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
-        store.applyImport(result)
+        let safeResult = result.markingProfiles(subscriptionID: subscription.id).droppingRules()
+        store.applyImport(safeResult)
         store.addSubscription(subscription)
         selectedSection = .subscriptions
-        importNotice = ProfileImportNotice(title: addedTitle, message: result.summary)
+        importNotice = ProfileImportNotice(title: addedTitle, message: safeResult.summary)
     }
 
     private func normalizedSubscriptionURL(_ value: String) -> String {

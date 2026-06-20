@@ -70,7 +70,7 @@ final class LatencyTesterTests: XCTestCase {
             selectedTarget: .profile(profile.id),
             settings: .defaults,
             tunnel: TunnelController(logs: []),
-            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()),
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
         )
 
         await store.testLatency(for: profile)

@@ -78,7 +78,7 @@ final class RuleConfigurationTests: XCTestCase {
 
     @MainActor
     func testStoreSeedsConfigurationsAndSelectsActive() throws {
-        let store = HopStore(dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()))
+        let store = HopStore(dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()))
 
         XCTAssertEqual(store.ruleConfigurations.count, 3)
         XCTAssertEqual(store.activeRuleConfigurationID, RuleConfiguration.defaultConfiguration.id)
@@ -92,7 +92,7 @@ final class RuleConfigurationTests: XCTestCase {
 
     @MainActor
     func testStoreAddUpdateDeleteConfiguration() {
-        let store = HopStore(dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory()))
+        let store = HopStore(dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()))
 
         let custom = RuleConfiguration(name: "My Rules", rules: [RoutingRule(kind: .domainSuffix, value: "example.com", target: .direct)])
         store.addRuleConfiguration(custom)
@@ -116,6 +116,7 @@ final class RuleConfigurationTests: XCTestCase {
     func testLegacyRulesMigrateIntoCustomConfigurationPlusGeneratedOnes() {
         let url = tempStateURL()
         let secretStore = SecretStore.inMemory()
+        let authStore = SecretStore.inMemory()
 
         // Write a pre-configurations state file (uses the legacy `rules` list).
         let legacy = HopAppData(
@@ -128,9 +129,9 @@ final class RuleConfigurationTests: XCTestCase {
             logs: [],
             rules: SampleData.rules,
         )
-        HopAppDataStore(url: url, secretStore: secretStore).save(legacy)
+        HopAppDataStore(url: url, secretStore: secretStore, authenticationStore: authStore).save(legacy)
 
-        let store = HopStore(dataStore: HopAppDataStore(url: url, secretStore: secretStore))
+        let store = HopStore(dataStore: HopAppDataStore(url: url, secretStore: secretStore, authenticationStore: authStore))
         XCTAssertEqual(store.activeRuleConfiguration?.name, "Custom")
         XCTAssertEqual(store.rules, SampleData.rules)
         XCTAssertTrue(store.ruleConfigurations.contains { $0.name == "China" })
@@ -141,6 +142,7 @@ final class RuleConfigurationTests: XCTestCase {
     func testLoadedGeneratedConfigurationsGainAppleSystemBypass() throws {
         let url = tempStateURL()
         let secretStore = SecretStore.inMemory()
+        let authStore = SecretStore.inMemory()
         let oldDefault = RuleConfiguration(
             name: "Default",
             rules: [
@@ -165,9 +167,9 @@ final class RuleConfigurationTests: XCTestCase {
             ruleConfigurations: [oldDefault, custom],
             activeRuleConfigurationID: oldDefault.id,
         )
-        HopAppDataStore(url: url, secretStore: secretStore).save(loaded)
+        HopAppDataStore(url: url, secretStore: secretStore, authenticationStore: authStore).save(loaded)
 
-        let store = HopStore(dataStore: HopAppDataStore(url: url, secretStore: secretStore))
+        let store = HopStore(dataStore: HopAppDataStore(url: url, secretStore: secretStore, authenticationStore: authStore))
         let migratedDefault = try XCTUnwrap(store.ruleConfigurations.first { $0.id == oldDefault.id })
         let appleRule = try XCTUnwrap(migratedDefault.rules.first { $0.kind == .domainSuffix && $0.target == .direct && $0.value.contains("push.apple.com") })
         XCTAssertTrue(appleRule.value.contains("icloud.com"))

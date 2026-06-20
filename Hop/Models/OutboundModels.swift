@@ -179,6 +179,26 @@ struct ImportResult: Hashable, Codable {
         "\(profiles.count) nodes, \(groups.count) groups, \(rules.count) rules, \(warnings.count) warnings"
     }
 
+    func markingProfiles(subscriptionID: SubscriptionSource.ID) -> ImportResult {
+        var copy = self
+        copy.profiles = profiles.map {
+            var profile = $0
+            profile.subscriptionID = subscriptionID
+            return profile
+        }
+        return copy
+    }
+
+    func droppingRules() -> ImportResult {
+        guard !rules.isEmpty else {
+            return self
+        }
+        var copy = self
+        copy.rules = []
+        copy.warnings.append(ImportWarning(message: "Ignored \(rules.count) routing rule(s) from subscription data. Import rules manually to review and apply them."))
+        return copy
+    }
+
     /// Returns the result with every profile and group display name run
     /// through `ImportPolicy.sanitizeImportedName`. Applied at the import
     /// chokepoints so spoofable names (bidi overrides, invisible characters,
