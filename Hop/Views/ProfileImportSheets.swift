@@ -57,16 +57,9 @@ struct ImportTextSheet: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
 
-                    Button {
+                    Button(isLoading ? "Previewing..." : "Preview Import") {
                         previewImport()
-                    } label: {
-                        if isLoading {
-                            Label("Previewing...", systemImage: "arrow.down.circle")
-                        } else {
-                            Label("Preview Import", systemImage: "eye")
-                        }
                     }
-                    .buttonStyle(.glass)
                     .disabled(isLoading || trimmedImportText.isEmpty)
                 } header: {
                     Text("Paste Import")
