@@ -145,13 +145,9 @@ private struct ConfigurationEditorView: View {
                             }
                     }
 
-                    Button {
+                    Button("Add Rule") {
                         ruleEditor = .add
-                    } label: {
-                        Label("Add Rule", systemImage: "plus")
                     }
-                    .buttonStyle(.glass)
-                    .controlSize(.small)
                 } header: {
                     Text("Rules")
                 } footer: {
