@@ -47,6 +47,7 @@ struct RulesView: View {
                     editor = .add
                 } label: {
                     Label("Add Configuration", systemImage: "plus")
+                        .labelStyle(.iconOnly)
                 }
                 .buttonStyle(.glass)
             }
