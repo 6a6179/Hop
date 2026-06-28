@@ -46,10 +46,11 @@ struct RulesView: View {
                 Button {
                     editor = .add
                 } label: {
-                    Label("Add Configuration", systemImage: "plus")
-                        .labelStyle(.iconOnly)
+                    Image(systemName: "plus")
+                        .imageScale(.large)
                 }
-                .buttonStyle(.glass)
+                .accessibilityLabel("Add Configuration")
+                .buttonStyle(.plain)
             }
         }
         .sheet(item: $editor) { state in

@@ -45,18 +45,20 @@ struct LogsView: View {
                         await store.tunnel.syncExtensionLogs()
                     }
                 } label: {
-                    Label("Refresh Logs", systemImage: "arrow.clockwise")
-                        .labelStyle(.iconOnly)
+                    Image(systemName: "arrow.clockwise")
+                        .imageScale(.large)
                 }
-                .buttonStyle(.glass)
+                .accessibilityLabel("Refresh Logs")
+                .buttonStyle(.plain)
             }
 
             ToolbarItem(placement: .topBarTrailing) {
                 ShareLink(item: exportText) {
-                    Label("Export Logs", systemImage: "square.and.arrow.up")
-                        .labelStyle(.iconOnly)
+                    Image(systemName: "square.and.arrow.up")
+                        .imageScale(.large)
                 }
-                .buttonStyle(.glass)
+                .accessibilityLabel("Export Logs")
+                .buttonStyle(.plain)
                 .disabled(logs.isEmpty)
             }
         }

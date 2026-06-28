@@ -58,10 +58,11 @@ struct ProfilesView: View {
                         }
                     }
                 } label: {
-                    Label("Add", systemImage: "plus")
-                        .labelStyle(.iconOnly)
+                    Image(systemName: "plus")
+                        .imageScale(.large)
                 }
-                .buttonStyle(.glass)
+                .accessibilityLabel("Add")
+                .buttonStyle(.plain)
             }
         }
         .sheet(item: $activeSheet) { sheet in
