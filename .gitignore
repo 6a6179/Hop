@@ -16,5 +16,5 @@ credentials.json
 service-account.json
 **/secrets/
 
-# sing-box engine — large GPL build artifact, rebuilt via scripts/build-libbox.sh
+# Static proxy engine artifacts are rebuilt by their pinned provenance scripts.
 Frameworks/*.xcframework

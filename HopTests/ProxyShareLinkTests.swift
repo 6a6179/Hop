@@ -95,8 +95,18 @@ final class ProxyShareLinkTests: XCTestCase {
         let profile = ProxyProfile(
             name: "Hysteria2 Obfs",
             endpoint: Endpoint(host: "nyc.example.net", port: 443),
-            options: .hysteria2(Hysteria2Options(password: "hy2password", obfs: "salamander", obfsPassword: "obfs-secret")),
+            options: .hysteria2(Hysteria2Options(
+                password: "hy2password",
+                obfs: "salamander",
+                obfsPassword: "obfs-secret",
+                up: "20 mbps",
+                down: "100 mbps",
+                ports: "20000-20100",
+                hopIntervalSeconds: 30,
+                udpIdleTimeoutSeconds: 60,
+            )),
             security: .tls(TLSOptions(serverName: "nyc.example.net")),
+            transport: TransportOptions(type: .hysteria),
         )
 
         let reparsed = try roundTrip(profile)
@@ -108,14 +118,54 @@ final class ProxyShareLinkTests: XCTestCase {
             XCTAssertEqual(options.password, "hy2password")
             XCTAssertEqual(options.obfs, "salamander")
             XCTAssertEqual(options.obfsPassword, "obfs-secret")
+            XCTAssertEqual(options.up, "20 mbps")
+            XCTAssertEqual(options.down, "100 mbps")
+            XCTAssertEqual(options.ports, "20000-20100")
+            XCTAssertEqual(options.hopIntervalSeconds, 30)
+            XCTAssertEqual(options.udpIdleTimeoutSeconds, 60)
         } else {
             XCTFail("Expected Hysteria2 options")
         }
     }
 
-    // MARK: - TUIC
+    func testTLSModernOptionsAndXHTTPRoundTrip() throws {
+        let profile = ProxyProfile(
+            name: "Modern TLS",
+            endpoint: Endpoint(host: "edge.example.net", port: 443),
+            options: .vless(VLESSOptions(
+                uuid: "11111111-1111-4111-8111-111111111111",
+                flow: "xtls-rprx-vision",
+                encryption: "mlkem768x25519plus.native.1rtt..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            )),
+            security: .tls(TLSOptions(
+                serverName: "edge.example.net",
+                alpn: ["h2"],
+                pinnedPeerCertSHA256: String(repeating: "ab", count: 32),
+                verifyPeerCertByName: "verify.example.net",
+                echConfigList: "dGVzdA==",
+                curvePreferences: ["X25519MLKEM768"],
+                minVersion: "1.2",
+                maxVersion: "1.3",
+                enableSessionResumption: true,
+            )),
+            transport: TransportOptions(type: .xhttp, path: "/x", host: "cdn.example.net", xhttpMode: "stream-up"),
+        )
 
-    func testTUICRoundTrip() throws {
+        let reparsed = try roundTrip(profile)
+        XCTAssertEqual(reparsed.transport.type, .xhttp)
+        XCTAssertEqual(reparsed.transport.xhttpMode, "stream-up")
+        XCTAssertEqual(reparsed.security.tls?.pinnedPeerCertSHA256, String(repeating: "ab", count: 32))
+        XCTAssertEqual(reparsed.security.tls?.verifyPeerCertByName, "verify.example.net")
+        XCTAssertEqual(reparsed.security.tls?.echConfigList, "dGVzdA==")
+        XCTAssertEqual(reparsed.security.tls?.curvePreferences, ["X25519MLKEM768"])
+        XCTAssertEqual(reparsed.security.tls?.minVersion, "1.2")
+        XCTAssertEqual(reparsed.security.tls?.maxVersion, "1.3")
+        XCTAssertEqual(reparsed.security.tls?.enableSessionResumption, true)
+    }
+
+    // MARK: - TUIC is unsupported by Xray
+
+    func testTUICShareLinkReturnsNil() {
         let profile = ProxyProfile(
             name: "TUIC Node",
             endpoint: Endpoint(host: "tuic.example.net", port: 443),
@@ -123,18 +173,7 @@ final class ProxyShareLinkTests: XCTestCase {
             security: .tls(TLSOptions(serverName: "tuic.example.net", alpn: ["h3"])),
         )
 
-        let reparsed = try roundTrip(profile)
-
-        XCTAssertEqual(reparsed.proto, .tuic)
-        XCTAssertEqual(reparsed.endpoint.host, "tuic.example.net")
-        XCTAssertEqual(reparsed.security.layer, .tls)
-        if case let .tuic(options) = reparsed.options {
-            XCTAssertEqual(options.uuid, "22222222-2222-4222-8222-222222222222")
-            XCTAssertEqual(options.password, "tuicpassword")
-            XCTAssertEqual(options.congestionControl, "bbr")
-        } else {
-            XCTFail("Expected TUIC options")
-        }
+        XCTAssertNil(ProxyShareLink.shareLink(for: profile))
     }
 
     // MARK: - Shadowsocks with special chars in password
@@ -246,20 +285,93 @@ final class ProxyShareLinkTests: XCTestCase {
         XCTAssertEqual(reparsed.name, "Tokyo 東京 Node")
     }
 
-    // MARK: - WireGuard and AnyTLS return nil
+    // MARK: - WireGuard custom client link and unsupported AnyTLS
 
-    func testWireGuardShareLinkReturnsNil() {
+    func testWireGuardRoundTrip() throws {
         let profile = ProxyProfile(
             name: "WG",
             endpoint: Endpoint(host: "wg.example.net", port: 51820),
             options: .wireGuard(WireGuardOptions(
                 privateKey: "PRIVATEKEY",
                 peerPublicKey: "PEERPUBLICKEY",
+                preSharedKey: "PRESHARED",
                 localAddress: ["10.0.0.2/32"],
+                allowedIPs: ["0.0.0.0/0", "::/0"],
+                reserved: [1, 2, 3],
+                keepAliveSeconds: 25,
+                mtu: 1280,
+                domainStrategy: "ForceIP",
             )),
             security: .none,
         )
-        XCTAssertNil(ProxyShareLink.shareLink(for: profile), "WireGuard has no interoperable share link format")
+        let reparsed = try roundTrip(profile)
+        guard case let .wireGuard(options) = reparsed.options else {
+            return XCTFail("Expected WireGuard options")
+        }
+        XCTAssertEqual(Optional(options), profile.options.wireGuardValue)
+    }
+
+    func testWireGuardMultiPeerExtensionRoundTrip() throws {
+        let peers = try [
+            WireGuardPeer(
+                id: XCTUnwrap(UUID(uuidString: "11111111-1111-4111-8111-111111111111")),
+                publicKey: "PEER-ONE",
+                endpoint: Endpoint(host: "one.example.net", port: 51820),
+                preSharedKey: "PSK-ONE",
+                allowedIPs: ["10.1.0.0/16"],
+                keepAliveSeconds: 25,
+            ),
+            WireGuardPeer(
+                id: XCTUnwrap(UUID(uuidString: "22222222-2222-4222-8222-222222222222")),
+                publicKey: "PEER-TWO",
+                endpoint: Endpoint(host: "two.example.net", port: 51821),
+                preSharedKey: "PSK-TWO",
+                allowedIPs: ["10.2.0.0/16"],
+            ),
+        ]
+        let profile = ProxyProfile(
+            name: "WG Multi",
+            endpoint: Endpoint(host: "fallback.example.net", port: 51820),
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "PRIVATEKEY",
+                peerPublicKey: peers[0].publicKey,
+                localAddress: ["10.0.0.2/32"],
+                mtu: 1280,
+                peers: peers,
+            )),
+            security: .none,
+        )
+
+        let link = try XCTUnwrap(ProxyShareLink.shareLink(for: profile))
+        XCTAssertTrue(link.contains("peers="))
+        let reparsed = try roundTrip(profile)
+        XCTAssertEqual(reparsed.options.wireGuardValue?.peers, peers)
+    }
+
+    func testFinalMaskAndTransportLongTailRoundTrip() throws {
+        let finalMask: JSONValue = .object([
+            "tcp": .array([.object(["type": .string("header-http")])]),
+        ])
+        let profile = ProxyProfile(
+            name: "FinalMask",
+            endpoint: Endpoint(host: "edge.example.net", port: 443),
+            options: .vless(VLESSOptions(uuid: "11111111-1111-4111-8111-111111111111")),
+            security: .tls(TLSOptions(serverName: "edge.example.net")),
+            transport: TransportOptions(
+                type: .xhttp,
+                path: "/x",
+                xhttpMode: "stream-up",
+                xhttpExtra: .object(["downloadSettings": .object(["address": .string("edge.example.net")])]),
+                finalMask: finalMask,
+                mux: XrayMuxOptions(enabled: true, concurrency: 4, xudpConcurrency: 8),
+                socketOptions: .object(["tcpKeepAliveInterval": .number(30)]),
+            ),
+        )
+        let reparsed = try roundTrip(profile)
+        XCTAssertEqual(reparsed.transport.xhttpExtra, profile.transport.xhttpExtra)
+        XCTAssertEqual(reparsed.transport.finalMask, finalMask)
+        XCTAssertEqual(reparsed.transport.mux, profile.transport.mux)
+        XCTAssertEqual(reparsed.transport.socketOptions, profile.transport.socketOptions)
     }
 
     func testAnyTLSShareLinkReturnsNil() {
@@ -276,7 +388,7 @@ final class ProxyShareLinkTests: XCTestCase {
 
     func testVLESSRealityAllowInsecurePreservedThroughRoundTrip() throws {
         // REALITY overrides allowInsecure to false in the parser (security enforced)
-        var profile = ProxyProfile(
+        let profile = ProxyProfile(
             name: "VLESS REALITY",
             endpoint: Endpoint(host: "edge.example.net", port: 443),
             options: .vless(VLESSOptions(uuid: "11111111-1111-4111-8111-111111111111")),
@@ -286,6 +398,12 @@ final class ProxyShareLinkTests: XCTestCase {
         XCTAssertEqual(profile.security.tls?.allowInsecure, false)
         let reparsed = try roundTrip(profile)
         XCTAssertEqual(reparsed.security.tls?.allowInsecure, false)
-        _ = profile // suppress unused warning
+    }
+}
+
+private extension ProtocolOptions {
+    var wireGuardValue: WireGuardOptions? {
+        guard case let .wireGuard(value) = self else { return nil }
+        return value
     }
 }

@@ -47,14 +47,12 @@ struct LogsView: View {
                 } label: {
                     Label("Refresh Logs", systemImage: "arrow.clockwise")
                 }
-                .buttonStyle(.glass)
             }
 
             ToolbarItem(placement: .topBarTrailing) {
                 ShareLink(item: exportText) {
                     Label("Export Logs", systemImage: "square.and.arrow.up")
                 }
-                .buttonStyle(.glass)
                 .disabled(logs.isEmpty)
             }
         }

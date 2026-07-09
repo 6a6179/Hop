@@ -22,19 +22,62 @@ enum SecurityLayer: String, CaseIterable, Codable, Identifiable {
 struct TLSOptions: Hashable, Codable {
     var serverName: String?
     var alpn: [String]
+    /// Kept only to decode/import legacy profiles. Xray v26.6.27 rejects it.
     var allowInsecure: Bool
     var utlsFingerprint: String?
+    var pinnedPeerCertSHA256: String?
+    var verifyPeerCertByName: String?
+    var echConfigList: String?
+    var curvePreferences: [String]
+    var minVersion: String?
+    var maxVersion: String?
+    var cipherSuites: String?
+    var enableSessionResumption: Bool
 
     init(
         serverName: String? = nil,
         alpn: [String] = [],
         allowInsecure: Bool = false,
         utlsFingerprint: String? = "chrome",
+        pinnedPeerCertSHA256: String? = nil,
+        verifyPeerCertByName: String? = nil,
+        echConfigList: String? = nil,
+        curvePreferences: [String] = [],
+        minVersion: String? = nil,
+        maxVersion: String? = nil,
+        cipherSuites: String? = nil,
+        enableSessionResumption: Bool = false,
     ) {
         self.serverName = serverName
         self.alpn = alpn
         self.allowInsecure = allowInsecure
         self.utlsFingerprint = utlsFingerprint
+        self.pinnedPeerCertSHA256 = pinnedPeerCertSHA256
+        self.verifyPeerCertByName = verifyPeerCertByName
+        self.echConfigList = echConfigList
+        self.curvePreferences = curvePreferences
+        self.minVersion = minVersion
+        self.maxVersion = maxVersion
+        self.cipherSuites = cipherSuites
+        self.enableSessionResumption = enableSessionResumption
+    }
+}
+
+extension TLSOptions {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        serverName = try container.decodeIfPresent(String.self, forKey: .serverName)
+        alpn = try container.decodeIfPresent([String].self, forKey: .alpn) ?? []
+        allowInsecure = try container.decodeIfPresent(Bool.self, forKey: .allowInsecure) ?? false
+        utlsFingerprint = try container.decodeIfPresent(String.self, forKey: .utlsFingerprint)
+        pinnedPeerCertSHA256 = try container.decodeIfPresent(String.self, forKey: .pinnedPeerCertSHA256)
+        verifyPeerCertByName = try container.decodeIfPresent(String.self, forKey: .verifyPeerCertByName)
+        echConfigList = try container.decodeIfPresent(String.self, forKey: .echConfigList)
+        curvePreferences = try container.decodeIfPresent([String].self, forKey: .curvePreferences) ?? []
+        minVersion = try container.decodeIfPresent(String.self, forKey: .minVersion)
+        maxVersion = try container.decodeIfPresent(String.self, forKey: .maxVersion)
+        cipherSuites = try container.decodeIfPresent(String.self, forKey: .cipherSuites)
+        enableSessionResumption = try container.decodeIfPresent(Bool.self, forKey: .enableSessionResumption) ?? false
     }
 }
 

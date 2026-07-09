@@ -64,16 +64,36 @@ struct AppShellView: View {
         .onOpenURL { url in
             handleExternalURL(url)
         }
+        .alert(
+            "Xray Migration Complete",
+            isPresented: Binding(
+                get: { store.pendingXrayMigrationReport != nil },
+                set: {
+                    if !$0 {
+                        store.acknowledgeXrayMigration()
+                    }
+                },
+            ),
+        ) {
+            Button("Review Profiles") {
+                selectedTab = .profiles
+                store.acknowledgeXrayMigration()
+            }
+            Button("OK") {
+                store.acknowledgeXrayMigration()
+            }
+        } message: {
+            Text(store.pendingXrayMigrationReport?.message ?? "Hop upgraded its saved configuration for Xray-core.")
+        }
     }
 
     /// Proxy share-link schemes Hop registers for (Info.plist
     /// `CFBundleURLTypes`): tapping such a link in a browser or scanning a
     /// share QR with the system Camera opens Hop with the whole link as the
-    /// import payload. Mirrors the schemes `ProxyImportService` parses, plus
-    /// `ssr` so those links produce a clear "unsupported" message instead of
-    /// nothing happening.
+    /// import payload. Mirrors the Xray-compatible schemes parsed by
+    /// `ProxyImportService`.
     static let proxyLinkSchemes: Set<String> = [
-        "vless", "vmess", "trojan", "ss", "ssr", "hysteria2", "hy2", "tuic", "socks", "socks5",
+        "vless", "vmess", "trojan", "ss", "hysteria2", "hy2", "socks", "socks5", "wireguard", "wg",
     ]
 
     /// Accepts `hop://import?url=<https-subscription>`,

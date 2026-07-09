@@ -207,9 +207,9 @@ enum RoutingRuleKind: String, CaseIterable, Codable, Identifiable {
         case .protocolSniff:
             "Matches sniffed protocols such as tls, http, or quic."
         case .geoSite:
-            "Matches a sing-box GeoSite name. Legacy field; rule sets are preferred."
+            "Matches an Xray GeoSite category from verified local geodata."
         case .geoIP:
-            "Matches a sing-box GeoIP name. Legacy field; rule sets are preferred."
+            "Matches an Xray GeoIP category from verified local geodata."
         case .sourceGeoIP:
             "Matches a source GeoIP name. Legacy field; rule sets are preferred."
         case .networkType:

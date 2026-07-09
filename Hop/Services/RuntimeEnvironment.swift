@@ -2,7 +2,7 @@ import Foundation
 
 enum RuntimeEnvironment {
     static let fallbackAppGroup = "group.cat.string.hop"
-    static let configFileName = "hop-sing-box.json"
+    static let configFileName = "hop-xray.json"
     static let stateFileName = "hop-state.json"
     static let tunnelLogFileName = "hop-tunnel.log"
 

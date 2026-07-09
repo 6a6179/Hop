@@ -1,5 +1,44 @@
 import Foundation
 
+/// How a subscription refresh handles settings that authenticate the remote
+/// endpoint or set the minimum transport-security posture.
+enum SubscriptionRefreshSecurityPolicy: Equatable {
+    /// Used by automatic refreshes and unreviewed merge paths. Imported values
+    /// are retained in the fetched result, but the stored profile keeps the
+    /// existing security-critical values.
+    case preserveExisting
+    /// Used only after the manual-refresh confirmation has shown the detected
+    /// changes to the user.
+    case applyReviewedChanges
+}
+
+/// A concise, non-secret description of security-critical changes in one
+/// matched subscription profile. Profile names are sanitized before display.
+struct SubscriptionSecurityChange: Hashable, Identifiable {
+    enum Field: String, Hashable {
+        case securityLayer = "TLS/REALITY layer"
+        case tlsMinimumVersion = "minimum TLS version"
+        case certificatePins = "certificate pins"
+        case verificationNames = "certificate verification names"
+        case ech = "ECH"
+        case postQuantumCurves = "post-quantum TLS curves"
+        case vlessEncryption = "VLESS Encryption/Auth"
+        case realityPublicKey = "REALITY public key"
+        case realityMLDSA = "REALITY ML-DSA-65 verification"
+    }
+
+    let profileName: String
+    let fields: [Field]
+
+    var id: String {
+        profileName + "\u{0}" + fields.map(\.rawValue).joined(separator: "\u{0}")
+    }
+
+    var summary: String {
+        "\(profileName): \(fields.map(\.rawValue).joined(separator: ", "))"
+    }
+}
+
 /// Merges a refreshed subscription's profiles and groups into the existing
 /// collections, updating matching items in place — keeping their stable IDs so
 /// group members, routing rules, and the selected target stay valid — instead
@@ -19,13 +58,42 @@ struct SubscriptionRefreshMerger {
     private(set) var profiles: [ProxyProfile]
     private(set) var groups: [ProxyGroup]
     private(set) var selectedTarget: OutboundTarget?
-    /// Human-readable notes for security settings the merge refused to weaken;
-    /// the store surfaces these in the app log after a refresh.
+    /// Human-readable notes for security settings an unreviewed merge refused
+    /// to change; the store surfaces these in the app log after a refresh.
     private(set) var securityDowngradeWarnings: [String] = []
 
-    mutating func merge(_ result: ImportResult) {
-        let profileIDMap = mergeProfiles(result.profiles)
+    mutating func merge(
+        _ result: ImportResult,
+        securityPolicy: SubscriptionRefreshSecurityPolicy = .preserveExisting,
+    ) {
+        let profileIDMap = mergeProfiles(result.profiles, securityPolicy: securityPolicy)
         mergeGroups(result.groups, importedProfileIDMap: profileIDMap)
+    }
+
+    /// Detects manual-review fields using the same match-preference rules as
+    /// the merge. New nodes are not "changes"; their separate allow-insecure
+    /// gate remains responsible for legacy insecure imports.
+    func securityCriticalChanges(in importedProfiles: [ProxyProfile]) -> [SubscriptionSecurityChange] {
+        let referencedProfileIDs = referencedProfileIDs()
+        return importedProfiles.compactMap { importedProfile in
+            let exactMatches = profileIndices(matchingIdentityOf: importedProfile)
+            guard exactMatches.isEmpty else { return nil }
+
+            let matchingIndices = profileIndices(matchingNameAndProtocolOf: importedProfile)
+            guard let profileIndex = preferredProfileIndex(from: matchingIndices, referencedProfileIDs: referencedProfileIDs) else {
+                return nil
+            }
+
+            let fields = Self.securityCriticalFields(
+                existing: profiles[profileIndex],
+                imported: importedProfile,
+            )
+            guard !fields.isEmpty else { return nil }
+            return SubscriptionSecurityChange(
+                profileName: ImportPolicy.sanitizeImportedName(importedProfile.name, fallback: "Imported Node"),
+                fields: fields,
+            )
+        }
     }
 
     /// Names of imported nodes that would *newly* disable TLS certificate
@@ -33,7 +101,7 @@ struct SubscriptionRefreshMerger {
     /// exact or same-subscription name+protocol match among the existing
     /// profiles. A matched node is never newly insecure — if the existing
     /// profile is already insecure nothing changes, and if it is secure
-    /// `securityPreservingDowngrades` blocks the flip (and logs the refusal).
+    /// the merge security policy blocks the flip (and logs the refusal).
     /// Only genuinely new nodes are inserted verbatim, so refresh flows must
     /// run the blocking insecure-TLS confirmation for these, same as initial
     /// imports (see the AGENTS.md import-gate invariant).
@@ -51,7 +119,10 @@ struct SubscriptionRefreshMerger {
 
     // MARK: - Profiles
 
-    private mutating func mergeProfiles(_ importedProfiles: [ProxyProfile]) -> [ProxyProfile.ID: ProxyProfile.ID] {
+    private mutating func mergeProfiles(
+        _ importedProfiles: [ProxyProfile],
+        securityPolicy: SubscriptionRefreshSecurityPolicy,
+    ) -> [ProxyProfile.ID: ProxyProfile.ID] {
         var importedProfileIDMap: [ProxyProfile.ID: ProxyProfile.ID] = [:]
         var replacedProfileIDMap: [ProxyProfile.ID: ProxyProfile.ID] = [:]
         // Groups don't change while profiles merge, so the set of
@@ -65,14 +136,15 @@ struct SubscriptionRefreshMerger {
             if let profileIndex = preferredProfileIndex(from: matchingIndices, referencedProfileIDs: referencedProfileIDs) {
                 var updatedProfile = importedProfile
                 updatedProfile.id = profiles[profileIndex].id
-                // A name-matched update comes from the subscription server and
-                // must not silently weaken the stored TLS posture: an attacker
-                // controlling the response could otherwise strip certificate
-                // verification (or TLS entirely) from a node the user trusts.
+                // A name-matched update comes from the subscription server.
+                // Automatic/unreviewed merges keep every security-critical
+                // value; a manual confirmation may opt into the reviewed
+                // values. allowInsecure is never allowed to flip on.
                 if exactMatches.isEmpty {
-                    updatedProfile.security = securityPreservingDowngrades(
+                    updatedProfile = applyingSecurityPolicy(
                         existing: profiles[profileIndex],
                         imported: updatedProfile,
+                        policy: securityPolicy,
                     )
                 }
                 profiles[profileIndex] = updatedProfile
@@ -98,50 +170,184 @@ struct SubscriptionRefreshMerger {
         return importedProfileIDMap
     }
 
-    /// Returns the security settings to store for a name-matched refresh,
-    /// refusing the silent downgrades an attacker-controlled subscription
-    /// could push: demoting the security layer (REALITY → TLS → none — REALITY
-    /// also carries anti-probing properties plain TLS lacks) and flipping
-    /// `allowInsecure` on. Each refusal is recorded as a warning.
-    private mutating func securityPreservingDowngrades(existing: ProxyProfile, imported: ProxyProfile) -> ProxySecurity {
+    private mutating func applyingSecurityPolicy(
+        existing: ProxyProfile,
+        imported: ProxyProfile,
+        policy: SubscriptionRefreshSecurityPolicy,
+    ) -> ProxyProfile {
+        var updated = imported
         var security = imported.security
 
-        if Self.layerRank(security.layer) < Self.layerRank(existing.security.layer) {
-            securityDowngradeWarnings.append(
-                "Refresh tried to downgrade \(imported.name) from \(existing.security.layer.displayName) to \(security.layer.displayName); kept the existing security settings.",
-            )
-            return existing.security
-        }
-
-        if existing.security.tls?.allowInsecure == false, security.tls?.allowInsecure == true {
+        // Xray v26.6.27 rejects allowInsecure. Keep a legacy imported value only
+        // on a genuinely new node (behind the existing import gate); a matched
+        // secure node can never be flipped, even after another change was
+        // reviewed.
+        if existing.security.tls?.allowInsecure != true, security.tls?.allowInsecure == true {
             security.tls?.allowInsecure = false
             securityDowngradeWarnings.append(
                 "Refresh tried to disable TLS certificate verification for \(imported.name); kept verification enabled.",
             )
         }
 
-        // A changed REALITY public key re-targets which server the client
-        // authenticates. Key rotation is legitimate, so the change applies —
-        // but never silently: the log names the node so an unexpected swap
-        // pushed by the subscription server is visible to the user.
-        if let existingKey = existing.security.reality?.publicKey,
-           let importedKey = security.reality?.publicKey,
-           !existingKey.isEmpty, existingKey != importedKey
-        {
+        guard policy == .preserveExisting else {
+            updated.security = security
+            return updated
+        }
+
+        if security.layer != existing.security.layer {
             securityDowngradeWarnings.append(
-                "Refresh changed the REALITY public key for \(imported.name). If you did not expect a key rotation from this provider, re-verify the node.",
+                "Refresh changed \(imported.name) from \(existing.security.layer.displayName) to \(security.layer.displayName); kept the existing security layer until it is reviewed manually.",
+            )
+            security = existing.security
+        } else {
+            preserveSecurityCriticalTLS(existing: existing, importedName: imported.name, security: &security)
+            preserveSecurityCriticalReality(existing: existing, importedName: imported.name, security: &security)
+        }
+
+        if case let .vless(existingOptions) = existing.options,
+           case let .vless(currentImportedOptions) = updated.options,
+           currentImportedOptions.normalizedEncryption != existingOptions.normalizedEncryption
+        {
+            var importedOptions = currentImportedOptions
+            importedOptions.encryption = existingOptions.encryption
+            updated.options = .vless(importedOptions)
+            securityDowngradeWarnings.append(
+                "Refresh changed or removed VLESS Encryption/Auth for \(imported.name); kept the existing value.",
             )
         }
 
-        return security
+        updated.security = security
+        return updated
     }
 
-    private static func layerRank(_ layer: SecurityLayer) -> Int {
-        switch layer {
-        case .none: 0
-        case .tls: 1
-        case .reality: 2
+    private mutating func preserveSecurityCriticalTLS(
+        existing: ProxyProfile,
+        importedName: String,
+        security: inout ProxySecurity,
+    ) {
+        let existingTLS = existing.security.tls
+        guard var importedTLS = security.tls else {
+            guard existingTLS != nil else { return }
+            security.tls = existingTLS
+            securityDowngradeWarnings.append(
+                "Refresh removed TLS verification settings for \(importedName); kept the existing values.",
+            )
+            return
         }
+
+        func preservingString(
+            _ existingValue: String?,
+            _ importedValue: inout String?,
+            label: String,
+        ) {
+            guard Self.normalizedOptional(existingValue) != Self.normalizedOptional(importedValue) else { return }
+            importedValue = existingValue
+            securityDowngradeWarnings.append(
+                "Refresh changed or removed \(label) for \(importedName); kept the existing value.",
+            )
+        }
+
+        preservingString(existingTLS?.pinnedPeerCertSHA256, &importedTLS.pinnedPeerCertSHA256, label: "certificate pins")
+        preservingString(existingTLS?.verifyPeerCertByName, &importedTLS.verifyPeerCertByName, label: "certificate verification names")
+        preservingString(existingTLS?.echConfigList, &importedTLS.echConfigList, label: "ECH")
+
+        if Self.postQuantumCurves(existingTLS?.curvePreferences ?? []) != Self.postQuantumCurves(importedTLS.curvePreferences) {
+            importedTLS.curvePreferences = existingTLS?.curvePreferences ?? []
+            securityDowngradeWarnings.append(
+                "Refresh changed post-quantum TLS curves for \(importedName); kept the existing curves.",
+            )
+        }
+
+        if Self.normalizedOptional(importedTLS.minVersion) != Self.normalizedOptional(existingTLS?.minVersion) {
+            importedTLS.minVersion = existingTLS?.minVersion
+            securityDowngradeWarnings.append(
+                "Refresh changed the minimum TLS version for \(importedName); kept the existing minimum.",
+            )
+        }
+        security.tls = importedTLS
+    }
+
+    private mutating func preserveSecurityCriticalReality(
+        existing: ProxyProfile,
+        importedName: String,
+        security: inout ProxySecurity,
+    ) {
+        guard let existingReality = existing.security.reality else { return }
+        guard var importedReality = security.reality else {
+            security.reality = existingReality
+            securityDowngradeWarnings.append(
+                "Refresh removed REALITY authentication for \(importedName); kept the existing values.",
+            )
+            return
+        }
+
+        if Self.normalizedOptional(importedReality.publicKey) != Self.normalizedOptional(existingReality.publicKey) {
+            importedReality.publicKey = existingReality.publicKey
+            securityDowngradeWarnings.append(
+                "Refresh changed the REALITY public key for \(importedName); kept the existing key until it is reviewed manually.",
+            )
+        }
+        if Self.normalizedOptional(importedReality.mldsa65Verify) != Self.normalizedOptional(existingReality.mldsa65Verify) {
+            importedReality.mldsa65Verify = existingReality.mldsa65Verify
+            securityDowngradeWarnings.append(
+                "Refresh changed REALITY ML-DSA-65 verification for \(importedName); kept the existing value until it is reviewed manually.",
+            )
+        }
+        security.reality = importedReality
+    }
+
+    private static func securityCriticalFields(existing: ProxyProfile, imported: ProxyProfile) -> [SubscriptionSecurityChange.Field] {
+        var fields: [SubscriptionSecurityChange.Field] = []
+        if existing.security.layer != imported.security.layer {
+            fields.append(.securityLayer)
+        }
+
+        if normalizedOptional(existing.security.tls?.minVersion) != normalizedOptional(imported.security.tls?.minVersion) {
+            fields.append(.tlsMinimumVersion)
+        }
+        if normalizedOptional(existing.security.tls?.pinnedPeerCertSHA256) != normalizedOptional(imported.security.tls?.pinnedPeerCertSHA256) {
+            fields.append(.certificatePins)
+        }
+        if normalizedOptional(existing.security.tls?.verifyPeerCertByName) != normalizedOptional(imported.security.tls?.verifyPeerCertByName) {
+            fields.append(.verificationNames)
+        }
+        if normalizedOptional(existing.security.tls?.echConfigList) != normalizedOptional(imported.security.tls?.echConfigList) {
+            fields.append(.ech)
+        }
+        if postQuantumCurves(existing.security.tls?.curvePreferences ?? []) != postQuantumCurves(imported.security.tls?.curvePreferences ?? []) {
+            fields.append(.postQuantumCurves)
+        }
+
+        if case let .vless(existingOptions) = existing.options,
+           case let .vless(importedOptions) = imported.options,
+           existingOptions.normalizedEncryption != importedOptions.normalizedEncryption
+        {
+            fields.append(.vlessEncryption)
+        }
+        if normalizedOptional(existing.security.reality?.publicKey) != normalizedOptional(imported.security.reality?.publicKey) {
+            fields.append(.realityPublicKey)
+        }
+        if normalizedOptional(existing.security.reality?.mldsa65Verify) != normalizedOptional(imported.security.reality?.mldsa65Verify) {
+            fields.append(.realityMLDSA)
+        }
+        return fields
+    }
+
+    private static func isPostQuantumCurve(_ value: String) -> Bool {
+        let value = value.lowercased()
+        return value.contains("mlkem") || value.contains("kyber")
+    }
+
+    private static func postQuantumCurves(_ values: [String]) -> [String] {
+        values
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { isPostQuantumCurve($0) }
+    }
+
+    private static func normalizedOptional(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func profileIndices(matchingIdentityOf profile: ProxyProfile) -> [Int] {

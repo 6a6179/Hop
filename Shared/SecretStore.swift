@@ -25,8 +25,8 @@ protocol SecretBackend: Sendable {
 struct SecretStore {
     static let defaultService = "cat.string.hop.secrets"
 
-    /// Separate Keychain service for runtime/inter-process secrets (e.g. the
-    /// libbox command-server token). Kept apart from `defaultService` so a
+    /// Separate Keychain service for runtime/inter-process secrets (for
+    /// example, App Group configuration authentication keys). Kept apart from `defaultService` so a
     /// profile save's `replaceAll` — which rewrites the *profile* secret set —
     /// never evicts these.
     static let runtimeService = "cat.string.hop.runtime"
@@ -48,7 +48,7 @@ struct SecretStore {
     static let shared = SecretStore()
 
     /// Shared store for runtime secrets that must outlive profile-secret
-    /// rewrites (see `runtimeService`). Used for the command-server token.
+    /// rewrites (see `runtimeService`).
     static let runtime = SecretStore(service: runtimeService)
 
     func value(forKey key: String) -> String? {
@@ -87,33 +87,6 @@ struct SecretStore {
             allSucceeded = backend.removeValue(forKey: key) && allSucceeded
         }
         return allSucceeded
-    }
-
-    // MARK: - Command-server secret
-
-    /// Keychain account for the libbox command-server auth token, stored in the
-    /// `runtime` service so it survives profile-secret rewrites.
-    static let commandServerSecretKey = "command-server-secret"
-
-    /// The shared command-server secret, or `""` if none has been stored yet.
-    /// Read by the tunnel extension (command *server*) and the app's telemetry
-    /// client (command *client*); both hand it to `LibboxSetup` so the unix
-    /// command socket rejects callers that can't present it. The tunnel refuses
-    /// to start the command server when this is empty rather than falling back
-    /// to an unauthenticated local socket.
-    func commandServerSecret() -> String {
-        value(forKey: Self.commandServerSecretKey) ?? ""
-    }
-
-    /// Returns the command-server secret, generating and persisting a random
-    /// one on first use. The app calls this before starting the tunnel so the
-    /// value exists in the shared Keychain for the extension and telemetry
-    /// client to read. Storing it in the Keychain (not the App Group container)
-    /// means a process with only container access — enough to reach the command
-    /// socket — still can't read the token without the keychain-access-group.
-    @discardableResult
-    func ensureCommandServerSecret() -> String {
-        ensureRuntimeSecret(forKey: Self.commandServerSecretKey)
     }
 
     /// Keychain account for the HMAC key that authenticates the App Group

@@ -30,6 +30,10 @@ enum ImportPolicy {
     /// `importText` re-entry path against deeply nested encoded payloads.
     static let maxDecodeDepth = 3
 
+    /// Hop's optional wireguard:// multi-peer extension is intentionally much
+    /// smaller than a general import payload (four peers maximum).
+    static let maxWireGuardPeerListBytes = 16 * 1024
+
     // MARK: - Regex safety
 
     /// Maximum length of an import-supplied regular-expression pattern
@@ -49,7 +53,7 @@ enum ImportPolicy {
     /// Subscriptions are fetched by the app, so they must be transport-secure.
     static let allowedSubscriptionSchemes: Set<String> = ["https"]
 
-    /// URL-test probe URLs are executed by the sing-box engine; `generate_204`
+    /// URL-test probe URLs are executed by the Xray observatory; `generate_204`
     /// endpoints are commonly plain HTTP, so both schemes are permitted, but
     /// the destination is still restricted to public hosts.
     static let allowedProbeSchemes: Set<String> = ["http", "https"]
@@ -254,7 +258,9 @@ enum ImportPolicy {
                 continue
             }
             if inCharacterClass {
-                if character == "]" { inCharacterClass = false }
+                if character == "]" {
+                    inCharacterClass = false
+                }
                 index += 1
                 continue
             }

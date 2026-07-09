@@ -1,2 +1,2 @@
-# Libbox.xcframework (the sing-box engine) is built here by scripts/build-libbox.sh.
+# LibXray.xcframework (the pinned client-only Xray bridge) is built here by scripts/build-libxray.sh.
 # The framework itself is git-ignored — run that script before building HopTunnel.

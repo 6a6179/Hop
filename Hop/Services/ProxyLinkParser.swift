@@ -128,7 +128,7 @@ struct ProxyImportService {
         case "hysteria2", "hy2":
             return try parseHysteria2(components: components)
         case "tuic":
-            return try parseTUIC(components: components)
+            throw ProxyLinkParseError.unsupportedScheme("TUIC is not supported by Xray-core v26.6.27")
         case "ss":
             return try parseShadowsocks(rawValue: trimmed, components: components)
         case "vmess":
@@ -137,8 +137,10 @@ struct ProxyImportService {
             return try parseHTTP(components: components, isTLS: scheme == "https")
         case "socks", "socks5", "socks5+tls":
             return try parseSOCKS(components: components, isTLS: scheme == "socks5+tls")
+        case "wireguard", "wg":
+            return try parseWireGuard(components: components)
         case "ssr", "snell":
-            throw ProxyLinkParseError.unsupportedScheme("\(scheme) is imported as an unsupported warning because sing-box mapping is not wired yet")
+            throw ProxyLinkParseError.unsupportedScheme("\(scheme) is not supported by Xray-core v26.6.27")
         default:
             throw ProxyLinkParseError.unsupportedScheme(scheme)
         }
@@ -150,7 +152,7 @@ struct ProxyImportService {
         let query = Query(components)
         let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
 
-        return ProxyProfile(
+        return try ProxyProfile(
             name: displayName(from: components, fallback: "VLESS \(endpoint.host)"),
             endpoint: endpoint,
             options: .vless(VLESSOptions(uuid: uuid, flow: query["flow"], encryption: query["encryption"])),
@@ -165,7 +167,7 @@ struct ProxyImportService {
         let query = Query(components)
         let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
 
-        return ProxyProfile(
+        return try ProxyProfile(
             name: displayName(from: components, fallback: "Trojan \(endpoint.host)"),
             endpoint: endpoint,
             options: .trojan(TrojanOptions(password: password)),
@@ -178,12 +180,11 @@ struct ProxyImportService {
         let password = try requiredUser(components)
         let endpoint = try endpoint(from: components)
         let query = Query(components)
-        // Hysteria2 runs over QUIC and always uses TLS; sing-box rejects the
-        // whole config for a hysteria2 outbound without one. Links commonly
-        // omit an explicit security parameter, so default to TLS on the host.
+        // Hysteria2 runs over QUIC and always uses TLS. Links commonly omit an
+        // explicit security parameter, so default to TLS on the host.
         let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
 
-        return ProxyProfile(
+        return try ProxyProfile(
             name: displayName(from: components, fallback: "Hysteria2 \(endpoint.host)"),
             endpoint: endpoint,
             options: .hysteria2(
@@ -191,10 +192,15 @@ struct ProxyImportService {
                     password: password,
                     obfs: query["obfs"],
                     obfsPassword: query["obfs-password"] ?? query["obfs_password"] ?? query["obfsParam"],
+                    up: query.first("up", "upmbps"),
+                    down: query.first("down", "downmbps"),
+                    ports: query["ports"],
+                    hopIntervalSeconds: Int(query.first("hop-interval", "hop_interval") ?? ""),
+                    udpIdleTimeoutSeconds: Int(query.first("udp-idle-timeout", "udp_idle_timeout") ?? ""),
                 ),
             ),
             security: security.layer == .none ? .tls(TLSOptions(serverName: endpoint.host)) : security,
-            transport: .tcp,
+            transport: parseTransport(query: query, defaultType: .hysteria),
         )
     }
 
@@ -205,8 +211,8 @@ struct ProxyImportService {
         }
         let endpoint = try endpoint(from: components)
         let query = Query(components)
-        // TUIC is QUIC-based like Hysteria2: TLS is mandatory in sing-box, so
-        // default it in when the link doesn't say otherwise.
+        // Kept only to decode legacy input for a precise unsupported-protocol
+        // report. TUIC is not admitted into the Xray runtime configuration.
         let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
 
         return ProxyProfile(
@@ -239,12 +245,12 @@ struct ProxyImportService {
             throw ProxyLinkParseError.missingCredentials
         }
 
-        return ProxyProfile(
+        return try ProxyProfile(
             name: name,
             endpoint: endpoint,
             options: .shadowsocks(ShadowsocksOptions(method: parts[0], password: parts[1])),
             security: parseSecurity(query: query, fallbackServerName: endpoint.host),
-            transport: .tcp,
+            transport: parseTransport(query: query),
         )
     }
 
@@ -301,13 +307,40 @@ struct ProxyImportService {
             let network = (object["net"] as? String) ?? "tcp"
             let tlsValue = ((object["tls"] as? String) ?? "").lowercased()
             let sni = (object["sni"] as? String) ?? (object["host"] as? String)
-            let security: ProxySecurity = tlsValue == "tls" ? .tls(TLSOptions(
+            let tls = TLSOptions(
                 serverName: sni ?? host,
                 alpn: alpnValues(from: object["alpn"] as? String),
                 allowInsecure: boolValue(from: object["allowInsecure"]) ?? boolValue(from: object["skip-cert-verify"]) ?? false,
                 utlsFingerprint: (object["fp"] as? String) ?? (object["fingerprint"] as? String) ?? "chrome",
-            )) : .none
-            let transport = transportFromVMess(network: network, path: object["path"] as? String, host: object["host"] as? String)
+                pinnedPeerCertSHA256: object["pcs"] as? String,
+                verifyPeerCertByName: object["vcn"] as? String,
+                echConfigList: object["ech"] as? String,
+                curvePreferences: alpnValues(from: object["curves"] as? String),
+                minVersion: object["minver"] as? String,
+                maxVersion: object["maxver"] as? String,
+                cipherSuites: object["ciphers"] as? String,
+                enableSessionResumption: boolValue(from: object["sessionResumption"]) ?? false,
+            )
+            let security: ProxySecurity = if tlsValue == "reality" {
+                ProxySecurity(
+                    layer: .reality,
+                    tls: tls,
+                    reality: RealityOptions(
+                        publicKey: (object["pbk"] as? String) ?? (object["publicKey"] as? String) ?? "",
+                        shortID: object["sid"] as? String,
+                        serverName: sni ?? host,
+                        spiderX: object["spx"] as? String,
+                        mldsa65Verify: object["pqv"] as? String,
+                        utlsFingerprint: tls.utlsFingerprint ?? "chrome",
+                    ),
+                )
+            } else if tlsValue == "tls" {
+                .tls(tls)
+            } else {
+                .none
+            }
+            var transport = transportFromVMess(network: network, path: object["path"] as? String, host: object["host"] as? String)
+            try applyTransportExtensions(from: object, to: &transport)
 
             return ProxyProfile(
                 name: (object["ps"] as? String)?.nilIfEmpty ?? "VMess \(host)",
@@ -348,26 +381,93 @@ struct ProxyImportService {
 
     private func parseHTTP(components: URLComponents, isTLS: Bool) throws -> ProxyProfile {
         let endpoint = try endpoint(from: components)
+        let query = Query(components)
         let username = components.user?.removingPercentEncoding
         let password = components.password?.removingPercentEncoding
-        return ProxyProfile(
+        let parsedSecurity = parseSecurity(query: query, fallbackServerName: endpoint.host)
+        return try ProxyProfile(
             name: displayName(from: components, fallback: "\(isTLS ? "HTTPS" : "HTTP") \(endpoint.host)"),
             endpoint: endpoint,
             options: .http(HTTPOptions(username: username, password: password)),
-            security: isTLS ? .tls(TLSOptions(serverName: endpoint.host)) : .none,
+            security: parsedSecurity.layer == .none && isTLS ? .tls(TLSOptions(serverName: endpoint.host)) : parsedSecurity,
+            transport: parseTransport(query: query),
         )
     }
 
     private func parseSOCKS(components: URLComponents, isTLS: Bool) throws -> ProxyProfile {
         let endpoint = try endpoint(from: components)
+        let query = Query(components)
         let username = components.user?.removingPercentEncoding
         let password = components.password?.removingPercentEncoding
-        return ProxyProfile(
+        let parsedSecurity = parseSecurity(query: query, fallbackServerName: endpoint.host)
+        return try ProxyProfile(
             name: displayName(from: components, fallback: "SOCKS \(endpoint.host)"),
             endpoint: endpoint,
             options: .socks(SOCKSOptions(username: username, password: password)),
-            security: isTLS ? .tls(TLSOptions(serverName: endpoint.host)) : .none,
+            security: parsedSecurity.layer == .none && isTLS ? .tls(TLSOptions(serverName: endpoint.host)) : parsedSecurity,
+            transport: parseTransport(query: query),
         )
+    }
+
+    private func parseWireGuard(components: URLComponents) throws -> ProxyProfile {
+        let privateKey = try requiredUser(components)
+        let endpoint = try endpoint(from: components)
+        let query = Query(components)
+        guard let publicKey = query.first("publickey", "publicKey", "peerPublicKey"), !publicKey.isEmpty,
+              let addresses = query["address"].map(csv), !addresses.isEmpty
+        else {
+            throw ProxyLinkParseError.missingCredentials
+        }
+        let peers = try query["peers"].map(parseWireGuardPeers)
+        let firstPeer = peers?.first
+        let reserved = query["reserved"].map(csv)?.compactMap(UInt8.init)
+        return ProxyProfile(
+            name: displayName(from: components, fallback: "WireGuard \(endpoint.host)"),
+            endpoint: endpoint,
+            options: .wireGuard(WireGuardOptions(
+                privateKey: privateKey,
+                peerPublicKey: firstPeer?.publicKey ?? publicKey,
+                preSharedKey: peers == nil ? query.first("presharedkey", "preSharedKey") : nil,
+                localAddress: addresses,
+                allowedIPs: firstPeer?.allowedIPs ?? query["allowedips"].map(csv),
+                reserved: reserved,
+                keepAliveSeconds: firstPeer?.keepAliveSeconds ?? Int(query["keepalive"] ?? ""),
+                mtu: Int(query["mtu"] ?? ""),
+                domainStrategy: query["domainStrategy"],
+                peers: peers,
+            )),
+            security: .none,
+        )
+    }
+
+    private func parseWireGuardPeers(_ encoded: String) throws -> [WireGuardPeer] {
+        guard encoded.utf8.count <= ImportPolicy.maxWireGuardPeerListBytes else {
+            throw ProxyLinkParseError.payloadTooLarge
+        }
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+        guard encoded.unicodeScalars.allSatisfy(allowed.contains) else {
+            throw ProxyLinkParseError.invalidURL
+        }
+        let normalized = encoded
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let padded = normalized.padding(toLength: ((normalized.count + 3) / 4) * 4, withPad: "=", startingAt: 0)
+        guard let data = Data(base64Encoded: padded),
+              data.count <= ImportPolicy.maxWireGuardPeerListBytes,
+              let peers = try? JSONDecoder().decode([WireGuardPeer].self, from: data),
+              (1 ... IOSRuntimeLimits.default.maxWireGuardPeers).contains(peers.count),
+              Set(peers.map(\.id)).count == peers.count,
+              peers.allSatisfy({ peer in
+                  !peer.publicKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                      (peer.endpoint == nil || (
+                          !peer.endpoint!.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                              (1 ... 65535).contains(peer.endpoint!.port)
+                      ))
+              })
+        else {
+            throw ProxyLinkParseError.invalidURL
+        }
+        return peers
     }
 
     func appendRuntimeWarnings(for profile: ProxyProfile, label: String, to result: inout ImportResult) {
@@ -382,6 +482,14 @@ struct ProxyImportService {
         let alpn = alpnValues(from: query.first("alpn"))
         let fingerprint = query.first("fp", "fingerprint", "utlsFingerprint", "utls_fingerprint", "utls-fingerprint", "clientFingerprint", "client_fingerprint", "client-fingerprint") ?? "chrome"
         let allowInsecure = boolOption(query.first("allowInsecure", "allow_insecure", "allow-insecure", "insecure", "skipCertVerify", "skip_cert_verify", "skip-cert-verify"))
+        let pinnedCertificates = query.first("pcs", "pinnedPeerCertSha256", "pinned_peer_cert_sha256", "pinned-peer-cert-sha256")
+        let verifyNames = query.first("vcn", "verifyPeerCertByName", "verify_peer_cert_by_name", "verify-peer-cert-by-name")
+        let echConfig = query.first("ech", "echConfigList", "ech_config_list", "ech-config-list")
+        let curves = alpnValues(from: query.first("curves", "curvePreferences", "curve_preferences", "curve-preferences"))
+        let minVersion = query.first("minver", "minVersion", "min_version", "min-version")
+        let maxVersion = query.first("maxver", "maxVersion", "max_version", "max-version")
+        let cipherSuites = query.first("ciphers", "cipherSuites", "cipher_suites", "cipher-suites")
+        let sessionResumption = boolOption(query.first("sessionResumption", "session_resumption", "session-resumption"))
 
         if security == "reality" {
             return ProxySecurity(
@@ -410,6 +518,14 @@ struct ProxyImportService {
                     alpn: alpn,
                     allowInsecure: allowInsecure,
                     utlsFingerprint: fingerprint,
+                    pinnedPeerCertSHA256: pinnedCertificates,
+                    verifyPeerCertByName: verifyNames,
+                    echConfigList: echConfig,
+                    curvePreferences: curves,
+                    minVersion: minVersion,
+                    maxVersion: maxVersion,
+                    cipherSuites: cipherSuites,
+                    enableSessionResumption: sessionResumption,
                 ),
             )
         }
@@ -417,19 +533,35 @@ struct ProxyImportService {
         return .none
     }
 
-    private func parseTransport(query: Query) -> TransportOptions {
-        switch (query["type"] ?? query["net"] ?? "").lowercased() {
+    private func parseTransport(query: Query, defaultType: TransportType = .tcp) throws -> TransportOptions {
+        var transport = switch (query["type"] ?? query["net"] ?? "").lowercased() {
         case "ws", "websocket":
             TransportOptions(type: .websocket, path: query["path"], host: query["host"], serviceName: nil)
         case "grpc":
             TransportOptions(type: .grpc, path: nil, host: nil, serviceName: query["serviceName"] ?? query["service_name"])
         case "httpupgrade", "http-upgrade":
             TransportOptions(type: .httpUpgrade, path: query["path"], host: query["host"], serviceName: nil)
+        case "xhttp", "splithttp":
+            TransportOptions(
+                type: .xhttp,
+                path: query["path"],
+                host: query["host"],
+                serviceName: nil,
+                xhttpMode: query["mode"],
+            )
+        case "kcp", "mkcp":
+            TransportOptions(type: .mKCP)
+        case "hysteria":
+            TransportOptions(type: .hysteria)
         case "quic":
+            // Preserve the legacy marker so validation can present a precise
+            // migration error instead of silently changing the transport.
             TransportOptions(type: .quic)
         default:
-            .tcp
+            TransportOptions(type: defaultType)
         }
+        try applyTransportExtensions(from: query, to: &transport)
+        return transport
     }
 
     private func transportFromVMess(network: String, path: String?, host: String?) -> TransportOptions {
@@ -439,10 +571,48 @@ struct ProxyImportService {
         case "grpc":
             TransportOptions(type: .grpc, path: nil, host: nil, serviceName: path)
         case "h2", "http":
-            TransportOptions(type: .httpUpgrade, path: path, host: host, serviceName: nil)
+            TransportOptions(type: .xhttp, path: path, host: host, serviceName: nil, xhttpMode: "stream-up")
+        case "xhttp", "splithttp":
+            TransportOptions(type: .xhttp, path: path, host: host, serviceName: nil)
+        case "kcp", "mkcp":
+            TransportOptions(type: .mKCP)
+        case "hysteria":
+            TransportOptions(type: .hysteria)
         default:
             .tcp
         }
+    }
+
+    private func applyTransportExtensions(from query: Query, to transport: inout TransportOptions) throws {
+        transport.xhttpExtra = try decodedJSON(query["xhttpExtra"], as: JSONValue.self)
+        transport.kcp = try decodedJSON(query["kcp"], as: XrayKCPOptions.self)
+        transport.finalMask = try decodedJSON(query["finalmask"], as: JSONValue.self)
+        transport.mux = try decodedJSON(query["mux"], as: XrayMuxOptions.self)
+        transport.socketOptions = try decodedJSON(query["sockopt"], as: JSONValue.self)
+    }
+
+    private func applyTransportExtensions(from object: [String: Any], to transport: inout TransportOptions) throws {
+        transport.xhttpExtra = try decodedJSON(object["xhttpExtra"] as? String, as: JSONValue.self)
+        transport.kcp = try decodedJSON(object["kcp"] as? String, as: XrayKCPOptions.self)
+        transport.finalMask = try decodedJSON(object["finalmask"] as? String, as: JSONValue.self)
+        transport.mux = try decodedJSON(object["mux"] as? String, as: XrayMuxOptions.self)
+        transport.socketOptions = try decodedJSON(object["sockopt"] as? String, as: JSONValue.self)
+    }
+
+    private func decodedJSON<T: Decodable>(_ value: String?, as _: T.Type) throws -> T? {
+        guard let value, !value.isEmpty else { return nil }
+        guard let json = decodeBase64String(value), let data = json.data(using: .utf8) else {
+            throw ProxyLinkParseError.invalidURL
+        }
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            throw ProxyLinkParseError.invalidURL
+        }
+    }
+
+    private func csv(_ value: String) -> [String] {
+        value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
     private func endpoint(from components: URLComponents) throws -> Endpoint {

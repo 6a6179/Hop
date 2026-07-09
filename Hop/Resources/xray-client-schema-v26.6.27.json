@@ -1,0 +1,7425 @@
+{
+  "formatVersion": 1,
+  "generator": {
+    "command": "scripts/generate-xray-client-schema.sh",
+    "method": "Go AST over JSON-tagged structs plus reviewed RawMessage unions and policy overlays"
+  },
+  "core": {
+    "version": "v26.6.27",
+    "commit": "45cf2898ab12e97a55dd8f1f3d78d903340bdc9e",
+    "module": "github.com/xtls/xray-core",
+    "moduleVersion": "v1.260327.1-0.20260627131803-45cf2898ab12",
+    "sourcePackage": "github.com/xtls/xray-core/infra/conf"
+  },
+  "scope": {
+    "applicability": "Hop client runtime on iOS",
+    "includes": [
+      "client outbounds and account settings registered by LibXray",
+      "RAW, WebSocket, gRPC, HTTPUpgrade, XHTTP, mKCP, and Hysteria transports",
+      "TLS, REALITY, FinalMask, mux, socket options, DNS, FakeDNS, routing, policy, balancing, observatory, version, and local geodata"
+    ],
+    "excludes": [
+      "custom server inbounds (the TUN inbound is generated and owned by Hop)",
+      "API and metrics listeners, reverse proxy, server-only transport/security fields",
+      "deprecated global transport settings and upstream removed features"
+    ]
+  },
+  "roots": {
+    "burstObservatory": {
+      "$ref": "#/definitions/BurstObservatoryConfig",
+      "applicability": "client"
+    },
+    "config": {
+      "$ref": "#/definitions/Config",
+      "applicability": "client"
+    },
+    "dns": {
+      "$ref": "#/definitions/DNSConfig",
+      "applicability": "client"
+    },
+    "fakeDns": {
+      "$ref": "#/definitions/FakeDNSConfig",
+      "applicability": "client"
+    },
+    "geodata": {
+      "$ref": "#/definitions/GeodataConfig",
+      "applicability": "client-local-assets-only"
+    },
+    "observatory": {
+      "$ref": "#/definitions/ObservatoryConfig",
+      "applicability": "client"
+    },
+    "outbound": {
+      "$ref": "#/definitions/OutboundDetourConfig",
+      "applicability": "client"
+    },
+    "policy": {
+      "$ref": "#/definitions/PolicyConfig",
+      "applicability": "client"
+    },
+    "routing": {
+      "$ref": "#/definitions/RouterConfig",
+      "applicability": "client"
+    },
+    "routingFieldRule": {
+      "$ref": "#/definitions/RawFieldRule",
+      "applicability": "client"
+    },
+    "streamSettings": {
+      "$ref": "#/definitions/StreamConfig",
+      "applicability": "client"
+    },
+    "version": {
+      "$ref": "#/definitions/VersionConfig",
+      "applicability": "client"
+    }
+  },
+  "outboundProtocols": {
+    "blackhole": {
+      "settingsRef": "#/definitions/BlackholeConfig",
+      "applicability": "outbound-client",
+      "aliases": [
+        "block"
+      ]
+    },
+    "dns": {
+      "settingsRef": "#/definitions/DNSOutboundConfig",
+      "applicability": "outbound-client"
+    },
+    "freedom": {
+      "settingsRef": "#/definitions/FreedomConfig",
+      "applicability": "outbound-client",
+      "aliases": [
+        "direct"
+      ]
+    },
+    "http": {
+      "settingsRef": "#/definitions/HTTPClientConfig",
+      "applicability": "outbound-client"
+    },
+    "hysteria": {
+      "settingsRef": "#/definitions/HysteriaClientConfig",
+      "applicability": "outbound-client",
+      "notes": [
+        "Authentication and QUIC controls are in streamSettings.hysteriaSettings."
+      ]
+    },
+    "loopback": {
+      "settingsRef": "#/definitions/LoopbackConfig",
+      "applicability": "outbound-client-hop-internal"
+    },
+    "shadowsocks": {
+      "settingsRef": "#/definitions/ShadowsocksClientConfig",
+      "applicability": "outbound-client",
+      "notes": [
+        "Includes Xray's registered Shadowsocks and SS2022 client config shape; Hop enforces the pinned secure cipher allowlist."
+      ]
+    },
+    "socks": {
+      "settingsRef": "#/definitions/SocksClientConfig",
+      "applicability": "outbound-client"
+    },
+    "trojan": {
+      "settingsRef": "#/definitions/TrojanClientConfig",
+      "applicability": "outbound-client"
+    },
+    "vless": {
+      "settingsRef": "#/definitions/VLessOutboundConfig",
+      "applicability": "outbound-client",
+      "notes": [
+        "encryption is preserved as the pinned VLESS Encryption/Auth grammar, including mlkem768x25519plus."
+      ]
+    },
+    "vmess": {
+      "settingsRef": "#/definitions/VMessOutboundConfig",
+      "applicability": "outbound-client"
+    },
+    "wireguard": {
+      "settingsRef": "#/definitions/WireGuardConfig",
+      "applicability": "outbound-client",
+      "notes": [
+        "Hop forces noKernelTun=true."
+      ]
+    }
+  },
+  "transports": {
+    "grpc": {
+      "settingsField": "grpcSettings",
+      "settingsRef": "#/definitions/GRPCConfig",
+      "applicability": "client"
+    },
+    "httpupgrade": {
+      "settingsField": "httpupgradeSettings",
+      "settingsRef": "#/definitions/HttpUpgradeConfig",
+      "applicability": "client"
+    },
+    "hysteria": {
+      "settingsField": "hysteriaSettings",
+      "settingsRef": "#/definitions/HysteriaConfig",
+      "applicability": "client"
+    },
+    "mkcp": {
+      "settingsField": "kcpSettings",
+      "settingsRef": "#/definitions/KCPConfig",
+      "applicability": "client",
+      "aliases": [
+        "kcp"
+      ]
+    },
+    "raw": {
+      "settingsField": "rawSettings",
+      "settingsRef": "#/definitions/TCPConfig",
+      "applicability": "client",
+      "aliases": [
+        "tcp"
+      ]
+    },
+    "reality": {
+      "settingsField": "realitySettings",
+      "settingsRef": "#/definitions/REALITYConfig",
+      "applicability": "client-and-server-shared-struct"
+    },
+    "tls": {
+      "settingsField": "tlsSettings",
+      "settingsRef": "#/definitions/TLSConfig",
+      "applicability": "client-and-server-shared-struct"
+    },
+    "websocket": {
+      "settingsField": "wsSettings",
+      "settingsRef": "#/definitions/WebSocketConfig",
+      "applicability": "client",
+      "aliases": [
+        "ws"
+      ]
+    },
+    "xhttp": {
+      "settingsField": "xhttpSettings",
+      "settingsRef": "#/definitions/SplitHTTPConfig",
+      "applicability": "client",
+      "aliases": [
+        "splithttp"
+      ]
+    }
+  },
+  "finalMask": {
+    "$ref": "#/definitions/FinalMask",
+    "tcpTypes": {
+      "fragment": {
+        "settingsRef": "#/definitions/FragmentMask",
+        "applicability": "client"
+      },
+      "header-custom": {
+        "settingsRef": "#/definitions/HeaderCustomTCP",
+        "applicability": "client"
+      },
+      "sudoku": {
+        "settingsRef": "#/definitions/Sudoku",
+        "applicability": "client"
+      }
+    },
+    "udpTypes": {
+      "header-custom": {
+        "settingsRef": "#/definitions/HeaderCustomUDP",
+        "applicability": "client"
+      },
+      "mkcp-legacy": {
+        "settingsRef": "#/definitions/MkcpLegacy",
+        "applicability": "client"
+      },
+      "noise": {
+        "settingsRef": "#/definitions/NoiseMask",
+        "applicability": "client"
+      },
+      "realm": {
+        "settingsRef": "#/definitions/Realm",
+        "applicability": "client"
+      },
+      "salamander": {
+        "settingsRef": "#/definitions/Salamander",
+        "applicability": "client"
+      },
+      "sudoku": {
+        "settingsRef": "#/definitions/Sudoku",
+        "applicability": "client"
+      },
+      "xdns": {
+        "settingsRef": "#/definitions/Xdns",
+        "applicability": "client"
+      },
+      "xicmp": {
+        "settingsRef": "#/definitions/Xicmp",
+        "applicability": "client"
+      }
+    }
+  },
+  "dynamicShapes": {
+    "balancerStrategySettings": {
+      "location": "/routing/balancers/*/strategy/settings",
+      "discriminator": "../type",
+      "variants": {
+        "leastload": {
+          "$ref": "#/definitions/strategyLeastLoadConfig",
+          "applicability": "client"
+        },
+        "leastping": {
+          "$ref": "#/definitions/strategyEmptyConfig",
+          "applicability": "client"
+        },
+        "random": {
+          "$ref": "#/definitions/strategyEmptyConfig",
+          "applicability": "client"
+        },
+        "roundrobin": {
+          "$ref": "#/definitions/strategyEmptyConfig",
+          "applicability": "client"
+        }
+      }
+    },
+    "blackholeResponse": {
+      "location": "/outbounds/*/settings/response",
+      "discriminator": "type",
+      "variants": {
+        "http": {
+          "$ref": "#/definitions/HTTPResponse",
+          "applicability": "client"
+        },
+        "none": {
+          "$ref": "#/definitions/NoneResponse",
+          "applicability": "client"
+        }
+      }
+    },
+    "httpUser": {
+      "location": "/outbounds/*/settings/servers/*/users/*",
+      "$ref": "#/definitions/HTTPAccount",
+      "notes": [
+        "Applies when the parent outbound protocol is http."
+      ]
+    },
+    "rawHeader": {
+      "location": "/outbounds/*/streamSettings/rawSettings/header",
+      "discriminator": "type",
+      "variants": {
+        "http": {
+          "$ref": "#/definitions/Authenticator",
+          "applicability": "client"
+        },
+        "none": {
+          "$ref": "#/definitions/NoOpConnectionAuthenticator",
+          "applicability": "client"
+        }
+      }
+    },
+    "routingRule": {
+      "location": "/routing/rules/*",
+      "$ref": "#/definitions/RawFieldRule",
+      "notes": [
+        "Routing rules are RawMessage entries parsed as field rules; inherited RouterRule target fields also apply."
+      ]
+    },
+    "socksUser": {
+      "location": "/outbounds/*/settings/servers/*/users/*",
+      "$ref": "#/definitions/SocksAccount",
+      "notes": [
+        "Applies when the parent outbound protocol is socks."
+      ]
+    },
+    "vmessUser": {
+      "location": "/outbounds/*/settings/vnext/*/users/*",
+      "$ref": "#/definitions/VMessAccount"
+    },
+    "xhttpExtra": {
+      "location": "/outbounds/*/streamSettings/xhttpSettings/extra",
+      "$ref": "#/definitions/SplitHTTPConfig",
+      "notes": [
+        "extra is reparsed as SplitHTTPConfig; outer host, path, and mode remain authoritative."
+      ]
+    }
+  },
+  "definitions": {
+    "Authenticator": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_authenticators.go",
+        "line": 188
+      },
+      "fields": {
+        "request": {
+          "goField": "Request",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/AuthenticatorRequest",
+          "optional": false,
+          "applicability": "client"
+        },
+        "response": {
+          "goField": "Response",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/AuthenticatorResponse",
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "AuthenticatorRequest": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_authenticators.go",
+        "line": 19
+      },
+      "fields": {
+        "headers": {
+          "goField": "Headers",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "array",
+              "string"
+            ],
+            "goType": "StringList",
+            "items": {
+              "jsonTypes": [
+                "string"
+              ],
+              "goType": "string"
+            }
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "method": {
+          "goField": "Method",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "path": {
+          "goField": "Path",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "version": {
+          "goField": "Version",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "AuthenticatorResponse": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_authenticators.go",
+        "line": 120
+      },
+      "fields": {
+        "headers": {
+          "goField": "Headers",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "array",
+              "string"
+            ],
+            "goType": "StringList",
+            "items": {
+              "jsonTypes": [
+                "string"
+              ],
+              "goType": "string"
+            }
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "reason": {
+          "goField": "Reason",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "status": {
+          "goField": "Status",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "version": {
+          "goField": "Version",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "BalancingRule": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/router.go",
+        "line": 21
+      },
+      "fields": {
+        "fallbackTag": {
+          "goField": "FallbackTag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "selector": {
+          "goField": "Selectors",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "strategy": {
+          "goField": "Strategy",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/StrategyConfig",
+          "optional": false,
+          "applicability": "client"
+        },
+        "tag": {
+          "goField": "Tag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "BlackholeConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/blackhole.go",
+        "line": 24
+      },
+      "fields": {
+        "response": {
+          "goField": "Response",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "BurstObservatoryConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/observatory.go",
+        "line": 23
+      },
+      "fields": {
+        "pingConfig": {
+          "goField": "HealthCheck",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/healthCheckSettings",
+          "optional": true,
+          "applicability": "client"
+        },
+        "subjectSelector": {
+          "goField": "SubjectSelector",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        }
+      }
+    },
+    "Config": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/xray.go",
+        "line": 345
+      },
+      "fields": {
+        "api": {
+          "goField": "API",
+          "jsonTypes": [
+            "object"
+          ],
+          "optional": true,
+          "applicability": "excluded-server-only"
+        },
+        "burstObservatory": {
+          "goField": "BurstObservatory",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/BurstObservatoryConfig",
+          "optional": true,
+          "applicability": "client-advanced"
+        },
+        "dns": {
+          "goField": "DNSConfig",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/DNSConfig",
+          "optional": true,
+          "applicability": "client-advanced"
+        },
+        "fakeDns": {
+          "goField": "FakeDNS",
+          "jsonTypes": [
+            "array",
+            "object"
+          ],
+          "$ref": "#/definitions/FakeDNSConfig",
+          "optional": true,
+          "applicability": "client-advanced"
+        },
+        "geodata": {
+          "goField": "Geodata",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/GeodataConfig",
+          "optional": true,
+          "applicability": "client-advanced-local-assets-only"
+        },
+        "inbounds": {
+          "goField": "InboundConfigs",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "goType": "InboundDetourConfig"
+          },
+          "optional": false,
+          "applicability": "hop-managed-tun-only"
+        },
+        "log": {
+          "goField": "LogConfig",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/LogConfig",
+          "optional": true,
+          "applicability": "hop-managed"
+        },
+        "metrics": {
+          "goField": "Metrics",
+          "jsonTypes": [
+            "object"
+          ],
+          "optional": true,
+          "applicability": "excluded-server-only"
+        },
+        "observatory": {
+          "goField": "Observatory",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/ObservatoryConfig",
+          "optional": true,
+          "applicability": "client-advanced"
+        },
+        "outbounds": {
+          "goField": "OutboundConfigs",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/OutboundDetourConfig",
+            "goType": "OutboundDetourConfig"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "policy": {
+          "goField": "Policy",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/PolicyConfig",
+          "optional": true,
+          "applicability": "client-advanced"
+        },
+        "reverse": {
+          "goField": "Reverse",
+          "jsonTypes": [
+            "object"
+          ],
+          "optional": true,
+          "applicability": "excluded-server-only"
+        },
+        "routing": {
+          "goField": "RouterConfig",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/RouterConfig",
+          "optional": true,
+          "applicability": "client-advanced"
+        },
+        "stats": {
+          "goField": "Stats",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/StatsConfig",
+          "optional": true,
+          "applicability": "excluded-app-telemetry"
+        },
+        "transport": {
+          "goField": "Transport",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "any"
+            ],
+            "goType": "json.RawMessage"
+          },
+          "optional": false,
+          "applicability": "excluded-deprecated"
+        },
+        "version": {
+          "goField": "Version",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/VersionConfig",
+          "optional": true,
+          "applicability": "client-advanced"
+        }
+      }
+    },
+    "CustomSockoptConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1033
+      },
+      "fields": {
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "network": {
+          "goField": "Network",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "opt": {
+          "goField": "Opt",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "system": {
+          "goField": "Syetem",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "value": {
+          "goField": "Value",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "CustomTransform": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1531
+      },
+      "fields": {
+        "args": {
+          "goField": "Args",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/CustomTransformArg",
+            "goType": "CustomTransformArg"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "op": {
+          "goField": "Op",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "CustomTransformArg": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1536
+      },
+      "fields": {
+        "bytes": {
+          "goField": "Bytes",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "metadata": {
+          "goField": "Metadata",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "reuse": {
+          "goField": "Reuse",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "transform": {
+          "goField": "Transform",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/CustomTransform",
+          "optional": true,
+          "applicability": "client"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "u64": {
+          "goField": "U64",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client"
+        }
+      }
+    },
+    "DNSConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/dns.go",
+        "line": 160
+      },
+      "fields": {
+        "clientIp": {
+          "goField": "ClientIP",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "disableCache": {
+          "goField": "DisableCache",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "disableFallback": {
+          "goField": "DisableFallback",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "disableFallbackIfMatch": {
+          "goField": "DisableFallbackIfMatch",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "enableParallelQuery": {
+          "goField": "EnableParallelQuery",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "hosts": {
+          "goField": "Hosts",
+          "jsonTypes": [
+            "object"
+          ],
+          "items": {
+            "jsonTypes": [
+              "array",
+              "string"
+            ]
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "queryStrategy": {
+          "goField": "QueryStrategy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "UseIP",
+            "UseIPv4",
+            "UseIPv6",
+            "UseSystem"
+          ],
+          "applicability": "client",
+          "notes": [
+            "Xray accepts documented spelling aliases case-insensitively."
+          ]
+        },
+        "serveExpiredTTL": {
+          "goField": "ServeExpiredTTL",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "serveStale": {
+          "goField": "ServeStale",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "servers": {
+          "goField": "Servers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/NameServerConfig",
+            "goType": "NameServerConfig"
+          },
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "tag": {
+          "goField": "Tag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "useSystemHosts": {
+          "goField": "UseSystemHosts",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "DNSOutboundConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/dns_proxy.go",
+        "line": 60
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "blockTypes": {
+          "goField": "BlockTypes",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "integer"
+            ],
+            "goType": "int32"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "network": {
+          "goField": "Network",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "nonIPQuery": {
+          "goField": "NonIPQuery",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "rewriteAddress": {
+          "goField": "RewriteAddress",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "rewriteNetwork": {
+          "goField": "RewriteNetwork",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "rewritePort": {
+          "goField": "RewritePort",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "rules": {
+          "goField": "Rules",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/DNSOutboundRuleConfig",
+            "goType": "DNSOutboundRuleConfig"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "userLevel": {
+          "goField": "UserLevel",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "DNSOutboundRuleConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/dns_proxy.go",
+        "line": 13
+      },
+      "fields": {
+        "action": {
+          "goField": "Action",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "direct",
+            "drop",
+            "return",
+            "hijack"
+          ],
+          "applicability": "client"
+        },
+        "domain": {
+          "goField": "Domain",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "qType": {
+          "goField": "QType",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "rCode": {
+          "goField": "RCode",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "FakeDNSConfig": {
+      "jsonTypes": [
+        "array",
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/fakedns.go",
+        "line": 18
+      },
+      "oneOf": [
+        {
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/FakeDNSPoolElementConfig"
+        },
+        {
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/FakeDNSPoolElementConfig"
+          }
+        }
+      ],
+      "notes": [
+        "Shape is defined by FakeDNSConfig.UnmarshalJSON rather than exported struct fields."
+      ]
+    },
+    "FakeDNSPoolElementConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/fakedns.go",
+        "line": 13
+      },
+      "fields": {
+        "ipPool": {
+          "goField": "IPPool",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "poolSize": {
+          "goField": "LRUSize",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        }
+      }
+    },
+    "FinalMask": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 2031
+      },
+      "fields": {
+        "quicParams": {
+          "goField": "QuicParams",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/QuicParamsConfig",
+          "optional": true,
+          "applicability": "client"
+        },
+        "tcp": {
+          "goField": "Tcp",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/Mask",
+            "goType": "Mask"
+          },
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "udp": {
+          "goField": "Udp",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/Mask",
+            "goType": "Mask"
+          },
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        }
+      }
+    },
+    "Fragment": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/freedom.go",
+        "line": 32
+      },
+      "fields": {
+        "interval": {
+          "goField": "Interval",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "length": {
+          "goField": "Length",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "maxSplit": {
+          "goField": "MaxSplit",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "packets": {
+          "goField": "Packets",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "FragmentMask": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1410
+      },
+      "fields": {
+        "delay": {
+          "goField": "Delay",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "delays": {
+          "goField": "Delays",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "integer",
+              "string"
+            ],
+            "goType": "Int32Range"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "length": {
+          "goField": "Length",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "lengths": {
+          "goField": "Lengths",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "integer",
+              "string"
+            ],
+            "goType": "Int32Range"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "maxSplit": {
+          "goField": "MaxSplit",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "packets": {
+          "goField": "Packets",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "FreedomConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/freedom.go",
+        "line": 19
+      },
+      "fields": {
+        "domainStrategy": {
+          "goField": "DomainStrategy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "finalRules": {
+          "goField": "FinalRules",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/FreedomFinalRuleConfig",
+            "goType": "FreedomFinalRuleConfig"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "fragment": {
+          "goField": "Fragment",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/Fragment",
+          "optional": true,
+          "applicability": "client"
+        },
+        "ipsBlocked": {
+          "goField": "IPsBlocked",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "noise": {
+          "goField": "Noise",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/Noise",
+          "optional": true,
+          "applicability": "client"
+        },
+        "noises": {
+          "goField": "Noises",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/Noise",
+            "goType": "Noise"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "proxyProtocol": {
+          "goField": "ProxyProtocol",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "redirect": {
+          "goField": "Redirect",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "targetStrategy": {
+          "goField": "TargetStrategy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "userLevel": {
+          "goField": "UserLevel",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "FreedomFinalRuleConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/freedom.go",
+        "line": 46
+      },
+      "fields": {
+        "action": {
+          "goField": "Action",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "blockDelay": {
+          "goField": "BlockDelay",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "ip": {
+          "goField": "IP",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "network": {
+          "goField": "Network",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        }
+      }
+    },
+    "GRPCConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/grpc.go",
+        "line": 8
+      },
+      "fields": {
+        "authority": {
+          "goField": "Authority",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "health_check_timeout": {
+          "goField": "HealthCheckTimeout",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "idle_timeout": {
+          "goField": "IdleTimeout",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "initial_windows_size": {
+          "goField": "InitialWindowsSize",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "multiMode": {
+          "goField": "MultiMode",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "permit_without_stream": {
+          "goField": "PermitWithoutStream",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "serviceName": {
+          "goField": "ServiceName",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "user_agent": {
+          "goField": "UserAgent",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "GeodataAssetConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/geodata.go",
+        "line": 13
+      },
+      "fields": {
+        "file": {
+          "goField": "File",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "verified-local-only"
+        },
+        "url": {
+          "goField": "URL",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "excluded-network-download"
+        }
+      }
+    },
+    "GeodataConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/geodata.go",
+        "line": 42
+      },
+      "fields": {
+        "assets": {
+          "goField": "Assets",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/GeodataAssetConfig",
+            "goType": "GeodataAssetConfig"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "cron": {
+          "goField": "Cron",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "outbound": {
+          "goField": "Outbound",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "HTTPAccount": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/http.go",
+        "line": 13
+      },
+      "fields": {
+        "pass": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret"
+          ]
+        },
+        "user": {
+          "goField": "Username",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "HTTPClientConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/http.go",
+        "line": 58
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "headers": {
+          "goField": "Headers",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "pass": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret"
+          ]
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "servers": {
+          "goField": "Servers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/HTTPRemoteConfig",
+            "goType": "HTTPRemoteConfig"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "user": {
+          "goField": "Username",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "HTTPRemoteConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/http.go",
+        "line": 52
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "users": {
+          "goField": "Users",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "any"
+            ],
+            "goType": "json.RawMessage"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      },
+      "notes": [
+        "users entries use HTTPAccount fields."
+      ]
+    },
+    "HTTPResponse": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/blackhole.go",
+        "line": 18
+      }
+    },
+    "HappyEyeballsConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1042
+      },
+      "fields": {
+        "interleave": {
+          "goField": "Interleave",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "maxConcurrentTry": {
+          "goField": "MaxConcurrentTry",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "prioritizeIPv6": {
+          "goField": "PrioritizeIPv6",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tryDelayMs": {
+          "goField": "TryDelayMs",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "HeaderCustomTCP": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1276
+      },
+      "fields": {
+        "clients": {
+          "goField": "Clients",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "array"
+            ],
+            "goType": "[]TCPItem",
+            "items": {
+              "jsonTypes": [
+                "object"
+              ],
+              "$ref": "#/definitions/TCPItem",
+              "goType": "TCPItem"
+            }
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "errors": {
+          "goField": "Errors",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "array"
+            ],
+            "goType": "[]TCPItem",
+            "items": {
+              "jsonTypes": [
+                "object"
+              ],
+              "$ref": "#/definitions/TCPItem",
+              "goType": "TCPItem"
+            }
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "servers": {
+          "goField": "Servers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "array"
+            ],
+            "goType": "[]TCPItem",
+            "items": {
+              "jsonTypes": [
+                "object"
+              ],
+              "$ref": "#/definitions/TCPItem",
+              "goType": "TCPItem"
+            }
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "HeaderCustomUDP": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1680
+      },
+      "fields": {
+        "client": {
+          "goField": "Client",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/UDPItem",
+            "goType": "UDPItem"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "mode": {
+          "goField": "Mode",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "prefix",
+            "standalone"
+          ],
+          "applicability": "client"
+        },
+        "server": {
+          "goField": "Server",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/UDPItem",
+            "goType": "UDPItem"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "HttpUpgradeConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client-and-server-shared-struct",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 175
+      },
+      "fields": {
+        "acceptProxyProtocol": {
+          "goField": "AcceptProxyProtocol",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "headers": {
+          "goField": "Headers",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "host": {
+          "goField": "Host",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "path": {
+          "goField": "Path",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        }
+      }
+    },
+    "HysteriaClientConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/hysteria.go",
+        "line": 13
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "version": {
+          "goField": "Version",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "HysteriaConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 547
+      },
+      "fields": {
+        "auth": {
+          "goField": "Auth",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "congestion": {
+          "goField": "Congestion",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "down": {
+          "goField": "Down",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "masquerade": {
+          "goField": "Masquerade",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/Masquerade",
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "udpIdleTimeout": {
+          "goField": "UdpIdleTimeout",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "udphop": {
+          "goField": "UdpHop",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/UdpHop",
+          "optional": true,
+          "applicability": "client"
+        },
+        "up": {
+          "goField": "Up",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "version": {
+          "goField": "Version",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "KCPConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 53
+      },
+      "fields": {
+        "cwndMultiplier": {
+          "goField": "CwndMultiplier",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "downlinkCapacity": {
+          "goField": "DownCap",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "header": {
+          "goField": "HeaderConfig",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "excluded-removed-feature"
+        },
+        "maxSendingWindow": {
+          "goField": "MaxSendingWindow",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "mtu": {
+          "goField": "Mtu",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "seed": {
+          "goField": "Seed",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "excluded-removed-feature"
+        },
+        "tti": {
+          "goField": "Tti",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "uplinkCapacity": {
+          "goField": "UpCap",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        }
+      }
+    },
+    "LimitFallback": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 781
+      },
+      "fields": {
+        "AfterBytes": {
+          "goField": "AfterBytes",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "BurstBytesPerSec": {
+          "goField": "BurstBytesPerSec",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "BytesPerSec": {
+          "goField": "BytesPerSec",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "LogConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/log.go",
+        "line": 18
+      },
+      "fields": {
+        "access": {
+          "goField": "AccessLog",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "dnsLog": {
+          "goField": "DNSLog",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "error": {
+          "goField": "ErrorLog",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "loglevel": {
+          "goField": "LogLevel",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "maskAddress": {
+          "goField": "MaskAddress",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "LoopbackConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/loopback.go",
+        "line": 9
+      },
+      "fields": {
+        "inboundTag": {
+          "goField": "InboundTag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "sniffing": {
+          "goField": "Sniffing",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/SniffingConfig",
+          "optional": true,
+          "applicability": "client"
+        }
+      }
+    },
+    "Mask": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 2005
+      },
+      "fields": {
+        "settings": {
+          "goField": "Settings",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "Masquerade": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client-and-server-shared-struct",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 533
+      },
+      "fields": {
+        "content": {
+          "goField": "Content",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "dir": {
+          "goField": "Dir",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "headers": {
+          "goField": "Headers",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "insecure": {
+          "goField": "Insecure",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "rewriteHost": {
+          "goField": "RewriteHost",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "statusCode": {
+          "goField": "StatusCode",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "url": {
+          "goField": "Url",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        }
+      }
+    },
+    "MkcpLegacy": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1771
+      },
+      "fields": {
+        "header": {
+          "goField": "Header",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "dns",
+            "dtls",
+            "srtp",
+            "utp",
+            "wechat",
+            "wireguard"
+          ],
+          "applicability": "client"
+        },
+        "value": {
+          "goField": "Value",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "MuxConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/xray.go",
+        "line": 101
+      },
+      "fields": {
+        "concurrency": {
+          "goField": "Concurrency",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "enabled": {
+          "goField": "Enabled",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "xudpConcurrency": {
+          "goField": "XudpConcurrency",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "xudpProxyUDP443": {
+          "goField": "XudpProxyUDP443",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "reject",
+            "allow",
+            "skip"
+          ],
+          "applicability": "client"
+        }
+      }
+    },
+    "NameServerConfig": {
+      "jsonTypes": [
+        "object",
+        "string"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/dns.go",
+        "line": 19
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "clientIp": {
+          "goField": "ClientIP",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "disableCache": {
+          "goField": "DisableCache",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "domains": {
+          "goField": "Domains",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "expectIPs": {
+          "goField": "ExpectIPs",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "expectedIPs": {
+          "goField": "ExpectedIPs",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "finalQuery": {
+          "goField": "FinalQuery",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "queryStrategy": {
+          "goField": "QueryStrategy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "UseIP",
+            "UseIPv4",
+            "UseIPv6",
+            "UseSystem"
+          ],
+          "applicability": "client",
+          "notes": [
+            "Xray accepts documented spelling aliases case-insensitively."
+          ]
+        },
+        "serveExpiredTTL": {
+          "goField": "ServeExpiredTTL",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "serveStale": {
+          "goField": "ServeStale",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "skipFallback": {
+          "goField": "SkipFallback",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tag": {
+          "goField": "Tag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "timeoutMs": {
+          "goField": "TimeoutMs",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "unexpectedIPs": {
+          "goField": "UnexpectedIPs",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      },
+      "notes": [
+        "NameServerConfig.UnmarshalJSON accepts either an address string or the expanded object fields."
+      ]
+    },
+    "NoOpConnectionAuthenticator": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_authenticators.go",
+        "line": 13
+      }
+    },
+    "Noise": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/freedom.go",
+        "line": 39
+      },
+      "fields": {
+        "applyTo": {
+          "goField": "ApplyTo",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "delay": {
+          "goField": "Delay",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "packet": {
+          "goField": "Packet",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "NoiseItem": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1471
+      },
+      "fields": {
+        "delay": {
+          "goField": "Delay",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "packet": {
+          "goField": "Packet",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "rand": {
+          "goField": "Rand",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "randRange": {
+          "goField": "RandRange",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "NoiseMask": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1479
+      },
+      "fields": {
+        "noise": {
+          "goField": "Noise",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/NoiseItem",
+            "goType": "NoiseItem"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "reset": {
+          "goField": "Reset",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "NoneResponse": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/blackhole.go",
+        "line": 12
+      }
+    },
+    "ObservatoryConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/observatory.go",
+        "line": 12
+      },
+      "fields": {
+        "enableConcurrency": {
+          "goField": "EnableConcurrency",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "probeInterval": {
+          "goField": "ProbeInterval",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "probeURL": {
+          "goField": "ProbeURL",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "subjectSelector": {
+          "goField": "SubjectSelector",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        }
+      }
+    },
+    "OutboundDetourConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/xray.go",
+        "line": 212
+      },
+      "fields": {
+        "mux": {
+          "goField": "MuxSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/MuxConfig",
+          "optional": true,
+          "applicability": "client-profile"
+        },
+        "protocol": {
+          "goField": "Protocol",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "hop-typed"
+        },
+        "proxySettings": {
+          "goField": "ProxySettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/ProxyConfig",
+          "optional": true,
+          "applicability": "client-profile"
+        },
+        "sendThrough": {
+          "goField": "SendThrough",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "settings": {
+          "goField": "Settings",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": true,
+          "applicability": "client-profile"
+        },
+        "streamSettings": {
+          "goField": "StreamSetting",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/StreamConfig",
+          "optional": true,
+          "applicability": "client-profile"
+        },
+        "tag": {
+          "goField": "Tag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "hop-typed"
+        },
+        "targetStrategy": {
+          "goField": "TargetStrategy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "asis",
+            "useip",
+            "useipv4",
+            "useipv6",
+            "useipv4v6",
+            "useipv6v4",
+            "forceip",
+            "forceipv4",
+            "forceipv6",
+            "forceipv4v6",
+            "forceipv6v4"
+          ],
+          "applicability": "client"
+        }
+      }
+    },
+    "Policy": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/policy.go",
+        "line": 7
+      },
+      "fields": {
+        "bufferSize": {
+          "goField": "BufferSize",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "connIdle": {
+          "goField": "ConnectionIdle",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "downlinkOnly": {
+          "goField": "DownlinkOnly",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "handshake": {
+          "goField": "Handshake",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "statsUserDownlink": {
+          "goField": "StatsUserDownlink",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "excluded-app-telemetry"
+        },
+        "statsUserOnline": {
+          "goField": "StatsUserOnline",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "excluded-app-telemetry"
+        },
+        "statsUserUplink": {
+          "goField": "StatsUserUplink",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "excluded-app-telemetry"
+        },
+        "uplinkOnly": {
+          "goField": "UplinkOnly",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client"
+        }
+      }
+    },
+    "PolicyConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/policy.go",
+        "line": 73
+      },
+      "fields": {
+        "levels": {
+          "goField": "Levels",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/Policy",
+            "goType": "Policy"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "system": {
+          "goField": "System",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/SystemPolicy",
+          "optional": true,
+          "applicability": "client"
+        }
+      }
+    },
+    "ProxyConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 2301
+      },
+      "fields": {
+        "tag": {
+          "goField": "Tag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "transportLayer": {
+          "goField": "TransportLayerProxy",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "QuicParamsConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 654
+      },
+      "fields": {
+        "bbrProfile": {
+          "goField": "BbrProfile",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "brutalDown": {
+          "goField": "BrutalDown",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "brutalUp": {
+          "goField": "BrutalUp",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "congestion": {
+          "goField": "Congestion",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "brutal",
+            "force-brutal",
+            "reno",
+            "bbr"
+          ],
+          "applicability": "client"
+        },
+        "debug": {
+          "goField": "Debug",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "disablePathMTUDiscovery": {
+          "goField": "DisablePathMTUDiscovery",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "initConnectionReceiveWindow": {
+          "goField": "InitConnectionReceiveWindow",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "initStreamReceiveWindow": {
+          "goField": "InitStreamReceiveWindow",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "keepAlivePeriod": {
+          "goField": "KeepAlivePeriod",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "maxConnectionReceiveWindow": {
+          "goField": "MaxConnectionReceiveWindow",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "maxIdleTimeout": {
+          "goField": "MaxIdleTimeout",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "maxIncomingStreams": {
+          "goField": "MaxIncomingStreams",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "maxStreamReceiveWindow": {
+          "goField": "MaxStreamReceiveWindow",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "udpHop": {
+          "goField": "UdpHop",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/UdpHop",
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "REALITYConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client-and-server-shared-struct",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 787
+      },
+      "fields": {
+        "dest": {
+          "goField": "Dest",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "server-only-legacy-alias"
+        },
+        "fingerprint": {
+          "goField": "Fingerprint",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "limitFallbackDownload": {
+          "goField": "LimitFallbackDownload",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/LimitFallback",
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "limitFallbackUpload": {
+          "goField": "LimitFallbackUpload",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/LimitFallback",
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "masterKeyLog": {
+          "goField": "MasterKeyLog",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "excluded-client-unsafe"
+        },
+        "maxClientVer": {
+          "goField": "MaxClientVer",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "maxTimeDiff": {
+          "goField": "MaxTimeDiff",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "minClientVer": {
+          "goField": "MinClientVer",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "mldsa65Seed": {
+          "goField": "Mldsa65Seed",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "server-only",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "mldsa65Verify": {
+          "goField": "Mldsa65Verify",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "password": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "privateKey": {
+          "goField": "PrivateKey",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "server-only",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "publicKey": {
+          "goField": "PublicKey",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-legacy-alias",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "serverName": {
+          "goField": "ServerName",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "serverNames": {
+          "goField": "ServerNames",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "shortId": {
+          "goField": "ShortId",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "shortIds": {
+          "goField": "ShortIds",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "show": {
+          "goField": "Show",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "spiderX": {
+          "goField": "SpiderX",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "target": {
+          "goField": "Target",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "xver": {
+          "goField": "Xver",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        }
+      }
+    },
+    "RawFieldRule": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/router.go",
+        "line": 133
+      },
+      "fields": {
+        "attrs": {
+          "goField": "Attributes",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "domain": {
+          "goField": "Domain",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "domains": {
+          "goField": "Domains",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "inboundTag": {
+          "goField": "InboundTag",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "ip": {
+          "goField": "IP",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "localIP": {
+          "goField": "LocalIP",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "localPort": {
+          "goField": "LocalPort",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "network": {
+          "goField": "Network",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "process": {
+          "goField": "Process",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "excluded-ios-unavailable"
+        },
+        "protocol": {
+          "goField": "Protocols",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "source": {
+          "goField": "Source",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "sourceIP": {
+          "goField": "SourceIP",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "sourcePort": {
+          "goField": "SourcePort",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "user": {
+          "goField": "User",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "vlessRoute": {
+          "goField": "VlessRoute",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "webhook": {
+          "goField": "Webhook",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/WebhookRuleConfig",
+          "optional": true,
+          "applicability": "excluded-unsupported-network-probe"
+        }
+      },
+      "inherits": [
+        "#/definitions/RouterRule"
+      ],
+      "notes": [
+        "Function-local struct used by parseFieldRule; inherited RouterRule fields are valid JSON fields."
+      ]
+    },
+    "Realm": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1919
+      },
+      "fields": {
+        "stunServers": {
+          "goField": "StunServers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "tlsConfig": {
+          "goField": "TlsConfig",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/TLSConfig",
+          "optional": true,
+          "applicability": "client"
+        },
+        "url": {
+          "goField": "Url",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret"
+          ]
+        }
+      }
+    },
+    "RouterConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/router.go",
+        "line": 71
+      },
+      "fields": {
+        "balancers": {
+          "goField": "Balancers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/BalancingRule",
+            "goType": "BalancingRule"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "domainStrategy": {
+          "goField": "DomainStrategy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "enum": [
+            "AsIs",
+            "IPIfNonMatch",
+            "IPOnDemand"
+          ],
+          "applicability": "client",
+          "notes": [
+            "Comparison is case-insensitive; unknown values fall back to AsIs."
+          ]
+        },
+        "rules": {
+          "goField": "RuleList",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "any"
+            ],
+            "goType": "json.RawMessage"
+          },
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        }
+      }
+    },
+    "RouterRule": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/router.go",
+        "line": 120
+      },
+      "fields": {
+        "balancerTag": {
+          "goField": "BalancerTag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "outboundTag": {
+          "goField": "OutboundTag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "ruleTag": {
+          "goField": "RuleTag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "Salamander": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1806
+      },
+      "fields": {
+        "packetSize": {
+          "goField": "PacketSize",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "password": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        }
+      }
+    },
+    "ShadowsocksClientConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/shadowsocks.go",
+        "line": 190
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "method": {
+          "goField": "Cipher",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "aes-128-gcm",
+            "aead_aes_128_gcm",
+            "aes-256-gcm",
+            "aead_aes_256_gcm",
+            "chacha20-poly1305",
+            "aead_chacha20_poly1305",
+            "chacha20-ietf-poly1305",
+            "xchacha20-poly1305",
+            "aead_xchacha20_poly1305",
+            "xchacha20-ietf-poly1305",
+            "2022-blake3-aes-128-gcm",
+            "2022-blake3-aes-256-gcm",
+            "2022-blake3-chacha20-poly1305",
+            "none",
+            "plain"
+          ],
+          "applicability": "client",
+          "annotations": [
+            "security-critical"
+          ],
+          "notes": [
+            "The enum records values parsed by the pinned core and pinned SS2022 dependency; Hop rejects none/plain and applies its reviewed secure allowlist."
+          ]
+        },
+        "password": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "servers": {
+          "goField": "Servers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/ShadowsocksServerTarget",
+            "goType": "ShadowsocksServerTarget"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "ShadowsocksServerTarget": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/shadowsocks.go",
+        "line": 181
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "method": {
+          "goField": "Cipher",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "aes-128-gcm",
+            "aead_aes_128_gcm",
+            "aes-256-gcm",
+            "aead_aes_256_gcm",
+            "chacha20-poly1305",
+            "aead_chacha20_poly1305",
+            "chacha20-ietf-poly1305",
+            "xchacha20-poly1305",
+            "aead_xchacha20_poly1305",
+            "xchacha20-ietf-poly1305",
+            "2022-blake3-aes-128-gcm",
+            "2022-blake3-aes-256-gcm",
+            "2022-blake3-chacha20-poly1305",
+            "none",
+            "plain"
+          ],
+          "applicability": "client"
+        },
+        "password": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "ShadowsocksUserConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/shadowsocks.go",
+        "line": 34
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "method": {
+          "goField": "Cipher",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "password": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "SniffingConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/xray.go",
+        "line": 54
+      },
+      "fields": {
+        "destOverride": {
+          "goField": "DestOverride",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "domainsExcluded": {
+          "goField": "DomainsExcluded",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "enabled": {
+          "goField": "Enabled",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "ipsExcluded": {
+          "goField": "IPsExcluded",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "metadataOnly": {
+          "goField": "MetadataOnly",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "routeOnly": {
+          "goField": "RouteOnly",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "SocketConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1066
+      },
+      "fields": {
+        "acceptProxyProtocol": {
+          "goField": "AcceptProxyProtocol",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "addressPortStrategy": {
+          "goField": "AddressPortStrategy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "none",
+            "srvportonly",
+            "srvaddressonly",
+            "srvportandaddress",
+            "txtportonly",
+            "txtaddressonly",
+            "txtportandaddress"
+          ],
+          "applicability": "client"
+        },
+        "customSockopt": {
+          "goField": "CustomSockopt",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/CustomSockoptConfig",
+            "goType": "CustomSockoptConfig"
+          },
+          "optional": false,
+          "applicability": "excluded-ios-unsafe"
+        },
+        "dialerProxy": {
+          "goField": "DialerProxy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "domainStrategy": {
+          "goField": "DomainStrategy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "asis",
+            "useip",
+            "useipv4",
+            "useipv6",
+            "useipv4v6",
+            "useipv6v4",
+            "forceip",
+            "forceipv4",
+            "forceipv6",
+            "forceipv4v6",
+            "forceipv6v4"
+          ],
+          "applicability": "client"
+        },
+        "happyEyeballs": {
+          "goField": "HappyEyeballsSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/HappyEyeballsConfig",
+          "optional": true,
+          "applicability": "client"
+        },
+        "interface": {
+          "goField": "Interface",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "mark": {
+          "goField": "Mark",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "penetrate": {
+          "goField": "Penetrate",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tcpCongestion": {
+          "goField": "TCPCongestion",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tcpFastOpen": {
+          "goField": "TFO",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tcpKeepAliveIdle": {
+          "goField": "TCPKeepAliveIdle",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tcpKeepAliveInterval": {
+          "goField": "TCPKeepAliveInterval",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tcpMaxSeg": {
+          "goField": "TCPMaxSeg",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tcpMptcp": {
+          "goField": "TcpMptcp",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tcpUserTimeout": {
+          "goField": "TCPUserTimeout",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tcpWindowClamp": {
+          "goField": "TCPWindowClamp",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "tproxy": {
+          "goField": "TProxy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "tproxy",
+            "redirect"
+          ],
+          "applicability": "client"
+        },
+        "trustedXForwardedFor": {
+          "goField": "TrustedXForwardedFor",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "v6only": {
+          "goField": "V6only",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "SocksAccount": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/socks.go",
+        "line": 13
+      },
+      "fields": {
+        "pass": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret"
+          ]
+        },
+        "user": {
+          "goField": "Username",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "SocksClientConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/socks.go",
+        "line": 77
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "pass": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret"
+          ]
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "servers": {
+          "goField": "Servers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/SocksRemoteConfig",
+            "goType": "SocksRemoteConfig"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "user": {
+          "goField": "Username",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "SocksRemoteConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/socks.go",
+        "line": 71
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "users": {
+          "goField": "Users",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "any"
+            ],
+            "goType": "json.RawMessage"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      },
+      "notes": [
+        "users entries use SocksAccount fields."
+      ]
+    },
+    "SplitHTTPConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 211
+      },
+      "fields": {
+        "downloadSettings": {
+          "goField": "DownloadSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/StreamConfig",
+          "optional": true,
+          "applicability": "client"
+        },
+        "extra": {
+          "goField": "Extra",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "headers": {
+          "goField": "Headers",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "host": {
+          "goField": "Host",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "mode": {
+          "goField": "Mode",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "auto",
+            "packet-up",
+            "stream-up",
+            "stream-one"
+          ],
+          "applicability": "client"
+        },
+        "noGRPCHeader": {
+          "goField": "NoGRPCHeader",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "noSSEHeader": {
+          "goField": "NoSSEHeader",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "path": {
+          "goField": "Path",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "scMaxBufferedPosts": {
+          "goField": "ScMaxBufferedPosts",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "scMaxEachPostBytes": {
+          "goField": "ScMaxEachPostBytes",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "scMinPostsIntervalMs": {
+          "goField": "ScMinPostsIntervalMs",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "scStreamUpServerSecs": {
+          "goField": "ScStreamUpServerSecs",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "seqKey": {
+          "goField": "SeqKey",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "seqPlacement": {
+          "goField": "SeqPlacement",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "path",
+            "cookie",
+            "header",
+            "query"
+          ],
+          "applicability": "client"
+        },
+        "serverMaxHeaderBytes": {
+          "goField": "ServerMaxHeaderBytes",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "sessionIDKey": {
+          "goField": "SessionIDKey",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "sessionIDLength": {
+          "goField": "SessionIDLength",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "sessionIDPlacement": {
+          "goField": "SessionIDPlacement",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "path",
+            "cookie",
+            "header",
+            "query"
+          ],
+          "applicability": "client"
+        },
+        "sessionIDTable": {
+          "goField": "SessionIDTable",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "uplinkChunkSize": {
+          "goField": "UplinkChunkSize",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "uplinkDataKey": {
+          "goField": "UplinkDataKey",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "uplinkDataPlacement": {
+          "goField": "UplinkDataPlacement",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "auto",
+            "body",
+            "cookie",
+            "header"
+          ],
+          "applicability": "client"
+        },
+        "uplinkHTTPMethod": {
+          "goField": "UplinkHTTPMethod",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "xPaddingBytes": {
+          "goField": "XPaddingBytes",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "xPaddingHeader": {
+          "goField": "XPaddingHeader",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "xPaddingKey": {
+          "goField": "XPaddingKey",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "xPaddingMethod": {
+          "goField": "XPaddingMethod",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "repeat-x",
+            "tokenish"
+          ],
+          "applicability": "client"
+        },
+        "xPaddingObfsMode": {
+          "goField": "XPaddingObfsMode",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "xPaddingPlacement": {
+          "goField": "XPaddingPlacement",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "cookie",
+            "header",
+            "query",
+            "queryInHeader"
+          ],
+          "applicability": "client"
+        },
+        "xmux": {
+          "goField": "Xmux",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/XmuxConfig",
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        }
+      }
+    },
+    "StatsConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/xray.go",
+        "line": 338
+      }
+    },
+    "StrategyConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/router.go",
+        "line": 16
+      },
+      "fields": {
+        "settings": {
+          "goField": "Settings",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "random",
+            "leastping",
+            "roundrobin",
+            "leastload"
+          ],
+          "applicability": "client"
+        }
+      }
+    },
+    "StreamConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client-and-server-shared-struct",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 2037
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "hop-typed"
+        },
+        "finalmask": {
+          "goField": "FinalMask",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/FinalMask",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "grpcSettings": {
+          "goField": "GRPCSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/GRPCConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "httpupgradeSettings": {
+          "goField": "HTTPUPGRADESettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/HttpUpgradeConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "hysteriaSettings": {
+          "goField": "HysteriaSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/HysteriaConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "kcpSettings": {
+          "goField": "KCPSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/KCPConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "network": {
+          "goField": "Network",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "enum": [
+            "raw",
+            "tcp",
+            "xhttp",
+            "splithttp",
+            "kcp",
+            "mkcp",
+            "grpc",
+            "ws",
+            "websocket",
+            "httpupgrade",
+            "hysteria"
+          ],
+          "applicability": "hop-typed",
+          "notes": [
+            "h2, h3, http, and quic are parsed only to return a removed-feature error."
+          ]
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "hop-typed"
+        },
+        "rawSettings": {
+          "goField": "RAWSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/TCPConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "realitySettings": {
+          "goField": "REALITYSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/REALITYConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "security": {
+          "goField": "Security",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "none",
+            "tls",
+            "reality"
+          ],
+          "applicability": "hop-typed",
+          "notes": [
+            "xtls is parsed only to return a removed-feature error."
+          ]
+        },
+        "sockopt": {
+          "goField": "SocketSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/SocketConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "splithttpSettings": {
+          "goField": "SplitHTTPSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/SplitHTTPConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "tcpSettings": {
+          "goField": "TCPSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/TCPConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "tlsSettings": {
+          "goField": "TLSSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/TLSConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "wsSettings": {
+          "goField": "WSSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/WebSocketConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "xhttpSettings": {
+          "goField": "XHTTPSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/SplitHTTPConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        }
+      }
+    },
+    "Sudoku": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1827
+      },
+      "fields": {
+        "ascii": {
+          "goField": "ASCII",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "customTable": {
+          "goField": "CustomTable",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "customTables": {
+          "goField": "CustomTables",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "custom_table": {
+          "goField": "LegacyCustomTable",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "custom_tables": {
+          "goField": "LegacyCustomSets",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "paddingMax": {
+          "goField": "PaddingMax",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "paddingMin": {
+          "goField": "PaddingMin",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "padding_max": {
+          "goField": "LegacyPaddingMax",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "padding_min": {
+          "goField": "LegacyPaddingMin",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "password": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        }
+      }
+    },
+    "SystemPolicy": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/policy.go",
+        "line": 55
+      },
+      "fields": {
+        "statsInboundDownlink": {
+          "goField": "StatsInboundDownlink",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "excluded-app-telemetry"
+        },
+        "statsInboundUplink": {
+          "goField": "StatsInboundUplink",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "excluded-app-telemetry"
+        },
+        "statsOutboundDownlink": {
+          "goField": "StatsOutboundDownlink",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "excluded-app-telemetry"
+        },
+        "statsOutboundUplink": {
+          "goField": "StatsOutboundUplink",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "excluded-app-telemetry"
+        }
+      }
+    },
+    "TCPConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client-and-server-shared-struct",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 108
+      },
+      "fields": {
+        "acceptProxyProtocol": {
+          "goField": "AcceptProxyProtocol",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "header": {
+          "goField": "HeaderConfig",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        }
+      }
+    },
+    "TCPItem": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1265
+      },
+      "fields": {
+        "capture": {
+          "goField": "Capture",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "delay": {
+          "goField": "Delay",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "packet": {
+          "goField": "Packet",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "rand": {
+          "goField": "Rand",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "randRange": {
+          "goField": "RandRange",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "reuse": {
+          "goField": "Reuse",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "transform": {
+          "goField": "Transform",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/CustomTransform",
+          "optional": true,
+          "applicability": "client"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "TLSCertConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client-and-server-shared-struct",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 602
+      },
+      "fields": {
+        "buildChain": {
+          "goField": "BuildChain",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "certificate": {
+          "goField": "CertStr",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "certificateFile": {
+          "goField": "CertFile",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "excluded-external-file"
+        },
+        "key": {
+          "goField": "KeyStr",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "secret"
+          ]
+        },
+        "keyFile": {
+          "goField": "KeyFile",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "excluded-external-file",
+          "annotations": [
+            "secret"
+          ]
+        },
+        "ocspStapling": {
+          "goField": "OcspStapling",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "oneTimeLoading": {
+          "goField": "OneTimeLoading",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "usage": {
+          "goField": "Usage",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "encipherment",
+            "verify",
+            "issue"
+          ],
+          "applicability": "client-and-server-shared-struct"
+        }
+      }
+    },
+    "TLSConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client-and-server-shared-struct",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 671
+      },
+      "fields": {
+        "allowInsecure": {
+          "goField": "AllowInsecure",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "excluded-removed-feature",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "alpn": {
+          "goField": "ALPN",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "certificates": {
+          "goField": "Certs",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/TLSCertConfig",
+            "goType": "TLSCertConfig"
+          },
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "cipherSuites": {
+          "goField": "CipherSuites",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "curvePreferences": {
+          "goField": "CurvePreferences",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "disableSystemRoot": {
+          "goField": "DisableSystemRoot",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "echConfigList": {
+          "goField": "ECHConfigList",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "echServerKeys": {
+          "goField": "ECHServerKeys",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "server-only",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "echSockopt": {
+          "goField": "ECHSocketSettings",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/SocketConfig",
+          "optional": true,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "enableSessionResumption": {
+          "goField": "EnableSessionResumption",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "fingerprint": {
+          "goField": "Fingerprint",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "masterKeyLog": {
+          "goField": "MasterKeyLog",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "excluded-client-unsafe"
+        },
+        "maxVersion": {
+          "goField": "MaxVersion",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "minVersion": {
+          "goField": "MinVersion",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "pinnedPeerCertSha256": {
+          "goField": "PinnedPeerCertSha256",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "rejectUnknownSni": {
+          "goField": "RejectUnknownSNI",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "serverName": {
+          "goField": "ServerName",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "verifyPeerCertByName": {
+          "goField": "VerifyPeerCertByName",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct",
+          "annotations": [
+            "security-critical"
+          ]
+        }
+      }
+    },
+    "TrojanClientConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/trojan.go",
+        "line": 31
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "flow": {
+          "goField": "Flow",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "password": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "servers": {
+          "goField": "Servers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/TrojanServerTarget",
+            "goType": "TrojanServerTarget"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "TrojanServerTarget": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/trojan.go",
+        "line": 21
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "flow": {
+          "goField": "Flow",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "password": {
+          "goField": "Password",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "UDPItem": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1521
+      },
+      "fields": {
+        "capture": {
+          "goField": "Capture",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "packet": {
+          "goField": "Packet",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "rand": {
+          "goField": "Rand",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "randRange": {
+          "goField": "RandRange",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "reuse": {
+          "goField": "Reuse",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "transform": {
+          "goField": "Transform",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/CustomTransform",
+          "optional": true,
+          "applicability": "client"
+        },
+        "type": {
+          "goField": "Type",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "UdpHop": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 528
+      },
+      "fields": {
+        "interval": {
+          "goField": "Interval",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "ports": {
+          "goField": "PortList",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "VLessOutboundConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/vless.go",
+        "line": 245
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "encryption": {
+          "goField": "Encryption",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "flow": {
+          "goField": "Flow",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "xtls-rprx-vision",
+            "xtls-rprx-vision-udp443"
+          ],
+          "applicability": "client",
+          "annotations": [
+            "security-critical"
+          ]
+        },
+        "id": {
+          "goField": "Id",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "reverse": {
+          "goField": "Reverse",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/VLessReverseConfig",
+          "optional": true,
+          "applicability": "excluded-reverse-proxy"
+        },
+        "seed": {
+          "goField": "Seed",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "testpre": {
+          "goField": "Testpre",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "testseed": {
+          "goField": "Testseed",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "integer"
+            ],
+            "goType": "uint32"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "vnext": {
+          "goField": "Vnext",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/VLessOutboundVnext",
+            "goType": "VLessOutboundVnext"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "VLessOutboundVnext": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/vless.go",
+        "line": 239
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "users": {
+          "goField": "Users",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "any"
+            ],
+            "goType": "json.RawMessage"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      },
+      "notes": [
+        "users entries are Xray VLESS account JSON; Hop accepts the flat client fields and preserves reviewed long-tail settings."
+      ]
+    },
+    "VLessReverseConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/vless.go",
+        "line": 217
+      },
+      "fields": {
+        "sniffing": {
+          "goField": "Sniffing",
+          "jsonTypes": [
+            "object"
+          ],
+          "$ref": "#/definitions/SniffingConfig",
+          "optional": true,
+          "applicability": "client"
+        },
+        "tag": {
+          "goField": "Tag",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "VMessAccount": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/vmess.go",
+        "line": 18
+      },
+      "fields": {
+        "experiments": {
+          "goField": "Experiments",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "id": {
+          "goField": "ID",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "security": {
+          "goField": "Security",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "aes-128-gcm",
+            "chacha20-poly1305",
+            "auto",
+            "none",
+            "zero"
+          ],
+          "applicability": "client",
+          "notes": [
+            "Hop policy permits only auto, aes-128-gcm, and chacha20-poly1305."
+          ]
+        }
+      }
+    },
+    "VMessOutboundConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/vmess.go",
+        "line": 115
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "experiments": {
+          "goField": "Experiments",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "id": {
+          "goField": "ID",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "security": {
+          "goField": "Security",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "aes-128-gcm",
+            "chacha20-poly1305",
+            "auto",
+            "none",
+            "zero"
+          ],
+          "applicability": "client",
+          "annotations": [
+            "security-critical"
+          ],
+          "notes": [
+            "Hop policy permits only auto, aes-128-gcm, and chacha20-poly1305."
+          ]
+        },
+        "vnext": {
+          "goField": "Receivers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/VMessOutboundTarget",
+            "goType": "VMessOutboundTarget"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "VMessOutboundTarget": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/vmess.go",
+        "line": 109
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "port": {
+          "goField": "Port",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "users": {
+          "goField": "Users",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "any"
+            ],
+            "goType": "json.RawMessage"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      },
+      "notes": [
+        "users entries use VMessAccount fields."
+      ]
+    },
+    "VersionConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/version.go",
+        "line": 10
+      },
+      "fields": {
+        "max": {
+          "goField": "MaxVersion",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "min": {
+          "goField": "MinVersion",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "WebSocketConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client-and-server-shared-struct",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 133
+      },
+      "fields": {
+        "acceptProxyProtocol": {
+          "goField": "AcceptProxyProtocol",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "server-only"
+        },
+        "headers": {
+          "goField": "Headers",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "heartbeatPeriod": {
+          "goField": "HeartbeatPeriod",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "host": {
+          "goField": "Host",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        },
+        "path": {
+          "goField": "Path",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client-and-server-shared-struct"
+        }
+      }
+    },
+    "WebhookRuleConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/router.go",
+        "line": 126
+      },
+      "fields": {
+        "deduplication": {
+          "goField": "Deduplication",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "headers": {
+          "goField": "Headers",
+          "jsonTypes": [
+            "object"
+          ],
+          "additionalProperties": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "url": {
+          "goField": "URL",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "WireGuardConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/wireguard.go",
+        "line": 59
+      },
+      "fields": {
+        "address": {
+          "goField": "Address",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "domainStrategy": {
+          "goField": "DomainStrategy",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "enum": [
+            "",
+            "forceip",
+            "forceipv4",
+            "forceipv6",
+            "forceipv4v6",
+            "forceipv6v4"
+          ],
+          "applicability": "client"
+        },
+        "mtu": {
+          "goField": "MTU",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "noKernelTun": {
+          "goField": "NoKernelTun",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "peers": {
+          "goField": "Peers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "$ref": "#/definitions/WireGuardPeerConfig",
+            "goType": "WireGuardPeerConfig"
+          },
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "reserved": {
+          "goField": "Reserved",
+          "jsonTypes": [
+            "array",
+            "string"
+          ],
+          "items": {
+            "jsonTypes": [
+              "integer"
+            ],
+            "goType": "byte"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "secretKey": {
+          "goField": "SecretKey",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        }
+      }
+    },
+    "WireGuardPeerConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/wireguard.go",
+        "line": 17
+      },
+      "fields": {
+        "allowedIPs": {
+          "goField": "AllowedIPs",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "email": {
+          "goField": "Email",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "endpoint": {
+          "goField": "Endpoint",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "keepAlive": {
+          "goField": "KeepAlive",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "level": {
+          "goField": "Level",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "preSharedKey": {
+          "goField": "PreSharedKey",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "secret",
+            "security-critical"
+          ]
+        },
+        "publicKey": {
+          "goField": "PublicKey",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "Xdns": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1871
+      },
+      "fields": {
+        "domain": {
+          "goField": "Domain",
+          "jsonTypes": [
+            "any"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "domains": {
+          "goField": "Domains",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        },
+        "resolvers": {
+          "goField": "Resolvers",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "Xicmp": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 1899
+      },
+      "fields": {
+        "dgram": {
+          "goField": "DGRAM",
+          "jsonTypes": [
+            "boolean"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "ips": {
+          "goField": "IPs",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "string"
+          },
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "XmuxConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/transport_internet.go",
+        "line": 244
+      },
+      "fields": {
+        "cMaxReuseTimes": {
+          "goField": "CMaxReuseTimes",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "hKeepAlivePeriod": {
+          "goField": "HKeepAlivePeriod",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "hMaxRequestTimes": {
+          "goField": "HMaxRequestTimes",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "hMaxReusableSecs": {
+          "goField": "HMaxReusableSecs",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "maxConcurrency": {
+          "goField": "MaxConcurrency",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        },
+        "maxConnections": {
+          "goField": "MaxConnections",
+          "jsonTypes": [
+            "integer",
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client",
+          "annotations": [
+            "memory-sensitive"
+          ]
+        }
+      }
+    },
+    "healthCheckSettings": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/router_strategy.go",
+        "line": 47
+      },
+      "fields": {
+        "connectivity": {
+          "goField": "Connectivity",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "destination": {
+          "goField": "Destination",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "httpMethod": {
+          "goField": "HttpMethod",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "interval": {
+          "goField": "Interval",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "sampling": {
+          "goField": "SamplingCount",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": false,
+          "applicability": "client"
+        },
+        "timeout": {
+          "goField": "Timeout",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": false,
+          "applicability": "client"
+        }
+      }
+    },
+    "strategyEmptyConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/router_strategy.go",
+        "line": 27
+      }
+    },
+    "strategyLeastLoadConfig": {
+      "jsonTypes": [
+        "object"
+      ],
+      "applicability": "client",
+      "source": {
+        "file": "infra/conf/router_strategy.go",
+        "line": 33
+      },
+      "fields": {
+        "baselines": {
+          "goField": "Baselines",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "string"
+            ],
+            "goType": "duration.Duration"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "costs": {
+          "goField": "Costs",
+          "jsonTypes": [
+            "array"
+          ],
+          "items": {
+            "jsonTypes": [
+              "object"
+            ],
+            "goType": "router.StrategyWeight"
+          },
+          "optional": true,
+          "applicability": "client"
+        },
+        "expected": {
+          "goField": "Expected",
+          "jsonTypes": [
+            "integer"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "maxRTT": {
+          "goField": "MaxRTT",
+          "jsonTypes": [
+            "string"
+          ],
+          "optional": true,
+          "applicability": "client"
+        },
+        "tolerance": {
+          "goField": "Tolerance",
+          "jsonTypes": [
+            "number"
+          ],
+          "optional": true,
+          "applicability": "client"
+        }
+      }
+    }
+  },
+  "annotations": {
+    "secretPaths": [
+      "/outbounds/*/settings/encryption",
+      "/outbounds/*/settings/id",
+      "/outbounds/*/settings/pass",
+      "/outbounds/*/settings/password",
+      "/outbounds/*/settings/peers/*/preSharedKey",
+      "/outbounds/*/settings/secretKey",
+      "/outbounds/*/settings/seed",
+      "/outbounds/*/settings/servers/*/password",
+      "/outbounds/*/settings/servers/*/users/*/pass",
+      "/outbounds/*/settings/servers/*/users/*/password",
+      "/outbounds/*/settings/vnext/*/users/*/id",
+      "/outbounds/*/streamSettings/finalmask/*/*/settings/password",
+      "/outbounds/*/streamSettings/finalmask/udp/*/settings/url",
+      "/outbounds/*/streamSettings/hysteriaSettings/auth",
+      "/outbounds/*/streamSettings/realitySettings/mldsa65Seed",
+      "/outbounds/*/streamSettings/realitySettings/privateKey",
+      "/outbounds/*/streamSettings/tlsSettings/certificates/*/key",
+      "/outbounds/*/streamSettings/tlsSettings/certificates/*/keyFile",
+      "/outbounds/*/streamSettings/tlsSettings/echServerKeys"
+    ],
+    "securityCriticalPaths": [
+      "/outbounds/*/settings/encryption",
+      "/outbounds/*/settings/flow",
+      "/outbounds/*/settings/id",
+      "/outbounds/*/settings/method",
+      "/outbounds/*/settings/password",
+      "/outbounds/*/settings/peers/*/preSharedKey",
+      "/outbounds/*/settings/secretKey",
+      "/outbounds/*/settings/security",
+      "/outbounds/*/settings/seed",
+      "/outbounds/*/settings/servers/*/password",
+      "/outbounds/*/settings/servers/*/users/*/password",
+      "/outbounds/*/settings/vnext/*/users/*/id",
+      "/outbounds/*/streamSettings/finalmask/*/*/settings/password",
+      "/outbounds/*/streamSettings/hysteriaSettings/auth",
+      "/outbounds/*/streamSettings/realitySettings/fingerprint",
+      "/outbounds/*/streamSettings/realitySettings/mldsa65Seed",
+      "/outbounds/*/streamSettings/realitySettings/mldsa65Verify",
+      "/outbounds/*/streamSettings/realitySettings/password",
+      "/outbounds/*/streamSettings/realitySettings/privateKey",
+      "/outbounds/*/streamSettings/realitySettings/publicKey",
+      "/outbounds/*/streamSettings/realitySettings/serverName",
+      "/outbounds/*/streamSettings/realitySettings/shortId",
+      "/outbounds/*/streamSettings/tlsSettings/allowInsecure",
+      "/outbounds/*/streamSettings/tlsSettings/cipherSuites",
+      "/outbounds/*/streamSettings/tlsSettings/curvePreferences",
+      "/outbounds/*/streamSettings/tlsSettings/disableSystemRoot",
+      "/outbounds/*/streamSettings/tlsSettings/echConfigList",
+      "/outbounds/*/streamSettings/tlsSettings/echServerKeys",
+      "/outbounds/*/streamSettings/tlsSettings/fingerprint",
+      "/outbounds/*/streamSettings/tlsSettings/maxVersion",
+      "/outbounds/*/streamSettings/tlsSettings/minVersion",
+      "/outbounds/*/streamSettings/tlsSettings/pinnedPeerCertSha256",
+      "/outbounds/*/streamSettings/tlsSettings/serverName",
+      "/outbounds/*/streamSettings/tlsSettings/verifyPeerCertByName"
+    ],
+    "memorySensitivePaths": [
+      "/burstObservatory/subjectSelector",
+      "/dns/servers",
+      "/fakeDns/*/poolSize",
+      "/observatory/subjectSelector",
+      "/outbounds/*/mux/concurrency",
+      "/outbounds/*/mux/xudpConcurrency",
+      "/outbounds/*/settings/peers",
+      "/outbounds/*/streamSettings/finalmask/quicParams/initConnectionReceiveWindow",
+      "/outbounds/*/streamSettings/finalmask/quicParams/initStreamReceiveWindow",
+      "/outbounds/*/streamSettings/finalmask/quicParams/maxConnectionReceiveWindow",
+      "/outbounds/*/streamSettings/finalmask/quicParams/maxIncomingStreams",
+      "/outbounds/*/streamSettings/finalmask/quicParams/maxStreamReceiveWindow",
+      "/outbounds/*/streamSettings/finalmask/tcp",
+      "/outbounds/*/streamSettings/finalmask/udp",
+      "/outbounds/*/streamSettings/grpcSettings/initial_windows_size",
+      "/outbounds/*/streamSettings/kcpSettings/downlinkCapacity",
+      "/outbounds/*/streamSettings/kcpSettings/maxSendingWindow",
+      "/outbounds/*/streamSettings/kcpSettings/mtu",
+      "/outbounds/*/streamSettings/kcpSettings/uplinkCapacity",
+      "/outbounds/*/streamSettings/xhttpSettings/scMaxBufferedPosts",
+      "/outbounds/*/streamSettings/xhttpSettings/scMaxEachPostBytes",
+      "/outbounds/*/streamSettings/xhttpSettings/uplinkChunkSize",
+      "/outbounds/*/streamSettings/xhttpSettings/xPaddingBytes",
+      "/outbounds/*/streamSettings/xhttpSettings/xmux",
+      "/outbounds/*/streamSettings/xhttpSettings/xmux/maxConcurrency",
+      "/outbounds/*/streamSettings/xhttpSettings/xmux/maxConnections",
+      "/policy/levels/*/bufferSize",
+      "/routing/balancers/*/selector",
+      "/routing/rules"
+    ],
+    "hopManagedPaths": [
+      "/inbounds",
+      "/log",
+      "/outbounds/*/protocol",
+      "/outbounds/*/streamSettings/address",
+      "/outbounds/*/streamSettings/network",
+      "/outbounds/*/streamSettings/port",
+      "/outbounds/*/streamSettings/security",
+      "/outbounds/*/tag"
+    ],
+    "rejectedPaths": [
+      {
+        "path": "/api",
+        "reason": "API listeners are outside Hop's client schema."
+      },
+      {
+        "path": "/geodata/assets/*/file",
+        "reason": "Asset paths must resolve to a Hop-verified local asset."
+      },
+      {
+        "path": "/geodata/assets/*/url",
+        "reason": "Hop permits only verified local geodata; runtime asset downloads are forbidden."
+      },
+      {
+        "path": "/inbounds",
+        "reason": "Arbitrary listeners are forbidden; Hop generates exactly one TUN inbound."
+      },
+      {
+        "path": "/log/access",
+        "reason": "The core may not write arbitrary files; extension logging is bounded and sanitized."
+      },
+      {
+        "path": "/log/error",
+        "reason": "The core may not write arbitrary files; extension logging is bounded and sanitized."
+      },
+      {
+        "path": "/metrics",
+        "reason": "Metrics listeners are outside Hop's client schema."
+      },
+      {
+        "path": "/outbounds/*/settings/reverse",
+        "reason": "VLESS reverse proxy is outside Hop's client schema."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/hysteriaSettings/masquerade",
+        "reason": "Hysteria server masquerade settings are outside client schema."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/kcpSettings/header",
+        "reason": "The pinned core removed legacy mKCP headers; use FinalMask instead."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/kcpSettings/seed",
+        "reason": "The pinned core removed legacy mKCP seed obfuscation; use FinalMask instead."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/realitySettings/masterKeyLog",
+        "reason": "REALITY master-key logging is forbidden."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/realitySettings/privateKey",
+        "reason": "Server-only REALITY fields are forbidden."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/customSockopt",
+        "reason": "Arbitrary platform socket options are unsafe and unavailable on iOS."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/tlsSettings/allowInsecure",
+        "reason": "Removed by Xray v26.6.27 and forbidden by Hop policy."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/tlsSettings/certificates/*/certificateFile",
+        "reason": "Unverified external file reads are forbidden."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/tlsSettings/certificates/*/keyFile",
+        "reason": "Unverified external file reads and key files are forbidden."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/tlsSettings/masterKeyLog",
+        "reason": "TLS master-key logging is forbidden."
+      },
+      {
+        "path": "/policy/levels/*/statsUserDownlink",
+        "reason": "Runtime traffic telemetry is not part of Hop's client schema."
+      },
+      {
+        "path": "/policy/levels/*/statsUserOnline",
+        "reason": "Runtime traffic telemetry is not part of Hop's client schema."
+      },
+      {
+        "path": "/policy/levels/*/statsUserUplink",
+        "reason": "Runtime traffic telemetry is not part of Hop's client schema."
+      },
+      {
+        "path": "/policy/system",
+        "reason": "Xray system policy contains only runtime traffic telemetry flags, which Hop does not expose."
+      },
+      {
+        "path": "/reverse",
+        "reason": "Reverse proxy is outside Hop's client schema."
+      },
+      {
+        "path": "/routing/rules/*/process",
+        "reason": "Per-process routing cannot be reproduced by Hop's iOS packet tunnel."
+      },
+      {
+        "path": "/routing/rules/*/webhook",
+        "reason": "Unsupported network probes and callbacks are forbidden."
+      },
+      {
+        "path": "/stats",
+        "reason": "Runtime traffic telemetry is not part of Hop's client schema."
+      },
+      {
+        "path": "/transport",
+        "reason": "Deprecated global transport configuration is rejected by the pinned core."
+      }
+    ]
+  }
+}

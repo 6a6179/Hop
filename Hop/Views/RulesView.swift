@@ -48,7 +48,6 @@ struct RulesView: View {
                 } label: {
                     Label("Add Configuration", systemImage: "plus")
                 }
-                .buttonStyle(.glass)
             }
         }
         .sheet(item: $editor) { state in
@@ -150,7 +149,6 @@ private struct ConfigurationEditorView: View {
                     } label: {
                         Label("Add Rule", systemImage: "plus")
                     }
-                    .buttonStyle(.glass)
                     .controlSize(.small)
                 } header: {
                     Text("Rules")

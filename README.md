@@ -1,19 +1,22 @@
 # Hop
 
-Hop is an open-source iOS 26+ proxy client built with Swift 6.2, SwiftUI, a Network Extension packet tunnel, and [sing-box](https://github.com/SagerNet/sing-box) libbox `v1.13.12`.
+Hop is an open-source iOS 26+ proxy client built with Swift 6.2, SwiftUI, a Network Extension packet tunnel, and a client-only [Xray-core](https://github.com/XTLS/Xray-core) `v26.6.27` bridge.
 
 There is no App Store build. Use the unsigned IPA from [Releases](../../releases), then re-sign it, or build it yourself.
 
 ## Features
 
-- Protocols: VLESS with REALITY, Trojan, Hysteria2, TUIC, Shadowsocks, VMess, HTTP, SOCKS, WireGuard, AnyTLS
-- Transports: TCP, WebSocket, gRPC, HTTPUpgrade, QUIC
+- Protocols: VLESS (including ML-KEM Encryption/Auth), REALITY with ML-DSA-65 verification, Trojan, Hysteria2, Shadowsocks/SS2022, VMess AEAD, HTTP, SOCKS, and WireGuard
+- Transports: RAW, WebSocket, gRPC, HTTPUpgrade, XHTTP, mKCP, Hysteria, FinalMask, mux/XUDP, and supported socket options
+- TLS: certificate SHA-256 pins, verification names, ECH, post-quantum curve preferences, version bounds, ALPN, session resumption, and fingerprints
+- Advanced configuration: versioned, schema-checked client options for DNS/FakeDNS, routing, policy, balancing, observatory, and local geodata
 - Import: share links, plain/base64 subscriptions, and `.conf` files by paste, QR scan, or URL scheme
 - Export: per-node share links by copy, share sheet, or QR
 - Groups: manual select and URL-test
-- Routing: domain, suffix, keyword, regex, IP CIDR, ports, geosite/geoip rule sets, network type, and Wi-Fi SSID
+- Routing: domain, suffix, keyword, regex, IP CIDR, ports, protocol, and verified local geosite/geoip data
 - Tunnel: kill switch, Connect On Demand, DoH presets, strict route, and protocol sniffing
-- Tools: traffic and connection telemetry, node search, latency tests, logs, and subscription refresh
+- Tools: node search, latency tests, logs, and subscription refresh
+- iOS safety: a hard 50 MiB Network Extension budget with preflight limits and a runtime memory watchdog
 
 ## Install
 
@@ -46,7 +49,7 @@ Hop registers:
 
 ```text
 hop
-vless vmess trojan ss ssr hysteria2 hy2 tuic socks socks5
+vless vmess trojan ss hysteria2 hy2 socks socks5 wireguard wg
 ```
 
 Examples:
@@ -66,12 +69,13 @@ Requirements:
 
 - Xcode
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-- Go 1.23 or newer, only needed to rebuild libbox
+- Go 1.26.5, only needed to rebuild the pinned Xray bridge
 
 Build:
 
 ```sh
-./scripts/build-libbox.sh
+./scripts/build-libxray.sh
+./scripts/verify-geodata.sh
 xcodegen generate
 xcodebuild -project Hop.xcodeproj -scheme Hop \
   -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
@@ -84,7 +88,7 @@ xcodebuild test -project Hop.xcodeproj -scheme Hop \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' CODE_SIGNING_ALLOWED=NO
 ```
 
-`scripts/build-libbox.sh` builds sing-box from a pinned tag and commit. `scripts/verify-libbox.sh` checks the vendored framework against `Frameworks/Libbox.xcframework.sha256` during builds.
+`scripts/build-libxray.sh` builds the client-only bridge from pinned Xray-core and Go Mobile revisions. `scripts/verify-libxray.sh` checks the vendored framework against `Frameworks/LibXray.xcframework.sha256` during builds. The app links the bridge only for exact configuration validation; the Network Extension owns the single runtime core instance.
 
 Unsigned IPA packaging is in [`.github/workflows/unsigned-ipa.yml`](.github/workflows/unsigned-ipa.yml). A local packaging command is documented in [`AGENTS.md`](AGENTS.md).
 
@@ -93,7 +97,7 @@ Unsigned IPA packaging is in [`.github/workflows/unsigned-ipa.yml`](.github/work
 - Secrets are stored in the iOS Keychain, not in the app state file.
 - Imports and subscriptions are untrusted input. They are size-limited, sanitized, and previewed before saving.
 - Subscription refreshes cannot silently weaken an existing profile's TLS posture.
-- Nodes that disable TLS verification require an explicit confirmation before saving.
+- Xray configurations that disable TLS verification are rejected; legacy nodes remain blocked until normal verification or certificate pins are selected.
 - Tunnel config passed through the shared App Group is authenticated before the extension resolves secret references.
 - Logs strip newlines and redact import-controlled warnings to avoid forged log entries and credential leaks.
 - Exported share links can contain credentials; only create or share them intentionally.

@@ -11,6 +11,10 @@ struct ProfilesView: View {
     /// applied only after the user confirms.
     @State private var pendingInsecureRefresh: PendingInsecureRefresh?
     @State private var showInsecureRefreshConfirmation = false
+    /// A manual refresh held back because a matched node changed pinned TLS,
+    /// REALITY, PQ, or VLESS authentication settings.
+    @State private var pendingSecurityRefresh: PendingSecurityRefresh?
+    @State private var showSecurityRefreshConfirmation = false
     @State private var shareQRItem: ShareQRItem?
 
     private let importService = ProxyImportService()
@@ -60,7 +64,6 @@ struct ProfilesView: View {
                 } label: {
                     Label("Add", systemImage: "plus.circle")
                 }
-                .buttonStyle(.glass)
             }
         }
         .sheet(item: $activeSheet) { sheet in
@@ -116,6 +119,20 @@ struct ProfilesView: View {
             profileNames: pendingInsecureRefresh?.insecureProfileNames ?? [],
         ) {
             applyPendingInsecureRefresh()
+        }
+        .confirmationDialog(
+            "Apply Security Changes?",
+            isPresented: $showSecurityRefreshConfirmation,
+            titleVisibility: .visible,
+        ) {
+            Button("Apply Reviewed Changes", role: .destructive) {
+                applyPendingSecurityRefresh()
+            }
+            Button("Cancel", role: .cancel) {
+                pendingSecurityRefresh = nil
+            }
+        } message: {
+            Text(pendingSecurityRefresh?.confirmationMessage ?? "")
         }
         .onAppear {
             consumePendingExternalImport()
@@ -248,7 +265,6 @@ struct ProfilesView: View {
                     Button("Test All") {
                         Task { await store.testAllLatencies(profiles) }
                     }
-                    .buttonStyle(.glass)
                     .controlSize(.small)
                     .font(.caption)
                     .disabled(store.nodeLatencies.values.contains(.testing))
@@ -340,7 +356,6 @@ struct ProfilesView: View {
                                 Label("Refresh", systemImage: "arrow.clockwise")
                                     .labelStyle(.iconOnly)
                             }
-                            .buttonStyle(.glass)
                             .controlSize(.small)
                             .accessibilityLabel("Refresh \(subscription.name)")
                         }
@@ -368,7 +383,7 @@ struct ProfilesView: View {
         } header: {
             Text("Subscriptions")
         } footer: {
-            Text("Refresh downloads the subscription again and updates matching nodes/groups in place instead of appending duplicates.")
+            Text("Refresh updates matching nodes/groups in place. Changes to pinned TLS, REALITY, PQ, or VLESS authentication require confirmation.")
         }
     }
 
@@ -377,9 +392,26 @@ struct ProfilesView: View {
             return
         }
         pendingInsecureRefresh = nil
-        store.confirmInsecureSubscriptionRefresh(pending.result, for: pending.subscription)
-        selectedSection = .subscriptions
-        importNotice = ProfileImportNotice(title: "Subscription Updated", message: pending.result.summary)
+        let outcome = store.confirmInsecureSubscriptionRefresh(
+            pending.result,
+            reviewedProfileNames: pending.insecureProfileNames,
+            for: pending.subscription,
+        )
+        handleRefreshOutcome(outcome, for: pending.subscription)
+    }
+
+    private func applyPendingSecurityRefresh() {
+        guard let pending = pendingSecurityRefresh else {
+            return
+        }
+        pendingSecurityRefresh = nil
+        let outcome = store.confirmSecuritySubscriptionRefresh(
+            pending.result,
+            reviewedChanges: pending.changes,
+            reviewedInsecureProfileNames: pending.reviewedInsecureProfileNames,
+            for: pending.subscription,
+        )
+        handleRefreshOutcome(outcome, for: pending.subscription)
     }
 
     /// Sheet flows already ran the allow-insecure confirmation before handing
@@ -432,15 +464,39 @@ struct ProfilesView: View {
             return
         }
         Task {
-            switch await store.refreshSubscription(subscription) {
-            case let .applied(summary):
-                importNotice = ProfileImportNotice(title: "Subscription Refreshed", message: summary)
-            case let .needsInsecureConfirmation(result, newInsecureNames):
-                pendingInsecureRefresh = PendingInsecureRefresh(result: result, subscription: subscription, insecureProfileNames: newInsecureNames)
-                showInsecureRefreshConfirmation = true
-            case let .failed(message):
-                importNotice = ProfileImportNotice(title: "Could Not Refresh Subscription", message: message)
+            await handleRefreshOutcome(store.refreshSubscription(subscription), for: subscription)
+        }
+    }
+
+    private func handleRefreshOutcome(
+        _ outcome: SubscriptionRefreshOutcome,
+        for subscription: SubscriptionSource,
+    ) {
+        switch outcome {
+        case let .applied(summary):
+            selectedSection = .subscriptions
+            importNotice = ProfileImportNotice(title: "Subscription Refreshed", message: summary)
+        case let .needsInsecureConfirmation(result, newInsecureNames):
+            pendingInsecureRefresh = PendingInsecureRefresh(
+                result: result,
+                subscription: subscription,
+                insecureProfileNames: newInsecureNames,
+            )
+            showInsecureRefreshConfirmation = true
+        case let .needsSecurityConfirmation(result, changes, reviewedInsecureProfileNames):
+            pendingSecurityRefresh = PendingSecurityRefresh(
+                result: result,
+                subscription: subscription,
+                changes: changes,
+                reviewedInsecureProfileNames: reviewedInsecureProfileNames,
+            )
+            // When this follows the allow-insecure alert, let that presentation
+            // finish dismissing before presenting the security review.
+            DispatchQueue.main.async {
+                showSecurityRefreshConfirmation = true
             }
+        case let .failed(message):
+            importNotice = ProfileImportNotice(title: "Could Not Refresh Subscription", message: message)
         }
     }
 
@@ -509,6 +565,19 @@ private struct PendingInsecureRefresh {
     /// insecure nodes — matched nodes that were already allow-insecure are not
     /// a new decision.
     let insecureProfileNames: [String]
+}
+
+private struct PendingSecurityRefresh {
+    let result: ImportResult
+    let subscription: SubscriptionSource
+    let changes: [SubscriptionSecurityChange]
+    let reviewedInsecureProfileNames: [String]
+
+    var confirmationMessage: String {
+        let shown = changes.prefix(6).map(\.summary).joined(separator: "\n")
+        let remainder = changes.count > 6 ? "\n…and \(changes.count - 6) more node(s)." : ""
+        return "This subscription changed security settings for matched nodes. Apply only if you expected these changes:\n\n\(shown)\(remainder)"
+    }
 }
 
 private struct ProfileImportNotice: Identifiable {

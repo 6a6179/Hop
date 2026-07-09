@@ -34,12 +34,12 @@
 				<string>vmess</string>
 				<string>trojan</string>
 				<string>ss</string>
-				<string>ssr</string>
 				<string>hysteria2</string>
 				<string>hy2</string>
-				<string>tuic</string>
 				<string>socks</string>
 				<string>socks5</string>
+				<string>wireguard</string>
+				<string>wg</string>
 			</array>
 		</dict>
 	</array>

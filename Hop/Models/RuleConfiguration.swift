@@ -71,11 +71,11 @@ extension RuleConfiguration {
         return copy
     }
 
-    /// Auto-generated "bypass China" configuration: connect directly to Chinese
-    /// sites and IPs (and the LAN), send everything else through the selected
-    /// outbound, and block ads.
+    /// Auto-generated "bypass China" configuration. The builder resolves
+    /// destination IPs so the small verified GeoIP asset is sufficient without
+    /// loading a multi-megabyte GeoSite database in the tunnel extension.
     static func china(id: UUID = UUID()) -> RuleConfiguration {
-        RuleConfiguration(id: id, name: "China", rules: bypassRules(geoSite: "cn", geoIP: "cn"))
+        RuleConfiguration(id: id, name: "China", rules: bypassRules(geoSite: nil, geoIP: "cn"))
     }
 
     /// Auto-generated "bypass Iran" configuration. Uses `geosite-category-ir`
@@ -90,14 +90,11 @@ extension RuleConfiguration {
         rules.isEmpty
     }
 
-    private static func bypassRules(geoSite: String, geoIP: String) -> [RoutingRule] {
-        [
-            RoutingRule(kind: .geoSite, value: "category-ads-all", target: .reject),
-            RoutingRule(kind: .geoIP, value: "private", target: .direct),
-        ] + appleSystemBypassRules + [
-            RoutingRule(kind: .geoSite, value: geoSite, target: .direct),
-            RoutingRule(kind: .geoIP, value: geoIP, target: .direct),
-        ]
+    private static func bypassRules(geoSite: String?, geoIP: String) -> [RoutingRule] {
+        [RoutingRule(kind: .geoIP, value: "private", target: .direct)]
+            + appleSystemBypassRules
+            + (geoSite.map { [RoutingRule(kind: .geoSite, value: $0, target: .direct)] } ?? [])
+            + [RoutingRule(kind: .geoIP, value: geoIP, target: .direct)]
     }
 
     private static func domainSuffixes(from value: String) -> [String] {

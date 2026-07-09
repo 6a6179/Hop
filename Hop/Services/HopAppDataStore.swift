@@ -1,6 +1,40 @@
 import Foundation
 
+struct XrayMigrationReport: Codable, Equatable {
+    var removedProfileNames: [String]
+    var removedGroupNames: [String]
+    var removedRuleCount: Int
+    var blockedTLSProfileNames: [String]
+
+    var isEmpty: Bool {
+        removedProfileNames.isEmpty
+            && removedGroupNames.isEmpty
+            && removedRuleCount == 0
+            && blockedTLSProfileNames.isEmpty
+    }
+
+    var message: String {
+        var lines: [String] = []
+        if !removedProfileNames.isEmpty {
+            lines.append("Removed unsupported nodes: \(removedProfileNames.joined(separator: ", ")).")
+        }
+        if !removedGroupNames.isEmpty {
+            lines.append("Removed empty groups: \(removedGroupNames.joined(separator: ", ")).")
+        }
+        if removedRuleCount > 0 {
+            lines.append("Removed \(removedRuleCount) rule(s) that referenced removed nodes or groups.")
+        }
+        if !blockedTLSProfileNames.isEmpty {
+            lines.append("These nodes must be edited before connecting because Xray does not accept allowInsecure: \(blockedTLSProfileNames.joined(separator: ", ")).")
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
 struct HopAppData: Codable {
+    static let currentSchemaVersion = 2
+
+    var schemaVersion: Int?
     var profiles: [ProxyProfile]
     var groups: [ProxyGroup]
     var subscriptions: [SubscriptionSource]
@@ -13,6 +47,7 @@ struct HopAppData: Codable {
     /// Legacy single rule list from before named configurations. Read on load to
     /// migrate; never written by current builds (optionals are omitted on encode).
     var rules: [RoutingRule]?
+    var pendingXrayMigrationReport: XrayMigrationReport?
 
     init(
         profiles: [ProxyProfile],
@@ -25,7 +60,10 @@ struct HopAppData: Codable {
         ruleConfigurations: [RuleConfiguration]? = nil,
         activeRuleConfigurationID: UUID? = nil,
         rules: [RoutingRule]? = nil,
+        schemaVersion: Int? = HopAppData.currentSchemaVersion,
+        pendingXrayMigrationReport: XrayMigrationReport? = nil,
     ) {
+        self.schemaVersion = schemaVersion
         self.profiles = profiles
         self.groups = groups
         self.subscriptions = subscriptions
@@ -36,6 +74,7 @@ struct HopAppData: Codable {
         self.ruleConfigurations = ruleConfigurations
         self.activeRuleConfigurationID = activeRuleConfigurationID
         self.rules = rules
+        self.pendingXrayMigrationReport = pendingXrayMigrationReport
     }
 }
 
@@ -71,18 +110,139 @@ struct HopAppDataStore {
             return nil
         }
 
+        let didMigrateToXray = migrateToXrayIfNeeded(&decoded)
+
         // Legacy/plaintext state (written before Keychain migration for
         // profiles, or before subscription URLs were treated as bearer
         // secrets) still carries inline values — detect that so we can migrate
         // it in place.
-        let hadInlineProfileSecrets = decoded.profiles.contains { !$0.secretFieldValues.isEmpty }
+        let hadInlineProfileSecrets = decoded.profiles.contains { !$0.keychainSecretItems.isEmpty }
         let hadInlineSubscriptionURLs = decoded.subscriptions.contains { !$0.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         decoded.profiles = decoded.profiles.map { $0.hydratingSecrets(from: secretStore) }
         decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: secretStore) }
-        if !hadAuthenticationSecret || hadInlineProfileSecrets || hadInlineSubscriptionURLs {
+        if !hadAuthenticationSecret || hadInlineProfileSecrets || hadInlineSubscriptionURLs || didMigrateToXray {
             save(decoded) // move secrets to the Keychain and rewrite the JSON without them
         }
         return decoded
+    }
+
+    /// Performs the destructive engine-compatibility migration exactly once.
+    /// Legacy enum cases remain decodable so old state can be inspected before
+    /// unsupported nodes and their dangling references are removed.
+    private func migrateToXrayIfNeeded(_ data: inout HopAppData) -> Bool {
+        guard (data.schemaVersion ?? 0) < HopAppData.currentSchemaVersion else {
+            return false
+        }
+
+        let unsupportedProfiles = data.profiles.filter { profile in
+            switch profile.proto {
+            case .tuic, .anyTLS:
+                true
+            default:
+                profile.transport.type == .quic
+            }
+        }
+        let removedProfileIDs = Set(unsupportedProfiles.map(\.id))
+        let removedProfileNames = Set(unsupportedProfiles.map { $0.name.lowercased() })
+        data.profiles.removeAll { removedProfileIDs.contains($0.id) }
+
+        func targetReferencesRemovedProfile(_ target: OutboundTarget) -> Bool {
+            switch target {
+            case let .profile(id):
+                removedProfileIDs.contains(id)
+            case let .named(name):
+                removedProfileNames.contains(name.lowercased())
+            default:
+                false
+            }
+        }
+
+        for index in data.groups.indices {
+            data.groups[index].members.removeAll(where: targetReferencesRemovedProfile)
+            if let defaultTarget = data.groups[index].defaultTarget,
+               targetReferencesRemovedProfile(defaultTarget)
+            {
+                data.groups[index].defaultTarget = data.groups[index].members.first
+            }
+        }
+
+        // Removing one empty group can make a group containing only that group
+        // empty as well, so prune to a fixed point.
+        var removedGroups: [ProxyGroup] = []
+        var removedGroupIDs = Set<ProxyGroup.ID>()
+        var removedGroupNames = Set<String>()
+        var changed = true
+        while changed {
+            changed = false
+            for index in data.groups.indices {
+                data.groups[index].members.removeAll { target in
+                    switch target {
+                    case let .group(id):
+                        removedGroupIDs.contains(id)
+                    case let .named(name):
+                        removedGroupNames.contains(name.lowercased())
+                    default:
+                        false
+                    }
+                }
+            }
+            let newlyRemoved = data.groups.filter(\.members.isEmpty)
+            guard !newlyRemoved.isEmpty else { continue }
+            changed = true
+            removedGroups.append(contentsOf: newlyRemoved)
+            removedGroupIDs.formUnion(newlyRemoved.map(\.id))
+            removedGroupNames.formUnion(newlyRemoved.map { $0.name.lowercased() })
+            data.groups.removeAll { removedGroupIDs.contains($0.id) }
+        }
+
+        func targetIsRemoved(_ target: OutboundTarget) -> Bool {
+            if targetReferencesRemovedProfile(target) {
+                return true
+            }
+            switch target {
+            case let .group(id):
+                return removedGroupIDs.contains(id)
+            case let .named(name):
+                return removedGroupNames.contains(name.lowercased())
+            default:
+                return false
+            }
+        }
+
+        var removedRuleCount = 0
+        if var configurations = data.ruleConfigurations {
+            for index in configurations.indices {
+                let oldCount = configurations[index].rules.count
+                configurations[index].rules.removeAll { targetIsRemoved($0.target) }
+                removedRuleCount += oldCount - configurations[index].rules.count
+            }
+            data.ruleConfigurations = configurations
+        }
+        if var legacyRules = data.rules {
+            let oldCount = legacyRules.count
+            legacyRules.removeAll { targetIsRemoved($0.target) }
+            removedRuleCount += oldCount - legacyRules.count
+            data.rules = legacyRules
+        }
+
+        if let selectedTarget = data.selectedTarget, targetIsRemoved(selectedTarget) {
+            // Deliberately do not fall back to Direct or a different proxy. The
+            // user must review and select the post-migration target.
+            data.selectedTarget = nil
+        }
+
+        let report = XrayMigrationReport(
+            removedProfileNames: unsupportedProfiles.map(\.name).sorted(),
+            removedGroupNames: removedGroups.map(\.name).sorted(),
+            removedRuleCount: removedRuleCount,
+            blockedTLSProfileNames: data.profiles
+                .filter { $0.security.tls?.allowInsecure == true }
+                .map(\.name)
+                .sorted(),
+        )
+        data.pendingXrayMigrationReport = report.isEmpty ? nil : report
+        data.schemaVersion = HopAppData.currentSchemaVersion
+        return true
     }
 
     func save(_ data: HopAppData) {

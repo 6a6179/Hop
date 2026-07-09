@@ -64,12 +64,12 @@ final class ExternalImportPayloadTests: XCTestCase {
             "vmess://eyJhZGQiOiJob3N0IiwicG9ydCI6IjQ0MyJ9",
             "trojan://password@host.example.com:443#Node",
             "ss://YWVzLTI1Ni1nY206cGFzcw@host.example.com:8388#SS",
-            "ssr://aG9zdDo0NDM6b3JpZ2luOmFlcy0yNTYtY2ZiOnBsYWluOnBhc3M",
             "hysteria2://pass@host.example.com:443#Hy2",
             "hy2://pass@host.example.com:443#Hy2",
-            "tuic://uuid:pass@host.example.com:443#TUIC",
             "socks://user:pass@host.example.com:1080#SOCKS",
             "socks5://user:pass@host.example.com:1080#SOCKS",
+            "wireguard://private@host.example.com:51820?publickey=peer&address=10.0.0.2%2F32#WG",
+            "wg://private@host.example.com:51820?publickey=peer&address=10.0.0.2%2F32#WG",
         ]
         for link in links {
             let url = try XCTUnwrap(URL(string: link), "fixture must parse: \(link)")

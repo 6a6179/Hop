@@ -17,14 +17,19 @@ targets:
     sources:
       - Hop
       - Shared
+      - path: Geodata/geoip.dat
+        buildPhase: resources
+      - path: Geodata/geosite.dat
+        buildPhase: resources
     dependencies:
       - target: HopTunnel
         embed: true
-      # The app links libbox only for the lightweight command client used to
-      # subscribe to live tunnel status/connections from the extension.
-      - framework: Frameworks/Libbox.xcframework
+      # The app links the same pinned core for exact preflight validation. It
+      # never starts an Xray instance; the packet-tunnel extension owns runtime.
+      - framework: Frameworks/LibXray.xcframework
         embed: false
       - sdk: libresolv.tbd
+      - sdk: Security.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: cat.string.hop
@@ -37,32 +42,34 @@ targets:
     sources:
       - HopTunnel
       - Shared
+      - path: Geodata/geoip.dat
+        buildPhase: resources
+      - path: Geodata/geosite.dat
+        buildPhase: resources
     preBuildScripts:
-      # Fail the build if the vendored sing-box engine doesn't match the
-      # checked-in provenance checksum (scripts/verify-libbox.sh). Rebuilding
-      # the engine via scripts/build-libbox.sh refreshes the manifest.
-      - name: Verify Libbox provenance
-        script: '"$SRCROOT/scripts/verify-libbox.sh"'
+      # Fail if the privileged static engine differs from the reviewed build.
+      - name: Verify LibXray provenance
+        script: '"$SRCROOT/scripts/verify-libxray.sh"'
+        basedOnDependencyAnalysis: false
+      - name: Verify local geodata
+        script: '"$SRCROOT/scripts/verify-geodata.sh"'
         basedOnDependencyAnalysis: false
     dependencies:
-      # Build this first: scripts/build-libbox.sh (needs Go). gomobile emits a
+      # Build this first: scripts/build-libxray.sh (needs pinned Go). gomobile emits a
       # *static* framework, so it's linked into the .appex, not embedded.
-      - framework: Frameworks/Libbox.xcframework
+      - framework: Frameworks/LibXray.xcframework
         embed: false
-      # System libs the static Go engine references: libresolv (Darwin DNS,
-      # res_9_*) and UIKit (a background-task helper inside the engine).
+      # System libraries referenced by the static Go engine and bindings.
       - sdk: libresolv.tbd
-      - sdk: UIKit.framework
+      - sdk: Security.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: cat.string.hop.tunnel
         INFOPLIST_FILE: HopTunnel/Info.plist
         CODE_SIGN_ENTITLEMENTS: HopTunnel/HopTunnel.entitlements
         APPLICATION_EXTENSION_API_ONLY: YES
-        # libbox invokes the platform interface synchronously from Go threads
-        # and traffics in non-Sendable gomobile types; keep bridge boundaries
-        # explicit with value snapshots, @preconcurrency, and narrow unchecked
-        # Sendable wrappers.
+        # Keep the gomobile boundary to versioned JSON strings so no Go-owned
+        # reference type crosses Swift concurrency domains.
         SWIFT_VERSION: "6.2"
   HopTests:
     type: bundle.unit-test

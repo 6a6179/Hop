@@ -108,6 +108,11 @@ struct Hysteria2Options: Hashable, Codable {
     var password: String
     var obfs: String?
     var obfsPassword: String?
+    var up: String? = nil
+    var down: String? = nil
+    var ports: String? = nil
+    var hopIntervalSeconds: Int? = nil
+    var udpIdleTimeoutSeconds: Int? = nil
 }
 
 struct TUICOptions: Hashable, Codable {
@@ -137,14 +142,68 @@ struct SOCKSOptions: Hashable, Codable {
     var password: String?
 }
 
+/// One Xray WireGuard peer. `id` is persisted so each peer's optional
+/// pre-shared key has a stable, distinct Keychain account even when peers are
+/// edited or shared between Hop installations.
+struct WireGuardPeer: Identifiable, Hashable, Codable {
+    var id: UUID
+    var publicKey: String
+    /// `nil` uses the profile endpoint, preserving the original one-peer model.
+    var endpoint: Endpoint?
+    var preSharedKey: String?
+    var allowedIPs: [String]?
+    var keepAliveSeconds: Int?
+
+    init(
+        id: UUID = UUID(),
+        publicKey: String,
+        endpoint: Endpoint? = nil,
+        preSharedKey: String? = nil,
+        allowedIPs: [String]? = nil,
+        keepAliveSeconds: Int? = nil,
+    ) {
+        self.id = id
+        self.publicKey = publicKey
+        self.endpoint = endpoint
+        self.preSharedKey = preSharedKey
+        self.allowedIPs = allowedIPs
+        self.keepAliveSeconds = keepAliveSeconds
+    }
+
+    var preSharedKeyFieldRaw: String {
+        "preSharedKey.peer.\(id.uuidString.lowercased())"
+    }
+}
+
 struct WireGuardOptions: Hashable, Codable {
     var privateKey: String
+    // Legacy first-peer fields stay decodable so existing saved profiles and
+    // wireguard:// links continue to work. New multi-peer profiles use `peers`.
     var peerPublicKey: String
-    /// Optional peer pre-shared key (the `PresharedKey` of a wg peer). Stored
-    /// in the Keychain like the private key; emitted as the endpoint peer's
-    /// `pre_shared_key`. Decodes as nil from state saved by older builds.
     var preSharedKey: String? = nil
     var localAddress: [String]
+    var allowedIPs: [String]? = nil
+    var reserved: [UInt8]? = nil
+    var keepAliveSeconds: Int? = nil
+    var mtu: Int? = nil
+    var domainStrategy: String? = nil
+    /// `nil` means the legacy first-peer fields above. Keeping this optional
+    /// makes synthesized Codable backward compatible with pre-migration state.
+    var peers: [WireGuardPeer]? = nil
+}
+
+extension WireGuardOptions {
+    var effectivePeers: [WireGuardPeer] {
+        if let peers, !peers.isEmpty {
+            return peers
+        }
+        return [WireGuardPeer(
+            publicKey: peerPublicKey,
+            preSharedKey: preSharedKey,
+            allowedIPs: allowedIPs,
+            keepAliveSeconds: keepAliveSeconds,
+        )]
+    }
 }
 
 struct AnyTLSOptions: Hashable, Codable {

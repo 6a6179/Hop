@@ -62,7 +62,6 @@
         ]
 
         static let rules = [
-            RoutingRule(kind: .geoSite, value: "category-ads-all", target: .reject),
             RoutingRule(kind: .geoIP, value: "private", target: .direct),
         ] + RuleConfiguration.appleSystemBypassRules + [
             RoutingRule(kind: .domainSuffix, value: "youtube.com", target: .group(proxyGroup.id)),
@@ -84,7 +83,7 @@
             "[9:18:27 PM] Loaded 3 sample nodes and 2 proxy groups.",
             "[9:18:26 PM] Routing mode set to Rule with 4 sample rules.",
             "[9:18:25 PM] Import parser ready for links, subscriptions, and Shadowrocket .conf files.",
-            "[9:18:24 PM] sing-box/libbox configuration builder ready.",
+            "[9:18:24 PM] Xray-core configuration builder ready.",
         ]
     }
 #endif

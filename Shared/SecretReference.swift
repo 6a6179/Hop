@@ -1,6 +1,6 @@
 import Foundation
 
-/// Token format that lets the app emit a sing-box config with secret
+/// Token format that lets the app emit an Xray config with secret
 /// *references* instead of secret values, which the tunnel extension resolves
 /// from the shared Keychain at start time. This keeps credentials out of the
 /// generated config on disk and out of IPC/provider configuration.

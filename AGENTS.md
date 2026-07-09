@@ -8,17 +8,17 @@ Guidance for AI coding agents working in this repository.
 - The Xcode project is generated from `project.yml` with XcodeGen. Treat `project.yml` as the source of truth for targets, sources, settings, and dependencies.
 - Main targets:
   - `Hop`: SwiftUI app, Swift 6.2.
-  - `HopTunnel`: Network Extension, Swift 6.2. Its libbox/gomobile bridge keeps concurrency boundaries explicit with value snapshots, `@preconcurrency`, and narrow unchecked `Sendable` wrappers.
+  - `HopTunnel`: Network Extension, Swift 6.2. Its LibXray/gomobile boundary is a versioned JSON request/response API, so Go-owned reference types never cross Swift concurrency domains.
   - `HopTests`: iOS unit tests.
 - Shared code lives in `Shared/` and is compiled into both app and extension.
-- `Frameworks/Libbox.xcframework` is a vendored static sing-box/libbox engine. Its provenance is checked by `scripts/verify-libbox.sh` against `Frameworks/Libbox.xcframework.sha256`.
+- `Frameworks/LibXray.xcframework` is a vendored static, client-only Xray-core bridge pinned to Xray `v26.6.27`. Its provenance is checked by `scripts/verify-libxray.sh` against `Frameworks/LibXray.xcframework.sha256`.
 
 ## Before editing
 
 - Check this file and any more-specific `AGENTS.md` files before modifying files.
 - Prefer small, focused changes that preserve the current SwiftUI/XcodeGen structure.
 - Do not manually edit `Hop.xcodeproj/project.pbxproj` for durable project changes. Edit `project.yml`, then run `xcodegen generate`.
-- Do not replace or rebuild `Frameworks/Libbox.xcframework` unless explicitly asked. If it is rebuilt with `scripts/build-libbox.sh`, expect the checksum manifest to change too.
+- Do not replace or rebuild `Frameworks/LibXray.xcframework` unless explicitly asked. If it is rebuilt with `scripts/build-libxray.sh`, expect the checksum manifest to change too.
 - The worktree may be dirty or uncommitted; do not revert unrelated user changes.
 
 ## Formatting and style
@@ -33,18 +33,20 @@ swiftformat Hop HopTunnel Shared HopTests
 - Keep Swift code idiomatic and concise. Prefer value models for app state and avoid unnecessary abstractions.
 - For Swift concurrency:
   - Keep app code compatible with Swift 6.2 checking.
-  - Be careful when crossing from gomobile/libbox callback types into Swift concurrency; convert non-Sendable libbox objects into Hop-owned value types before dispatching or crossing actor/thread boundaries.
+  - Keep the gomobile boundary to Codable value snapshots encoded as JSON. Do not expose Xray/Go object references or callbacks to Swift.
   - Keep `HopTunnel` in Swift 6.2 and avoid broad `@unchecked Sendable`; use it only for tightly scoped bridge wrappers with clear synchronization or lifetime guarantees.
 
 ## Invariants to preserve
 
 Security and consistency properties that code changes must not regress:
 
-- `SingBoxConfigBuilder` emits WireGuard profiles as sing-box `endpoints`, never as outbounds — the vendored sing-box 1.13 removed the `wireguard` outbound type and rejects the whole config if one appears. Endpoint tags share the outbound tag namespace, so groups and routes can reference them like any profile tag.
+- `XrayConfigBuilder` is the only runtime-config builder. It emits a deterministic client configuration for the pinned schema, compiles only reachable outbounds, forces WireGuard `noKernelTun: true`, rejects typed/advanced collisions and unsupported Apple-only routing matchers, and applies `IOSRuntimeLimits` before the extension starts.
+- Configuration validation is intentionally layered: Swift schema/policy checks, exact parsing by the pinned core in the app, then exact parsing in the extension after nonce-bound secret resolution. Do not remove a stage or let typed fields silently overwrite advanced JSON.
+- The 50 MiB Network Extension ceiling is a hard constraint. Preserve the 30 MiB Go heap limit, one-second Go collection, 250-millisecond footprint sampling, 42 MiB soft response, 46 MiB graceful shutdown, and the per-feature limits in `IOSRuntimeLimits`; explicitly excessive values are rejected rather than clamped.
 - Imported and refreshed data is untrusted (subscription servers and share links are attacker-controllable):
-  - Subscription refreshes must never silently weaken a matched profile's security — layer demotions (REALITY → TLS → none) and `allowInsecure` flips are blocked by `SubscriptionRefreshMerger.securityPreservingDowngrades`, which records warnings the store logs.
+  - Subscription refreshes must never silently replace a matched profile's security-critical values. Automatic/unreviewed merges use `SubscriptionRefreshSecurityPolicy.preserveExisting`; manual refreshes return `.needsSecurityConfirmation` for TLS/REALITY layer and floor, pins, verification names, ECH, PQ curves, VLESS Encryption/Auth, REALITY public-key, and ML-DSA changes before `.applyReviewedChanges` may apply them. A matched node can never newly enable `allowInsecure`, even after another change is reviewed; refused changes are recorded in the warnings the store logs.
   - Subscription refreshes must not install routing rules from the response; rules only apply through reviewed manual imports.
-  - Every UI path that saves imported nodes with `allowInsecure` must run the blocking `insecureTLSImportConfirmation` first. The sheet flows gate themselves; the QR-scan and refresh paths in `ProfilesView` gate via `pendingInsecureScan`. New import paths need the same gate.
+  - Every UI path that saves imported nodes with `allowInsecure` must run the blocking `insecureTLSImportConfirmation` first. The sheet flows gate themselves; the QR-scan and refresh paths in `ProfilesView` gate via `pendingInsecureScan`. New import paths need the same gate. This permits preserving a legacy node for editing only: `XrayConfigBuilder` must continue rejecting it until the user enables normal validation or supplies certificate pins.
   - Subscription refreshes extend that gate to *new* nodes: `SubscriptionRefreshMerger.newInsecureProfileNames` decides which imported allow-insecure nodes are new (vs. updates to already-insecure nodes), `HopStore.refreshSubscription` returns `.needsInsecureConfirmation` instead of applying them, and `autoRefreshStaleSubscriptions` skips such refreshes outright — no user is present to confirm.
   - URL-scheme payloads — `hop://import` and the registered proxy share-link schemes (`AppShellView.proxyLinkSchemes`, mirrored in the app Info.plist's `CFBundleURLTypes`; a test asserts they stay in sync) — are untrusted (any app can open them). They only flow into the prefilled `ImportTextSheet`, never applied directly, so the preview and allow-insecure gates stay in force. The sheet auto-previews only payloads that parse locally; subscription URLs are never fetched without an explicit user tap.
   - Imported display names are sanitized (`ImportPolicy.sanitizeImportedName`, applied via `ImportResult.sanitizingNames()` at the `importText` exits): bidi/invisible characters are stripped and length is capped so a crafted name can't spoof the allow-insecure confirmation alert. Keep new parser entry points on this path.
@@ -56,8 +58,9 @@ Security and consistency properties that code changes must not regress:
 - A manual `disconnect()` clears `isOnDemandEnabled` (and saves the manager) before `stopVPNTunnel`, or iOS immediately relaunches the tunnel under the on-demand rule and the user's stop does not stick. The next `connect()` re-arms on-demand from settings.
 - Node share links (`ProxyShareLink`) embed credentials by design; they are only produced from the explicit context-menu actions, and pasteboard copies set an expiration. Don't add share/export paths that emit credentials implicitly.
 - The shared App Group tunnel config is authenticated with `TunnelConfigAuthenticator` before the extension resolves nonce-bound secret tokens from it. Keep the HMAC key in `SecretStore.runtime` and fail closed if the signature/key is missing or invalid.
-- The libbox command server must never start with an empty auth token. `TunnelController` ensures the runtime Keychain token before launch; `PacketTunnelProvider` fails closed if it cannot read the same token.
-- The libbox service state in `PacketTunnelProvider` (`commandServer`, `lastRawConfig`, `configSecretNonce`, `lastConfigSecretsAreResolved`) is guarded by `serviceStateLock` and accessed from three threads. Never call into libbox while holding the lock — its callbacks can re-enter the provider and deadlock. Clear the state under the lock before tearing the server down.
+- LibXray permits only one core instance. Bridge `start`, `stop`, and restart behavior must remain idempotent, and the app may call only `validate`/`version`; it must never start a core instance.
+- Xray service and watchdog state in `PacketTunnelProvider` is guarded by `serviceStateLock` and accessed from multiple queues. Never call into LibXray while holding the lock. Clear/copy state under the lock before stopping the core or cancelling timers.
+- Do not reintroduce extension-to-app telemetry, a command socket, per-connection streams, or connection-close controls; the extension retains only its local memory watchdog and bounded sanitized logs.
 - Credential fields in editors (passwords, private keys) render as `SecureField` via `ProfileTextField(isSecure: true)`.
 - Pin GitHub Actions `uses:` references to commit SHAs with the tag in a trailing comment; do not move them back to mutable tags.
 

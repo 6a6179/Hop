@@ -9,7 +9,20 @@ enum SubscriptionRefreshOutcome {
     /// caller must run the blocking insecure-TLS confirmation, then call
     /// `confirmInsecureSubscriptionRefresh`.
     case needsInsecureConfirmation(result: ImportResult, newInsecureProfileNames: [String])
+    /// A matched node changed security values that authenticate the server or
+    /// define the TLS/PQ floor. Nothing was applied; the caller must show the
+    /// concise review and then call `confirmSecuritySubscriptionRefresh`.
+    case needsSecurityConfirmation(
+        result: ImportResult,
+        changes: [SubscriptionSecurityChange],
+        reviewedInsecureProfileNames: [String],
+    )
     case failed(message: String)
+}
+
+enum SubscriptionRefreshMode: Equatable {
+    case manual
+    case automatic
 }
 
 @MainActor
@@ -52,6 +65,14 @@ final class HopStore {
     }
 
     var selectedTarget: OutboundTarget? {
+        didSet {
+            persistUnlessBatched()
+        }
+    }
+
+    /// One-time report produced while removing profiles the Xray engine cannot
+    /// run. It remains persisted until the user acknowledges it.
+    var pendingXrayMigrationReport: XrayMigrationReport? {
         didSet {
             persistUnlessBatched()
         }
@@ -101,6 +122,7 @@ final class HopStore {
         activeRuleConfigurationID: RuleConfiguration.ID? = nil,
         routingMode: RoutingMode? = nil,
         selectedTarget: OutboundTarget? = nil,
+        pendingXrayMigrationReport: XrayMigrationReport? = nil,
         settings: AppSettings? = nil,
         tunnel: TunnelController? = nil,
         dataStore: HopAppDataStore = HopAppDataStore(),
@@ -124,6 +146,7 @@ final class HopStore {
 
         self.routingMode = routingMode ?? loaded?.routingMode ?? .rule
         self.selectedTarget = selectedTarget ?? loaded?.selectedTarget
+        self.pendingXrayMigrationReport = pendingXrayMigrationReport ?? loaded?.pendingXrayMigrationReport
         self.settings = settings ?? loaded?.settings ?? .defaults
         self.tunnel = tunnel ?? TunnelController(logs: loaded?.logs ?? [])
         self.tunnel.maximumLogEntries = self.settings.logRetention.rawValue
@@ -169,7 +192,13 @@ final class HopStore {
             guard ["Default", "China", "Iran"].contains(configuration.name) else {
                 return configuration
             }
-            let updated = configuration.withAppleSystemBypassRule()
+            var updated = configuration.withAppleSystemBypassRule()
+            updated.rules.removeAll { rule in
+                rule.kind == .geoSite
+                    && !rule.value.split(separator: ",").allSatisfy {
+                        VerifiedXrayGeodata.geoSiteCategories.contains(String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+                    }
+            }
             didMigrate = didMigrate || updated != configuration
             return updated
         }
@@ -179,9 +208,9 @@ final class HopStore {
     var selectedProfile: ProxyProfile? {
         get {
             if case let .profile(id) = selectedTarget {
-                return profiles.first { $0.id == id } ?? profiles.first
+                return profiles.first { $0.id == id }
             }
-            return profiles.first
+            return nil
         }
         set {
             selectedTarget = newValue.map { .profile($0.id) }
@@ -196,7 +225,7 @@ final class HopStore {
     }
 
     var selectedTargetDisplayName: String {
-        displayName(for: selectedTarget ?? defaultTarget)
+        selectedTarget.map { displayName(for: $0) } ?? "Select Outbound"
     }
 
     var defaultTarget: OutboundTarget {
@@ -367,7 +396,11 @@ final class HopStore {
         }
     }
 
-    func applySubscriptionRefresh(_ result: ImportResult, updating subscription: SubscriptionSource? = nil) {
+    func applySubscriptionRefresh(
+        _ result: ImportResult,
+        updating subscription: SubscriptionSource? = nil,
+        securityPolicy: SubscriptionRefreshSecurityPolicy = .preserveExisting,
+    ) {
         let result = result.sanitizingNames()
         guard !result.isEmpty else {
             tunnel.appendLog("Subscription refresh skipped: no runnable items found")
@@ -380,7 +413,7 @@ final class HopStore {
         // The subscription record updates inside the same batch — a refresh is
         // one logical mutation and persists once.
         var merger = SubscriptionRefreshMerger(profiles: profiles, groups: groups, selectedTarget: selectedTarget)
-        merger.merge(result)
+        merger.merge(result, securityPolicy: securityPolicy)
         withBatchedPersist {
             profiles = merger.profiles
             groups = merger.groups
@@ -412,9 +445,14 @@ final class HopStore {
     /// allow-insecure nodes are not applied here — they come back as
     /// `.needsInsecureConfirmation`, and the caller must run the blocking
     /// insecure-TLS confirmation before applying via
-    /// `confirmInsecureSubscriptionRefresh`. Matched nodes are already
-    /// protected by the merger's downgrade guards.
-    func refreshSubscription(_ subscription: SubscriptionSource) async -> SubscriptionRefreshOutcome {
+    /// `confirmInsecureSubscriptionRefresh`. Manual refreshes also return a
+    /// blocking security review for matched-node TLS/REALITY/PQ/auth changes;
+    /// automatic refreshes keep the stored values and apply only noncritical
+    /// updates.
+    func refreshSubscription(
+        _ subscription: SubscriptionSource,
+        mode: SubscriptionRefreshMode = .manual,
+    ) async -> SubscriptionRefreshOutcome {
         guard !refreshingSubscriptionIDs.contains(subscription.id) else {
             return .failed(message: "A refresh for this subscription is already running.")
         }
@@ -434,20 +472,68 @@ final class HopStore {
             return .failed(message: error.localizedDescription)
         }
 
+        if mode == .manual {
+            return reviewSubscriptionRefresh(result, for: subscription)
+        }
+
         let newInsecureNames = SubscriptionRefreshMerger.newInsecureProfileNames(existing: profiles, imported: result.profiles)
         guard newInsecureNames.isEmpty else {
             return .needsInsecureConfirmation(result: result, newInsecureProfileNames: newInsecureNames)
         }
-
-        applyRefreshResult(result, for: subscription)
+        applyRefreshResult(result, for: subscription, securityPolicy: .preserveExisting)
         return .applied(summary: result.summary)
     }
 
     /// Applies a refresh the user explicitly confirmed despite it introducing
-    /// new allow-insecure nodes. Only call after the blocking
-    /// `insecureTLSImportConfirmation` has run.
-    func confirmInsecureSubscriptionRefresh(_ result: ImportResult, for subscription: SubscriptionSource) {
-        applyRefreshResult(result, for: subscription)
+    /// new allow-insecure nodes. If the same result also changes pinned
+    /// security values, it remains blocked and returns the second confirmation
+    /// outcome instead of applying both decisions behind the first alert.
+    @discardableResult
+    func confirmInsecureSubscriptionRefresh(
+        _ result: ImportResult,
+        reviewedProfileNames: [String],
+        for subscription: SubscriptionSource,
+    ) -> SubscriptionRefreshOutcome {
+        reviewSubscriptionRefresh(
+            result,
+            for: subscription,
+            reviewedInsecureProfileNames: reviewedProfileNames,
+        )
+    }
+
+    /// Applies only the security-change categories shown by the manual review.
+    /// The current state is checked again so an intervening profile edit cannot
+    /// introduce a new, unreviewed category before this confirmation lands.
+    @discardableResult
+    func confirmSecuritySubscriptionRefresh(
+        _ result: ImportResult,
+        reviewedChanges: [SubscriptionSecurityChange],
+        reviewedInsecureProfileNames: [String],
+        for subscription: SubscriptionSource,
+    ) -> SubscriptionRefreshOutcome {
+        let result = result
+            .markingProfiles(subscriptionID: subscription.id)
+            .sanitizingNames()
+        let newInsecureNames = SubscriptionRefreshMerger.newInsecureProfileNames(existing: profiles, imported: result.profiles)
+        guard Self.reviewedNames(reviewedInsecureProfileNames, cover: newInsecureNames) else {
+            return .needsInsecureConfirmation(result: result, newInsecureProfileNames: newInsecureNames)
+        }
+
+        let changes = subscriptionSecurityChanges(in: result)
+        guard changes == reviewedChanges else {
+            if changes.isEmpty {
+                applyRefreshResult(result, for: subscription, securityPolicy: .preserveExisting)
+                return .applied(summary: result.summary)
+            }
+            return .needsSecurityConfirmation(
+                result: result,
+                changes: changes,
+                reviewedInsecureProfileNames: reviewedInsecureProfileNames,
+            )
+        }
+
+        applyRefreshResult(result, for: subscription, securityPolicy: .applyReviewedChanges)
+        return .applied(summary: result.summary)
     }
 
     /// Refreshes every subscription that hasn't updated within
@@ -468,22 +554,76 @@ final class HopStore {
 
         tunnel.appendLog("Auto-refreshing \(stale.count) stale subscription(s)")
         for subscription in stale {
-            switch await refreshSubscription(subscription) {
+            switch await refreshSubscription(subscription, mode: .automatic) {
             case let .applied(summary):
                 tunnel.appendLog("Auto-refreshed \(subscription.name): \(summary)")
             case let .needsInsecureConfirmation(_, names):
                 tunnel.appendLog("Auto-refresh of \(subscription.name) skipped: it adds \(names.count) node(s) that disable TLS certificate verification. Refresh manually to review.")
+            case .needsSecurityConfirmation:
+                // Automatic mode preserves these values and therefore never
+                // returns a manual-review outcome. Keep this fail-closed if a
+                // future code path violates that contract.
+                tunnel.appendLog("Auto-refresh of \(subscription.name) skipped: security changes require manual review.")
             case let .failed(message):
                 tunnel.appendLog("Auto-refresh of \(subscription.name) failed: \(message)")
             }
         }
     }
 
-    private func applyRefreshResult(_ result: ImportResult, for subscription: SubscriptionSource) {
+    /// Processes an already fetched manual result. Kept internal so focused
+    /// tests can verify the blocking outcome without making a network request.
+    func reviewSubscriptionRefresh(
+        _ untrustedResult: ImportResult,
+        for subscription: SubscriptionSource,
+        reviewedInsecureProfileNames: [String] = [],
+    ) -> SubscriptionRefreshOutcome {
+        let result = untrustedResult
+            .markingProfiles(subscriptionID: subscription.id)
+            .sanitizingNames()
+        let newInsecureNames = SubscriptionRefreshMerger.newInsecureProfileNames(existing: profiles, imported: result.profiles)
+        guard Self.reviewedNames(reviewedInsecureProfileNames, cover: newInsecureNames) else {
+            return .needsInsecureConfirmation(result: result, newInsecureProfileNames: newInsecureNames)
+        }
+
+        let changes = subscriptionSecurityChanges(in: result)
+        guard changes.isEmpty else {
+            return .needsSecurityConfirmation(
+                result: result,
+                changes: changes,
+                reviewedInsecureProfileNames: reviewedInsecureProfileNames,
+            )
+        }
+
+        applyRefreshResult(result, for: subscription, securityPolicy: .preserveExisting)
+        return .applied(summary: result.summary)
+    }
+
+    private func subscriptionSecurityChanges(in result: ImportResult) -> [SubscriptionSecurityChange] {
+        SubscriptionRefreshMerger(
+            profiles: profiles,
+            groups: groups,
+            selectedTarget: selectedTarget,
+        ).securityCriticalChanges(in: result.profiles)
+    }
+
+    private static func reviewedNames(_ reviewed: [String], cover current: [String]) -> Bool {
+        var remaining = Dictionary(reviewed.map { ($0, 1) }, uniquingKeysWith: { $0 + $1 })
+        for name in current {
+            guard let count = remaining[name], count > 0 else { return false }
+            remaining[name] = count - 1
+        }
+        return true
+    }
+
+    private func applyRefreshResult(
+        _ result: ImportResult,
+        for subscription: SubscriptionSource,
+        securityPolicy: SubscriptionRefreshSecurityPolicy,
+    ) {
         var refreshed = subscription
         refreshed.lastUpdatedAt = .now
         refreshed.lastImportSummary = result.summary
-        applySubscriptionRefresh(result, updating: refreshed)
+        applySubscriptionRefresh(result, updating: refreshed, securityPolicy: securityPolicy)
     }
 
     private func applyImportedRules(_ importedRules: [RoutingRule]) {
@@ -549,6 +689,10 @@ final class HopStore {
         tunnel.clearLogs()
     }
 
+    func acknowledgeXrayMigration() {
+        pendingXrayMigrationReport = nil
+    }
+
     func resetSettings() {
         settings = .defaults
         tunnel.appendLog("Settings reset to defaults")
@@ -579,6 +723,7 @@ final class HopStore {
             logs: tunnel.logs,
             ruleConfigurations: ruleConfigurations,
             activeRuleConfigurationID: activeRuleConfigurationID,
+            pendingXrayMigrationReport: pendingXrayMigrationReport,
         )
         let dataStore = dataStore
         persistQueue.async {

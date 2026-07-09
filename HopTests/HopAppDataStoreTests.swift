@@ -127,6 +127,50 @@ final class HopAppDataStoreTests: XCTestCase {
         XCTAssertEqual(decoded.appearance, .dark)
     }
 
+    func testLegacyStateMigrationRemovesUnsupportedXrayProfilesAndReferences() throws {
+        let url = tempStateURL()
+        let store = HopAppDataStore(url: url, secretStore: .inMemory(), authenticationStore: .inMemory())
+        let supported = trojanProfile(id: UUID(), name: "Supported", host: "ok.example.com", password: "secret")
+        let tuic = ProxyProfile(
+            name: "Old TUIC",
+            endpoint: Endpoint(host: "tuic.example.com", port: 443),
+            options: .tuic(TUICOptions(uuid: "uuid", password: "password", congestionControl: nil)),
+            security: .tls(TLSOptions(serverName: "tuic.example.com")),
+        )
+        let group = ProxyGroup(
+            name: "Legacy Group",
+            type: .select,
+            members: [.profile(tuic.id)],
+            defaultTarget: .profile(tuic.id),
+        )
+        let rules = [RoutingRule(kind: .domain, value: "example.com", target: .profile(tuic.id))]
+        let config = RuleConfiguration(name: "Legacy Rules", rules: rules)
+        let data = HopAppData(
+            profiles: [supported, tuic],
+            groups: [group],
+            subscriptions: [],
+            routingMode: .rule,
+            selectedTarget: .profile(tuic.id),
+            settings: .defaults,
+            logs: [],
+            ruleConfigurations: [config],
+            activeRuleConfigurationID: config.id,
+            schemaVersion: 1,
+        )
+
+        store.save(data)
+        let migrated = try XCTUnwrap(store.load())
+
+        XCTAssertEqual(migrated.schemaVersion, HopAppData.currentSchemaVersion)
+        XCTAssertEqual(migrated.profiles.map(\.id), [supported.id])
+        XCTAssertTrue(migrated.groups.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(migrated.ruleConfigurations).first?.rules.isEmpty == true)
+        XCTAssertNil(migrated.selectedTarget, "migration must require an explicit post-migration selection")
+        XCTAssertEqual(migrated.pendingXrayMigrationReport?.removedProfileNames, ["Old TUIC"])
+        XCTAssertEqual(migrated.pendingXrayMigrationReport?.removedGroupNames, ["Legacy Group"])
+        XCTAssertEqual(migrated.pendingXrayMigrationReport?.removedRuleCount, 1)
+    }
+
     @MainActor
     func testStoreUpdatesSubscriptionMetadata() {
         let subscription = SubscriptionSource(name: "Airport", url: "https://example.com/sub")

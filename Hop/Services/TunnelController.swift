@@ -6,20 +6,15 @@ import Observation
 @Observable
 final class TunnelController {
     var state: TunnelConnectionState = .disconnected
-    var counters: TrafficCounters = .zero
-    var connections: [TunnelConnectionSnapshot] = []
-    var telemetryIsConnected = false
-    var telemetryError: String?
     var logs: [String]
     var maximumLogEntries: Int
 
     @ObservationIgnored var onLogsChanged: (() -> Void)?
 
-    private let configBuilder = SingBoxConfigBuilder()
+    private let configBuilder = XrayConfigBuilder()
     private let sharedConfigStore = SharedTunnelConfigurationStore()
     private let sharedLogStore = SharedTunnelLogStore()
     private let secretStore = SecretStore.shared
-    private let telemetryClient = TunnelTelemetryClient()
     @ObservationIgnored private var diagnosticsTask: Task<Void, Never>?
     private var manager: NETunnelProviderManager?
     private var statusObserver: NSObjectProtocol?
@@ -27,28 +22,9 @@ final class TunnelController {
     private var lastObservedStatus: NEVPNStatus?
     private var startInProgress = false
     private var loggedStartupStop = false
-    /// Whether a connections UI is currently visible. The per-connection event
-    /// stream is heavy (libbox pushes batches every interval), so it runs only
-    /// while something displays it; the always-on status stream keeps counters
-    /// and the live connection count.
-    private(set) var isMonitoringConnections = false
-
     init(logs: [String] = [], maximumLogEntries: Int = LogRetention.fiveHundred.rawValue) {
         self.logs = logs
         self.maximumLogEntries = maximumLogEntries
-        telemetryClient.onStatus = { [weak self] counters in
-            self?.counters = counters
-        }
-        telemetryClient.onConnections = { [weak self] connections in
-            self?.connections = connections
-        }
-        telemetryClient.onConnectionStateChanged = { [weak self] isConnected, error in
-            self?.telemetryIsConnected = isConnected
-            self?.telemetryError = error
-            if let error, self?.state.isConnected == true {
-                self?.appendLog("Telemetry unavailable: \(error)")
-            }
-        }
     }
 
     func connect(
@@ -69,9 +45,6 @@ final class TunnelController {
         loggedStartupStop = false
         startInProgress = true
         state = .connecting
-        counters = .zero
-        connections = []
-        telemetryError = nil
         appendLog("Connect requested for \(target.id)")
         appendLog("Resolved App Group: \(RuntimeEnvironment.appGroupIdentifier)")
         appendLog(RuntimeEnvironment.appGroupResolutionDiagnostic)
@@ -107,26 +80,6 @@ final class TunnelController {
 
         do {
             appendLog("Preparing tunnel with \(profiles.count) nodes, \(groups.count) groups, \(rules.count) rules")
-            // The import preview warns once at import time; record it again at
-            // every connect so the session log always names nodes running
-            // without certificate verification (full MITM exposure).
-            let insecureProfiles = profiles.filter { $0.security.tls?.allowInsecure == true }
-            if !insecureProfiles.isEmpty {
-                appendLog("WARNING: TLS certificate verification is disabled (allow-insecure) for: \(insecureProfiles.map(\.name).joined(separator: ", "))")
-            }
-            // Rules that silently can't do their job get named here: the
-            // config builder routes a rule with a vanished target to the
-            // selected outbound, and protocol rules never match with sniffing
-            // off — both look like "rules ignored" without an explanation.
-            if routingMode == .rule {
-                let unresolvedRules = rules.filter { !Self.ruleTargetIsResolvable($0.target, profiles: profiles, groups: groups) }
-                if !unresolvedRules.isEmpty {
-                    appendLog("WARNING: \(unresolvedRules.count) routing rule(s) reference nodes or groups that no longer exist; matching traffic is routed to the selected outbound instead.")
-                }
-                if !settings.sniffTraffic, rules.contains(where: { $0.kind == .protocolSniff }) {
-                    appendLog("WARNING: Protocol routing rules need traffic sniffing, which is off in Settings — those rules will never match.")
-                }
-            }
             // Ensure secrets are in the shared Keychain for the normal tokenized
             // config path. If signing does not expose a verifiable shared App
             // Group, startup falls back to an inline one-shot resolved config so
@@ -134,17 +87,24 @@ final class TunnelController {
             for item in profiles.flatMap(\.keychainSecretItems) {
                 secretStore.setValue(item.value, forKey: item.key)
             }
-            // Ensure the command-server auth token exists before the extension
-            // starts; the extension and telemetry client read the same shared
-            // Keychain value to gate/authenticate the command socket. If it
-            // cannot be read back, fail before starting: the extension refuses
-            // to run an unauthenticated command server.
-            let commandServerSecret = SecretStore.runtime.ensureCommandServerSecret()
-            guard !commandServerSecret.isEmpty,
-                  SecretStore.runtime.commandServerSecret() == commandServerSecret
-            else {
-                throw TunnelControllerError.runtimeSecretUnavailable
+
+            // Build once with hydrated values for exact pinned-core validation.
+            // The app never starts an instance; `validate` parses and closes it.
+            let resolvedConfig = try configBuilder.build(
+                profiles: profiles,
+                groups: groups,
+                selectedTarget: target,
+                routingMode: routingMode,
+                rules: rules,
+                settings: settings,
+            )
+            appendLog("Validating settings with Xray-core \(XrayConfigBuilder.coreVersion)")
+            try await XrayCoreClient.validate(configJSON: resolvedConfig)
+            guard startInProgress else {
+                appendLog("Tunnel start cancelled during Xray validation")
+                return
             }
+
             let secretNonce = UUID().uuidString
             let configContent = try configBuilder.build(
                 profiles: profiles.map { $0.tokenizingSecrets(nonce: secretNonce) },
@@ -153,20 +113,8 @@ final class TunnelController {
                 routingMode: routingMode,
                 rules: rules,
                 settings: settings,
-                logOutputPath: RuntimeEnvironment.tunnelLogFileURL.path,
             )
-            let inlineConfigContent: String? = if useInlineResolvedConfig {
-                try configBuilder.build(
-                    profiles: profiles,
-                    groups: groups,
-                    selectedTarget: target,
-                    routingMode: routingMode,
-                    rules: rules,
-                    settings: settings,
-                )
-            } else {
-                nil
-            }
+            let inlineConfigContent = useInlineResolvedConfig ? resolvedConfig : nil
             try sharedConfigStore.writeConfig(configContent)
 
             let manager = try await configuredManager(secretNonce: secretNonce, onDemand: settings.connectOnDemand, killSwitch: settings.killSwitch)
@@ -179,11 +127,13 @@ final class TunnelController {
                 return
             }
             observeStatus(for: manager.connection)
-            appendLog("Starting NetworkExtension tunnel with sing-box engine")
+            appendLog("Starting NetworkExtension tunnel with Xray-core \(XrayConfigBuilder.coreVersion)")
             var startOptions: [String: NSObject] = [
                 "appGroup": RuntimeEnvironment.appGroupIdentifier as NSString,
                 "secretNonce": secretNonce as NSString,
                 "includeAllNetworks": (settings.killSwitch ? "true" : "false") as NSString,
+                "dnsServers": XrayTunnelNetworkDefaults.dnsServers.joined(separator: ",") as NSString,
+                "tunnelMTU": String(XrayTunnelNetworkDefaults.mtu) as NSString,
             ]
             if let inlineConfigContent {
                 startOptions["configContent"] = inlineConfigContent as NSString
@@ -248,7 +198,6 @@ final class TunnelController {
         state = .disconnecting
         startInProgress = false
         diagnosticsTask?.cancel()
-        stopTelemetry()
         do {
             let manager = try await loadManager()
             // With on-demand rules active, iOS would immediately relaunch the
@@ -332,24 +281,6 @@ final class TunnelController {
         }
     }
 
-    private static func ruleTargetIsResolvable(_ target: OutboundTarget, profiles: [ProxyProfile], groups: [ProxyGroup]) -> Bool {
-        switch target {
-        case .selectedProxy, .direct, .reject:
-            return true
-        case let .profile(id):
-            return profiles.contains { $0.id == id }
-        case let .group(id):
-            return groups.contains { $0.id == id && $0.isEnabled }
-        case let .named(name):
-            let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if ["direct", "reject", "proxy"].contains(normalized) {
-                return true
-            }
-            return profiles.contains { $0.name.lowercased() == normalized }
-                || groups.contains { $0.name.lowercased() == normalized && $0.isEnabled }
-        }
-    }
-
     private func configuredManager(secretNonce: String, onDemand: Bool, killSwitch: Bool) async throws -> NETunnelProviderManager {
         let manager = try await loadManager()
         let tunnelProtocol = NETunnelProviderProtocol()
@@ -366,6 +297,8 @@ final class TunnelController {
             "appGroup": RuntimeEnvironment.appGroupIdentifier,
             "secretNonce": secretNonce,
             "includeAllNetworks": killSwitch ? "true" : "false",
+            "dnsServers": XrayTunnelNetworkDefaults.dnsServers.joined(separator: ","),
+            "tunnelMTU": String(XrayTunnelNetworkDefaults.mtu),
         ]
         // Kill switch: when on, iOS forces every flow through the tunnel and
         // drops traffic if the extension dies (fail-closed) instead of leaking
@@ -477,7 +410,6 @@ final class TunnelController {
             startInProgress = false
             loggedStartupStop = false
             diagnosticsTask?.cancel()
-            startTelemetry()
             if !wasConnected {
                 appendLog("Tunnel connected")
             }
@@ -506,10 +438,8 @@ final class TunnelController {
                 // otherwise quietly wash the red failure state away.
                 state = .disconnected
             }
-            stopTelemetry()
         @unknown default:
             state = .failed
-            stopTelemetry()
             appendLog("NetworkExtension reported an unknown status")
         }
     }
@@ -539,54 +469,6 @@ final class TunnelController {
                     self.appendLog("Diagnostic: \(hint)")
                 }
             }
-        }
-    }
-
-    private func startTelemetry() {
-        telemetryClient.start()
-        if isMonitoringConnections {
-            telemetryClient.startConnections()
-        }
-    }
-
-    private func stopTelemetry() {
-        telemetryClient.stop()
-        telemetryIsConnected = false
-        telemetryError = nil
-    }
-
-    /// Called when a connections UI appears/disappears; subscribes to the
-    /// per-connection event stream only while it is actually displayed.
-    func beginConnectionsMonitoring() {
-        isMonitoringConnections = true
-        if state.isConnected {
-            telemetryClient.startConnections()
-        }
-    }
-
-    func endConnectionsMonitoring() {
-        isMonitoringConnections = false
-        telemetryClient.stopConnections()
-    }
-
-    func closeAllConnections() {
-        telemetryClient.closeAllConnections()
-        appendLog("Requested close for all active connections")
-    }
-
-    func closeConnection(id: String) {
-        telemetryClient.closeConnection(id: id)
-        appendLog("Requested close for connection \(id)")
-    }
-}
-
-private enum TunnelControllerError: LocalizedError {
-    case runtimeSecretUnavailable
-
-    var errorDescription: String? {
-        switch self {
-        case .runtimeSecretUnavailable:
-            "The command-server authentication token could not be saved to the shared Keychain. Verify the keychain-access-groups entitlement on both Hop.app and HopTunnel.appex."
         }
     }
 }

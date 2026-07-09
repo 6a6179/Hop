@@ -47,13 +47,15 @@ final class ProxyLinkParserTests: XCTestCase {
         }
     }
 
-    func testImportWarnsForVLESSEncryptionAuthLink() throws {
+    func testImportPreservesSupportedVLESSEncryptionAuthLinkWithoutCompatibilityWarning() throws {
         let result = try importService.importText("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?encryption=\(mlkem768Encryption)#Tokyo")
 
         XCTAssertEqual(result.profiles.count, 1)
-        XCTAssertTrue(result.warnings.contains { warning in
-            warning.message.contains("ML-KEM-768 auth") && warning.message.contains("cannot run Xray VLESS Encryption/Auth yet")
-        })
+        XCTAssertFalse(result.warnings.contains { $0.message.contains("cannot run Xray VLESS Encryption/Auth") })
+        guard case let .vless(options) = result.profiles.first?.options else {
+            return XCTFail("Expected VLESS options")
+        }
+        XCTAssertEqual(options.encryption, mlkem768Encryption)
     }
 
     func testParsesTrojanTLSLink() throws {
@@ -78,16 +80,10 @@ final class ProxyLinkParserTests: XCTestCase {
         }
     }
 
-    func testParsesTUICTLSLink() throws {
-        let profile = try parse("tuic://22222222-2222-4222-8222-222222222222:secret@tuic.example.net:443?sni=tuic.example.net&congestion_control=bbr#TUIC")
-
-        XCTAssertEqual(profile.proto, .tuic)
-        XCTAssertEqual(profile.security.layer, .tls)
-        if case let .tuic(options) = profile.options {
-            XCTAssertEqual(options.congestionControl, "bbr")
-        } else {
-            XCTFail("Expected TUIC options")
-        }
+    func testRejectsTUICBecausePinnedXrayHasNoOutbound() {
+        XCTAssertThrowsError(
+            try parse("tuic://22222222-2222-4222-8222-222222222222:secret@tuic.example.net:443?sni=tuic.example.net&congestion_control=bbr#TUIC"),
+        )
     }
 
     func testParsesShadowsocksSIP002AndLegacyBase64Links() throws {
@@ -215,19 +211,12 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(encoded.profiles.map(\.name), ["One", "Two"])
     }
 
-    // MARK: - Default TLS for Hysteria2 and TUIC (regression)
+    // MARK: - Default TLS for Hysteria2
 
     func testHysteria2WithoutSecurityParamDefaultsToTLS() throws {
         // No `security=` or `sni=` or `tls=` param — just the bare minimum
         let profile = try parse("hysteria2://pass@example.com:443#n")
         XCTAssertEqual(profile.security.layer, .tls, "hysteria2 with no security param must default to TLS")
-        XCTAssertEqual(profile.security.tls?.serverName, "example.com", "server name must default to the host")
-    }
-
-    func testTUICWithoutSecurityParamDefaultsToTLS() throws {
-        // tuic:// requires uuid:password in user info
-        let profile = try parse("tuic://22222222-2222-4222-8222-222222222222:pass@example.com:443#n")
-        XCTAssertEqual(profile.security.layer, .tls, "tuic with no security param must default to TLS")
         XCTAssertEqual(profile.security.tls?.serverName, "example.com", "server name must default to the host")
     }
 
@@ -295,8 +284,8 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(result.rules.last?.kind, .final)
         XCTAssertEqual(result.rules.last?.target, .named("Auto"))
         XCTAssertGreaterThanOrEqual(result.warnings.count, 2)
-        XCTAssertTrue(result.warnings.contains { $0.message.contains("X25519 auth") })
-        XCTAssertTrue(result.warnings.contains { $0.message.contains("ML-DSA-65") })
+        XCTAssertFalse(result.warnings.contains { $0.message.contains("X25519 auth") })
+        XCTAssertFalse(result.warnings.contains { $0.message.contains("ML-DSA-65") })
         if case let .vless(options) = result.profiles.first?.options {
             XCTAssertEqual(options.encryption, x25519Encryption)
         } else {

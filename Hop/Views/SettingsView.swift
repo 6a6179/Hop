@@ -93,6 +93,10 @@ struct SettingsView: View {
             }
 
             Section("Data") {
+                NavigationLink("Advanced Xray Configuration") {
+                    XrayAdvancedSettingsView()
+                }
+
                 Button(role: .destructive) {
                     showingSettingsReset = true
                 } label: {
@@ -102,7 +106,7 @@ struct SettingsView: View {
 
             Section("About") {
                 LabeledContent("Mode", value: "Packet tunnel")
-                LabeledContent("Engine", value: "sing-box/libbox")
+                LabeledContent("Engine", value: "Xray-core v26.6.27")
                 Text("Hop is original software and does not copy Shadowrocket assets, branding, or App Store metadata.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -116,6 +120,82 @@ struct SettingsView: View {
             }
         } message: {
             Text("This returns Settings to the default values.")
+        }
+    }
+}
+
+private struct XrayAdvancedSettingsView: View {
+    @Environment(HopStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var json = "{}"
+    @State private var didLoad = false
+
+    var body: some View {
+        Form {
+            Section {
+                TextEditor(text: $json)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(minHeight: 360)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            } footer: {
+                Text("Accepts client-side DNS, FakeDNS, routing, policy, balancing, observatory, and verified local-geodata overrides. Hop owns the TUN inbound, logging, and all listeners.")
+            }
+
+            if let errorMessage {
+                Section {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+        .navigationTitle("Advanced Xray")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save") {
+                    guard let document else { return }
+                    var settings = store.settings
+                    settings.xrayAdvanced = document.isEmpty ? nil : document
+                    store.settings = settings
+                    dismiss()
+                }
+                .disabled(document == nil)
+            }
+        }
+        .onAppear {
+            guard !didLoad else { return }
+            didLoad = true
+            json = store.settings.xrayAdvanced?.jsonString ?? "{}"
+        }
+    }
+
+    private var document: XrayAdvancedDocument? {
+        guard errorMessage == nil else { return nil }
+        return try? XrayAdvancedDocument(jsonString: json)
+    }
+
+    private var errorMessage: String? {
+        do {
+            let document = try XrayAdvancedDocument(jsonString: json)
+            guard document.encodedByteCount <= IOSRuntimeLimits.default.maxGlobalAdvancedBytes else {
+                return "Advanced global JSON exceeds the 256 KiB iOS limit."
+            }
+            var candidateSettings = store.settings
+            candidateSettings.xrayAdvanced = document.isEmpty ? nil : document
+            if let issue = XrayConfigBuilder().validationIssues(
+                profiles: [],
+                groups: [],
+                selectedTarget: .direct,
+                routingMode: .direct,
+                rules: [],
+                settings: candidateSettings,
+            ).first {
+                return "\(issue.path): \(issue.message)"
+            }
+            return nil
+        } catch {
+            return error.localizedDescription
         }
     }
 }

@@ -288,8 +288,8 @@ final class ImportSecurityTests: XCTestCase {
 
     // MARK: - Config builder enforcement (findings 8, 12 defense-in-depth)
 
-    func testConfigBuilderSanitizesURLTestAndDomainRegex() throws {
-        let builder = SingBoxConfigBuilder()
+    func testConfigBuilderRejectsUnsafeURLTestAndDomainRegex() throws {
+        let builder = XrayConfigBuilder()
         let profile = SampleData.trojanTLS
         let group = ProxyGroup(
             name: "Auto",
@@ -299,28 +299,24 @@ final class ImportSecurityTests: XCTestCase {
             testOptions: ProxyGroupTestOptions(url: "http://169.254.169.254/x", intervalSeconds: 0, toleranceMilliseconds: 9_999_999),
         )
         let longPattern = String(repeating: "a", count: ImportPolicy.maxRegexPatternLength + 10)
-        let rules = [RoutingRule(kind: .domainRegex, value: longPattern, target: .direct)]
-
-        let json = try builder.build(
+        XCTAssertThrowsError(try builder.build(
             profiles: [profile],
             groups: [group],
             selectedTarget: .group(group.id),
+            routingMode: .global,
+            rules: [],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("probe"))
+        }
+
+        XCTAssertThrowsError(try builder.build(
+            profiles: [profile],
+            groups: [],
+            selectedTarget: .profile(profile.id),
             routingMode: .rule,
-            rules: rules,
-        )
-        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
-        let urlTest = try XCTUnwrap(outbounds.first { ($0["type"] as? String) == "urltest" })
-
-        XCTAssertEqual(urlTest["url"] as? String, ProxyGroupTestOptions.defaultURL)
-        XCTAssertEqual(urlTest["interval"] as? String, "\(ImportPolicy.minURLTestIntervalSeconds)s")
-        XCTAssertEqual(urlTest["tolerance"] as? Int, ImportPolicy.maxURLTestToleranceMilliseconds)
-
-        let route = try XCTUnwrap(root["route"] as? [String: Any])
-        for rule in route["rules"] as? [[String: Any]] ?? [] {
-            if let regexes = rule["domain_regex"] as? [String] {
-                XCTAssertFalse(regexes.contains(longPattern))
-            }
+            rules: [RoutingRule(kind: .domainRegex, value: longPattern, target: .direct)],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("regex"))
         }
     }
 
@@ -421,18 +417,18 @@ final class ImportSecurityTests: XCTestCase {
     }
 
     func testGeoRuleSetRejectsPathTraversalCategory() throws {
-        let builder = SingBoxConfigBuilder()
+        let builder = XrayConfigBuilder()
         let profile = SampleData.trojanTLS
         let rules = [RoutingRule(kind: .geoSite, value: "../../evil/repo/main/payload", target: .direct)]
 
-        let json = try builder.build(
+        XCTAssertThrowsError(try builder.build(
             profiles: [profile],
             groups: [],
             selectedTarget: .profile(profile.id),
             routingMode: .rule,
             rules: rules,
-        )
-        XCTAssertFalse(json.contains("../"), "geo category must not introduce path traversal into the rule-set URL")
-        XCTAssertFalse(json.contains("evil/repo"), "unsafe geo category must be dropped, not fetched")
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Unsafe GeoSite/GeoIP category"))
+        }
     }
 }

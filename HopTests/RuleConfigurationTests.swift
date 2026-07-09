@@ -2,7 +2,7 @@
 import XCTest
 
 final class RuleConfigurationTests: XCTestCase {
-    private let builder = SingBoxConfigBuilder()
+    private let builder = XrayConfigBuilder()
 
     private func tempStateURL() -> URL {
         FileManager.default.temporaryDirectory
@@ -28,12 +28,11 @@ final class RuleConfigurationTests: XCTestCase {
         XCTAssertTrue(suffixes.contains("apple-dns.net"))
     }
 
-    func testChinaConfigurationBypassesChinaAndBlocksAds() {
+    func testChinaConfigurationUsesMemoryBoundedGeoIP() {
         let rules = RuleConfiguration.china().rules
-        XCTAssertTrue(rules.contains { $0.kind == .geoSite && $0.value == "cn" && $0.target == .direct })
+        XCTAssertFalse(rules.contains { $0.kind == .geoSite })
         XCTAssertTrue(rules.contains { $0.kind == .geoIP && $0.value == "cn" && $0.target == .direct })
         XCTAssertTrue(rules.contains { $0.kind == .geoIP && $0.value == "private" && $0.target == .direct })
-        XCTAssertTrue(rules.contains { $0.kind == .geoSite && $0.value == "category-ads-all" && $0.target == .reject })
         XCTAssertTrue(rules.contains { $0.kind == .domainSuffix && $0.value.contains("push.apple.com") && $0.target == .direct })
     }
 
@@ -45,33 +44,48 @@ final class RuleConfigurationTests: XCTestCase {
         XCTAssertFalse(rules.contains { $0.kind == .geoSite && $0.value == "ir" })
     }
 
-    func testChinaConfigurationGeneratesCNRuleSetsRoutedToDirect() throws {
+    func testChinaConfigurationGeneratesXrayGeoRulesRoutedToDirect() async throws {
+        let profile = SampleData.trojanTLS
         let json = try builder.build(
-            profiles: SampleData.profiles,
-            groups: SampleData.groups,
-            selectedTarget: .group(SampleData.proxyGroup.id),
+            profiles: [profile],
+            groups: [],
+            selectedTarget: .profile(profile.id),
             routingMode: .rule,
             rules: RuleConfiguration.china().rules,
         )
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
-        let route = try XCTUnwrap(root["route"] as? [String: Any])
+        let routing = try XCTUnwrap(root["routing"] as? [String: Any])
+        let rules = routing["rules"] as? [[String: Any]] ?? []
+        let directRules = rules.filter { ($0["outboundTag"] as? String) == "direct" }
 
-        let tags = Set((route["rule_set"] as? [[String: Any]] ?? []).compactMap { $0["tag"] as? String })
-        XCTAssertTrue(tags.contains("geosite-cn"))
-        XCTAssertTrue(tags.contains("geoip-cn"))
-        XCTAssertTrue(tags.contains("geosite-category-ads-all"))
+        XCTAssertTrue(directRules.contains { ($0["ip"] as? [String])?.contains("geoip:cn") == true })
+        XCTAssertEqual(routing["domainStrategy"] as? String, "IPIfNonMatch")
 
-        let directRuleSets = (route["rules"] as? [[String: Any]] ?? [])
-            .filter { ($0["outbound"] as? String) == "direct" }
-            .flatMap { $0["rule_set"] as? [String] ?? [] }
-        XCTAssertTrue(directRuleSets.contains("geosite-cn"))
-        XCTAssertTrue(directRuleSets.contains("geoip-cn"))
+        let directDomains = directRules.flatMap { $0["domain"] as? [String] ?? [] }
+        XCTAssertTrue(directDomains.contains("domain:push.apple.com"))
+        XCTAssertTrue(directDomains.contains("domain:icloud.com"))
 
-        let directDomainSuffixes = (route["rules"] as? [[String: Any]] ?? [])
-            .filter { ($0["outbound"] as? String) == "direct" }
-            .flatMap { $0["domain_suffix"] as? [String] ?? [] }
-        XCTAssertTrue(directDomainSuffixes.contains("push.apple.com"))
-        XCTAssertTrue(directDomainSuffixes.contains("icloud.com"))
+        // Exact pinned-core parsing proves the pruned asset also includes the
+        // PRIVATE entry used by the China preset.
+        try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testIranConfigurationValidatesWithPinnedLocalGeodata() async throws {
+        let profile = SampleData.trojanTLS
+        let json = try builder.build(
+            profiles: [profile],
+            groups: [],
+            selectedTarget: .profile(profile.id),
+            routingMode: .rule,
+            rules: RuleConfiguration.iran().rules,
+        )
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let routing = try XCTUnwrap(root["routing"] as? [String: Any])
+        let rules = routing["rules"] as? [[String: Any]] ?? []
+
+        XCTAssertTrue(rules.contains { ($0["domain"] as? [String])?.contains("geosite:category-ir") == true })
+        XCTAssertTrue(rules.contains { ($0["ip"] as? [String])?.contains("geoip:ir") == true })
+        try await XrayCoreClient.validate(configJSON: json)
     }
 
     // MARK: - Store: select / add / update / delete
@@ -171,6 +185,7 @@ final class RuleConfigurationTests: XCTestCase {
 
         let store = HopStore(dataStore: HopAppDataStore(url: url, secretStore: secretStore, authenticationStore: authStore))
         let migratedDefault = try XCTUnwrap(store.ruleConfigurations.first { $0.id == oldDefault.id })
+        XCTAssertFalse(migratedDefault.rules.contains { $0.kind == .geoSite && $0.value == "category-ads-all" })
         let appleRule = try XCTUnwrap(migratedDefault.rules.first { $0.kind == .domainSuffix && $0.target == .direct && $0.value.contains("push.apple.com") })
         XCTAssertTrue(appleRule.value.contains("icloud.com"))
         XCTAssertTrue(appleRule.value.contains("apple.com"))

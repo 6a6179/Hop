@@ -51,7 +51,6 @@ struct ProfileShareQRSheet: View {
                     Button("Done") {
                         dismiss()
                     }
-                    .buttonStyle(.glass)
                 }
             }
         }

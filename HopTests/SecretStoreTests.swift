@@ -65,28 +65,9 @@ final class SecretStoreTests: XCTestCase {
         XCTAssertEqual(store.value(forKey: "weird"), messy)
     }
 
-    // MARK: - Command-server secret
-
-    func testCommandServerSecretIsEmptyUntilGenerated() {
-        let store = makeStore()
-        defer { store.removeAll() }
-
-        XCTAssertTrue(store.commandServerSecret().isEmpty, "no secret should exist before first use")
-    }
-
-    func testEnsureCommandServerSecretGeneratesAndIsStable() {
-        let store = makeStore()
-        defer { store.removeAll() }
-
-        let created = store.ensureCommandServerSecret()
-        XCTAssertFalse(created.isEmpty, "a secret must be generated on first use")
-        XCTAssertEqual(store.ensureCommandServerSecret(), created, "the secret must be stable across calls")
-        XCTAssertEqual(store.commandServerSecret(), created, "a read must return the generated secret")
-    }
-
-    /// The command-server secret must live in its own Keychain service so a
-    /// profile save's `replaceAll` (which rewrites the *profile* secret set)
-    /// never evicts it. This guards the wiring that keeps the two stores apart.
+    /// Runtime authentication keys must live in their own Keychain service so
+    /// a profile save's `replaceAll` (which rewrites the *profile* secret set)
+    /// never evicts them. This guards the wiring that keeps the stores apart.
     func testRuntimeServiceIsSeparateFromProfileSecrets() {
         XCTAssertNotEqual(SecretStore.runtimeService, SecretStore.defaultService)
     }
@@ -168,6 +149,41 @@ final class SecretStoreTests: XCTestCase {
         XCTAssertEqual(hydrated, profile)
     }
 
+    func testWireGuardPeerPreSharedKeysUseDistinctStableAccounts() throws {
+        let store = makeStore()
+        defer { store.removeAll() }
+        let peers = try [
+            WireGuardPeer(id: XCTUnwrap(UUID(uuidString: "11111111-1111-4111-8111-111111111111")), publicKey: "one", preSharedKey: "psk-one"),
+            WireGuardPeer(id: XCTUnwrap(UUID(uuidString: "22222222-2222-4222-8222-222222222222")), publicKey: "two", preSharedKey: "psk-two"),
+        ]
+        let profile = ProxyProfile(
+            name: "WG",
+            endpoint: Endpoint(host: "wg.example.net", port: 51820),
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "private",
+                peerPublicKey: peers[0].publicKey,
+                localAddress: ["10.0.0.2/32"],
+                peers: peers,
+            )),
+            security: .none,
+        )
+
+        let pskItems = profile.keychainSecretItems.filter { $0.value.hasPrefix("psk-") }
+        XCTAssertEqual(pskItems.count, 2)
+        XCTAssertEqual(Set(pskItems.map(\.key)).count, 2)
+        profile.keychainSecretItems.forEach { store.setValue($0.value, forKey: $0.key) }
+
+        let redacted = profile.redactingSecrets()
+        guard case let .wireGuard(redactedOptions) = redacted.options else { return XCTFail("Expected WireGuard") }
+        XCTAssertEqual(redactedOptions.peers?.map(\.preSharedKey), ["", ""])
+        XCTAssertEqual(redacted.hydratingSecrets(from: store), profile)
+
+        guard case let .wireGuard(tokenizedOptions) = profile.tokenizingSecrets(nonce: "nonce").options else { return XCTFail("Expected WireGuard") }
+        let tokens = tokenizedOptions.peers?.compactMap(\.preSharedKey) ?? []
+        XCTAssertEqual(Set(tokens).count, 2)
+        XCTAssertTrue(tokens.allSatisfy { $0.hasPrefix("##HOP_SECRET:nonce:") })
+    }
+
     // MARK: - Tokenization + resolution
 
     func testTokenizedConfigCarriesNoSecretsAndResolves() throws {
@@ -180,7 +196,7 @@ final class SecretStoreTests: XCTestCase {
         }
 
         let nonce = "test-nonce-AAAA"
-        let json = try SingBoxConfigBuilder().build(profile: profile.tokenizingSecrets(nonce: nonce), routingMode: .global, rules: [])
+        let json = try XrayConfigBuilder().build(profile: profile.tokenizingSecrets(nonce: nonce), routingMode: .global, rules: [])
         XCTAssertFalse(json.contains("replace-me"), "tokenized config must not contain the secret")
         XCTAssertTrue(json.contains("##HOP_SECRET:"), "tokenized config must reference the secret")
 
@@ -246,6 +262,61 @@ final class SecretStoreTests: XCTestCase {
 
         let loaded = try XCTUnwrap(dataStore.load())
         XCTAssertEqual(loaded.profiles, SampleData.profiles, "secrets must be restored from the Keychain on load")
+    }
+
+    func testAdvancedSecretSidecarPersistsReferencesAndHydratesValues() throws {
+        let url = makeTempStateURL()
+        let store = makeStore()
+        let dataStore = HopAppDataStore(url: url, secretStore: store, authenticationStore: store)
+        defer {
+            store.removeAll()
+            try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
+        }
+
+        var profile = SampleData.vlessReality
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "settings": .object(["seed": .string("vless-seed-secret")]),
+            "streamSettings": .object([
+                "wsSettings": .object([
+                    "headers": .object(["Authorization": .string("Bearer advanced-secret")]),
+                ]),
+            ]),
+        ])
+        profile.transport.finalMask = .object([
+            "udp": .array([
+                .object([
+                    "type": .string("salamander"),
+                    "settings": .object(["password": .string("mask-password")]),
+                ]),
+                .object([
+                    "type": .string("realm"),
+                    "settings": .object(["url": .string("realm://host/token")]),
+                ]),
+            ]),
+        ])
+
+        let data = HopAppData(
+            profiles: [profile],
+            groups: [],
+            subscriptions: [],
+            routingMode: .global,
+            selectedTarget: .profile(profile.id),
+            settings: .defaults,
+            logs: [],
+        )
+        dataStore.save(data)
+
+        let raw = try String(contentsOf: url, encoding: .utf8)
+        for secret in ["vless-seed-secret", "Bearer advanced-secret", "mask-password", "realm://host/token"] {
+            XCTAssertFalse(raw.contains(secret))
+        }
+        XCTAssertTrue(raw.contains("##HOP_XRAY_SECRET_REF:"))
+        XCTAssertEqual(try XCTUnwrap(dataStore.load()).profiles, [profile])
+
+        let tokenized = profile.tokenizingSecrets(nonce: "advanced-nonce")
+        let tokenizedJSON = try String(data: JSONEncoder().encode(tokenized), encoding: .utf8) ?? ""
+        XCTAssertFalse(tokenizedJSON.contains("vless-seed-secret"))
+        XCTAssertTrue(tokenizedJSON.contains("##HOP_SECRET:advanced-nonce:"))
     }
 
     func testLegacyPlaintextStateIsMigratedOnLoad() throws {

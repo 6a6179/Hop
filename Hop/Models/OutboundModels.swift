@@ -45,17 +45,6 @@ enum ProxyGroupType: String, CaseIterable, Codable, Identifiable {
             "Unsupported"
         }
     }
-
-    var singBoxType: String? {
-        switch self {
-        case .select:
-            "selector"
-        case .urlTest:
-            "urltest"
-        case .unsupported:
-            nil
-        }
-    }
 }
 
 struct ProxyGroupTestOptions: Hashable, Codable {

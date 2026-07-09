@@ -4,7 +4,7 @@ import Foundation
 /// HMACs the App Group tunnel config before the extension resolves any secret
 /// tokens from it. App Group containers are a sharing boundary, not an
 /// integrity boundary: another process with the same group could otherwise
-/// tamper `hop-sing-box.json`, reuse the current nonce-bearing tokens, and make
+/// tamper `hop-xray.json`, reuse the current nonce-bearing tokens, and make
 /// the extension resolve Keychain credentials into attacker-controlled config.
 enum TunnelConfigAuthenticator {
     static func signatureURL(forConfigURL url: URL) -> URL {

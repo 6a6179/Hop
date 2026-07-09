@@ -8,6 +8,7 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
     var security: ProxySecurity
     var transport: TransportOptions
     var subscriptionID: UUID?
+    var xrayAdvanced: XrayAdvancedDocument?
 
     init(
         id: UUID = UUID(),
@@ -17,6 +18,7 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         security: ProxySecurity,
         transport: TransportOptions = .tcp,
         subscriptionID: UUID? = nil,
+        xrayAdvanced: XrayAdvancedDocument? = nil,
     ) {
         self.id = id
         self.name = name
@@ -25,6 +27,7 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         self.security = security
         self.transport = transport
         self.subscriptionID = subscriptionID
+        self.xrayAdvanced = xrayAdvanced
     }
 
     var proto: ProxyProtocol {
@@ -49,23 +52,6 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         return options
     }
 
-    var vlessEncryptionRuntimeWarning: String? {
-        guard proto == .vless,
-              let options = vlessOptions,
-              options.normalizedEncryption != nil
-        else {
-            return nil
-        }
-        return "\(options.encryptionAuthLabel) is preserved, but the bundled sing-box/libbox engine cannot run Xray VLESS Encryption/Auth yet."
-    }
-
-    var realityMLDSA65RuntimeWarning: String? {
-        guard security.reality?.mldsa65Verify?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
-            return nil
-        }
-        return "REALITY ML-DSA-65 verification is preserved, but the bundled sing-box/libbox engine cannot enforce pqv yet."
-    }
-
     /// The config builder only emits Hysteria2 obfuscation when both the type
     /// and password are present; an obfs type without a password is silently
     /// unusable at runtime, so it surfaces as a warning instead.
@@ -80,6 +66,6 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
     }
 
     var importRuntimeWarnings: [String] {
-        [vlessEncryptionRuntimeWarning, realityMLDSA65RuntimeWarning, hysteria2ObfsRuntimeWarning].compactMap(\.self)
+        [hysteria2ObfsRuntimeWarning].compactMap(\.self)
     }
 }

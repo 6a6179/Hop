@@ -1,374 +1,163 @@
+import Darwin
 import Foundation
-import Network
 import NetworkExtension
 
-#if canImport(Libbox)
-    @preconcurrency import Libbox
+struct TunnelDescriptor: Sendable {
+    let fileDescriptor: Int32
+    let interfaceName: String
+}
 
-    /// Bridges sing-box's `libbox` engine to iOS NetworkExtension APIs.
-    ///
-    /// libbox drives the tunnel through this object: it hands us the TUN
-    /// configuration (`openTun`), asks about the default interface, and reports
-    /// status. The method set here matches the sing-box **v1.13.12** libbox API
-    /// (see `scripts/build-libbox.sh`); newer/older tags rename some of these,
-    /// so the engine version and this file must move together.
-    ///
-    /// Modeled on sing-box-for-apple's `ExtensionPlatformInterface`, trimmed to
-    /// what Hop needs (iOS, full-tunnel, no system-proxy / multi-platform paths).
-    final class HopPlatformInterface: NSObject {
-        private weak var provider: PacketTunnelProvider?
-        private var networkSettings: NEPacketTunnelNetworkSettings?
-        private var pathMonitor: NWPathMonitor?
+/// Applies the deterministic NetworkExtension configuration and locates the
+/// system-owned utun descriptor consumed by Xray's native iOS TUN inbound.
+/// The descriptor is borrowed: neither this adapter nor Xray may close it.
+final class HopPlatformInterface {
+    private weak var provider: NEPacketTunnelProvider?
 
-        init(provider: PacketTunnelProvider) {
-            self.provider = provider
+    init(provider: NEPacketTunnelProvider) {
+        self.provider = provider
+    }
+
+    func configure(dnsServers: [String], mtu: Int, includeAllNetworks: Bool) throws -> TunnelDescriptor {
+        guard let provider else {
+            throw HopTunnelError("tunnel provider was deallocated")
         }
 
-        /// Tear down monitors when the service stops; called from the provider.
-        func reset() {
-            networkSettings = nil
-            pathMonitor?.cancel()
-            pathMonitor = nil
+        let settings = Self.makeNetworkSettings(
+            dnsServers: dnsServers,
+            mtu: mtu,
+        )
+        // Full-tunnel/kill-switch policy is configured on the app-owned
+        // NETunnelProviderProtocol. NEPacketTunnelNetworkSettings has no
+        // includeAllNetworks property; its default routes below provide the
+        // matching data-plane configuration.
+        _ = includeAllNetworks
+        try Self.applyNetworkSettings(settings, to: provider)
+
+        if let descriptor = Self.networkExtensionTunnelDescriptor() {
+            return descriptor
+        }
+        throw HopTunnelError("could not find the NetworkExtension utun file descriptor after scanning descriptors 3...1024")
+    }
+
+    func reset() {
+        // NetworkExtension tears down the borrowed descriptor and settings.
+        // Keeping reset explicit makes the service lifecycle intention clear.
+    }
+
+    private static func makeNetworkSettings(
+        dnsServers: [String],
+        mtu: Int,
+    ) -> NEPacketTunnelNetworkSettings {
+        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: XrayTunnelNetworkDefaults.xrayIPv4Address)
+        settings.mtu = NSNumber(value: clampedMTU(mtu))
+
+        let ipv4 = NEIPv4Settings(
+            addresses: [XrayTunnelNetworkDefaults.providerIPv4Address],
+            subnetMasks: [XrayTunnelNetworkDefaults.ipv4Mask],
+        )
+        ipv4.includedRoutes = [NEIPv4Route.default()]
+        settings.ipv4Settings = ipv4
+
+        let ipv6 = NEIPv6Settings(
+            addresses: [XrayTunnelNetworkDefaults.providerIPv6Address],
+            networkPrefixLengths: [NSNumber(value: XrayTunnelNetworkDefaults.ipv6PrefixLength)],
+        )
+        ipv6.includedRoutes = [NEIPv6Route.default()]
+        settings.ipv6Settings = ipv6
+
+        let requestedDNS = dnsServers.filter(Self.isIPAddress)
+        let dns = NEDNSSettings(servers: requestedDNS.isEmpty ? XrayTunnelNetworkDefaults.dnsServers : requestedDNS)
+        dns.matchDomains = [""]
+        settings.dnsSettings = dns
+        return settings
+    }
+
+    private static func isIPAddress(_ value: String) -> Bool {
+        var ipv4 = in_addr()
+        var ipv6 = in6_addr()
+        return value.withCString {
+            inet_pton(AF_INET, $0, &ipv4) == 1 || inet_pton(AF_INET6, $0, &ipv6) == 1
         }
     }
 
-    // MARK: - LibboxPlatformInterfaceProtocol
-
-    extension HopPlatformInterface: LibboxPlatformInterfaceProtocol {
-        func openTun(_ options: LibboxTunOptionsProtocol?, ret0_: UnsafeMutablePointer<Int32>?) throws {
-            guard let options else { throw HopTunnelError("libbox passed nil tun options") }
-            guard let ret0_ else { throw HopTunnelError("libbox passed nil return pointer") }
-            guard let provider else { throw HopTunnelError("tunnel provider was deallocated") }
-
-            let settings = try Self.makeNetworkSettings(from: options)
-            networkSettings = settings
-
-            try Self.applyNetworkSettings(settings, to: provider)
-
-            // The NEPacketTunnelFlow exposes the utun fd via KVC; fall back to
-            // libbox's own loop-based lookup if Apple ever hides it.
-            if let fd = provider.packetFlow.value(forKeyPath: "socket.fileDescriptor") as? Int32 {
-                ret0_.pointee = fd
-                return
-            }
-            let loopFd = LibboxGetTunnelFileDescriptor()
-            if loopFd != -1 {
-                ret0_.pointee = loopFd
-            } else {
-                throw HopTunnelError("could not obtain the tun file descriptor")
-            }
-        }
-
-        func clearDNSCache() {
-            guard let provider, let networkSettings else { return }
-            // Re-applying the settings flushes the system resolver cache.
-            try? Self.applyNetworkSettings(nil, to: provider)
-            try? Self.applyNetworkSettings(networkSettings, to: provider)
-        }
-
-        func startDefaultInterfaceMonitor(_ listener: LibboxInterfaceUpdateListenerProtocol?) throws {
-            guard let listener else { return }
-            let listenerBox = DefaultInterfaceListener(listener)
-            let monitor = NWPathMonitor()
-            pathMonitor = monitor
-            let semaphore = DispatchSemaphore(value: 0)
-            monitor.pathUpdateHandler = { path in
-                listenerBox.notify(of: path)
-                semaphore.signal()
-                monitor.pathUpdateHandler = { path in
-                    listenerBox.notify(of: path)
-                }
-            }
-            monitor.start(queue: .global())
-            if semaphore.wait(timeout: .now() + .seconds(5)) == .timedOut {
-                monitor.cancel()
-                pathMonitor = nil
-                throw HopTunnelError("timed out waiting for the default network interface")
-            }
-        }
-
-        func closeDefaultInterfaceMonitor(_: LibboxInterfaceUpdateListenerProtocol?) throws {
-            pathMonitor?.cancel()
-            pathMonitor = nil
-        }
-
-        func getInterfaces() throws -> LibboxNetworkInterfaceIteratorProtocol {
-            guard let path = pathMonitor?.currentPath, path.status != .unsatisfied else {
-                return NetworkInterfaceIterator([])
-            }
-            let interfaces = path.availableInterfaces.map { nwInterface -> LibboxNetworkInterface in
-                let interface = LibboxNetworkInterface()
-                interface.name = nwInterface.name
-                interface.index = Int32(nwInterface.index)
-                switch nwInterface.type {
-                case .wifi:
-                    interface.type = LibboxInterfaceTypeWIFI
-                case .cellular:
-                    interface.type = LibboxInterfaceTypeCellular
-                case .wiredEthernet:
-                    interface.type = LibboxInterfaceTypeEthernet
-                default:
-                    interface.type = LibboxInterfaceTypeOther
-                }
-                return interface
-            }
-            return NetworkInterfaceIterator(interfaces)
-        }
-
-        func findConnectionOwner(
-            _: Int32,
-            sourceAddress _: String?,
-            sourcePort _: Int32,
-            destinationAddress _: String?,
-            destinationPort _: Int32,
-        ) throws -> LibboxConnectionOwner {
-            throw HopTunnelError("connection owner lookup is not supported on iOS")
-        }
-
-        func localDNSTransport() -> (any LibboxLocalDNSTransportProtocol)? {
-            nil
-        }
-
-        func usePlatformAutoDetectControl() -> Bool {
-            false
-        }
-
-        func autoDetectControl(_: Int32) throws {}
-        func useProcFS() -> Bool {
-            false
-        }
-
-        func underNetworkExtension() -> Bool {
-            true
-        }
-
-        func includeAllNetworks() -> Bool {
-            provider?.includeAllNetworksSetting ?? false
-        }
-
-        func readWIFIState() -> LibboxWIFIState? {
-            nil
-        }
-
-        func systemCertificates() -> (any LibboxStringIteratorProtocol)? {
-            nil
-        }
-
-        func send(_: LibboxNotification?) throws {}
-
-        // MARK: Settings construction
-
-        private static func makeNetworkSettings(from options: LibboxTunOptionsProtocol) throws -> NEPacketTunnelNetworkSettings {
-            let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: "127.0.0.1")
-            guard options.getAutoRoute() else {
-                return settings
-            }
-
-            settings.mtu = NSNumber(value: options.getMTU())
-            let dnsServer = try options.getDNSServerAddress()
-            settings.dnsSettings = NEDNSSettings(servers: [dnsServer.value])
-
-            var ipv4Addresses: [String] = []
-            var ipv4Masks: [String] = []
-            if let iterator = options.getInet4Address() {
-                while iterator.hasNext() {
-                    guard let prefix = iterator.next() else { break }
-                    ipv4Addresses.append(prefix.address())
-                    ipv4Masks.append(prefix.mask())
-                }
-            }
-            if !ipv4Addresses.isEmpty {
-                let ipv4 = NEIPv4Settings(addresses: ipv4Addresses, subnetMasks: ipv4Masks)
-                ipv4.includedRoutes = includedIPv4Routes(options)
-                ipv4.excludedRoutes = excludedIPv4Routes(options)
-                settings.ipv4Settings = ipv4
-            }
-
-            var ipv6Addresses: [String] = []
-            var ipv6Prefixes: [NSNumber] = []
-            if let iterator = options.getInet6Address() {
-                while iterator.hasNext() {
-                    guard let prefix = iterator.next() else { break }
-                    ipv6Addresses.append(prefix.address())
-                    ipv6Prefixes.append(NSNumber(value: prefix.prefix()))
-                }
-            }
-            if !ipv6Addresses.isEmpty {
-                let ipv6 = NEIPv6Settings(addresses: ipv6Addresses, networkPrefixLengths: ipv6Prefixes)
-                ipv6.includedRoutes = includedIPv6Routes(options)
-                ipv6.excludedRoutes = excludedIPv6Routes(options)
-                settings.ipv6Settings = ipv6
-            }
-
-            return settings
-        }
-
-        private static func includedIPv4Routes(_ options: LibboxTunOptionsProtocol) -> [NEIPv4Route] {
-            guard let iterator = options.getInet4RouteAddress() else {
-                return [NEIPv4Route.default()]
-            }
-            var routes: [NEIPv4Route] = []
-            while iterator.hasNext() {
-                guard let prefix = iterator.next() else { break }
-                routes.append(NEIPv4Route(destinationAddress: prefix.address(), subnetMask: prefix.mask()))
-            }
-            return routes.isEmpty ? [NEIPv4Route.default()] : routes
-        }
-
-        private static func excludedIPv4Routes(_ options: LibboxTunOptionsProtocol) -> [NEIPv4Route] {
-            guard let iterator = options.getInet4RouteExcludeAddress() else { return [] }
-            var routes: [NEIPv4Route] = []
-            while iterator.hasNext() {
-                guard let prefix = iterator.next() else { break }
-                routes.append(NEIPv4Route(destinationAddress: prefix.address(), subnetMask: prefix.mask()))
-            }
-            return routes
-        }
-
-        private static func includedIPv6Routes(_ options: LibboxTunOptionsProtocol) -> [NEIPv6Route] {
-            guard let iterator = options.getInet6RouteAddress() else {
-                return [NEIPv6Route.default()]
-            }
-            var routes: [NEIPv6Route] = []
-            while iterator.hasNext() {
-                guard let prefix = iterator.next() else { break }
-                routes.append(NEIPv6Route(destinationAddress: prefix.address(), networkPrefixLength: NSNumber(value: prefix.prefix())))
-            }
-            return routes.isEmpty ? [NEIPv6Route.default()] : routes
-        }
-
-        private static func excludedIPv6Routes(_ options: LibboxTunOptionsProtocol) -> [NEIPv6Route] {
-            guard let iterator = options.getInet6RouteExcludeAddress() else { return [] }
-            var routes: [NEIPv6Route] = []
-            while iterator.hasNext() {
-                guard let prefix = iterator.next() else { break }
-                routes.append(NEIPv6Route(destinationAddress: prefix.address(), networkPrefixLength: NSNumber(value: prefix.prefix())))
-            }
-            return routes
-        }
-
-        private static func applyNetworkSettings(_ settings: NEPacketTunnelNetworkSettings?, to provider: NEPacketTunnelProvider) throws {
-            let result = NetworkSettingsResult()
-            let semaphore = DispatchSemaphore(value: 0)
-
-            provider.setTunnelNetworkSettings(settings) { error in
-                if let error {
-                    result.set(.failure(error))
-                } else {
-                    result.set(.success(()))
-                }
-                semaphore.signal()
-            }
-
-            if semaphore.wait(timeout: .now() + .seconds(10)) == .timedOut {
-                throw HopTunnelError("timed out applying tunnel network settings")
-            }
-            try result.get()
-        }
-
-        fileprivate static func notify(_ listener: LibboxInterfaceUpdateListenerProtocol, of path: Network.NWPath) {
-            guard path.status != .unsatisfied, let primary = path.availableInterfaces.first else {
-                listener.updateDefaultInterface("", interfaceIndex: -1, isExpensive: false, isConstrained: false)
-                return
-            }
-            listener.updateDefaultInterface(
-                primary.name,
-                interfaceIndex: Int32(primary.index),
-                isExpensive: path.isExpensive,
-                isConstrained: path.isConstrained,
-            )
-        }
+    static func clampedMTU(_ value: Int) -> Int {
+        min(max(value, 1280), 9000)
     }
 
-    // MARK: - LibboxCommandServerHandlerProtocol
-
-    extension HopPlatformInterface: LibboxCommandServerHandlerProtocol {
-        func serviceStop() throws {
-            provider?.stopService()
+    private static func applyNetworkSettings(
+        _ settings: NEPacketTunnelNetworkSettings,
+        to provider: NEPacketTunnelProvider,
+    ) throws {
+        let result = NetworkSettingsResult()
+        let semaphore = DispatchSemaphore(value: 0)
+        provider.setTunnelNetworkSettings(settings) { error in
+            result.set(error.map(Result.failure) ?? .success(()))
+            semaphore.signal()
         }
 
-        func serviceReload() throws {
-            try provider?.reloadService()
+        guard semaphore.wait(timeout: .now() + .seconds(10)) == .success else {
+            throw HopTunnelError("timed out applying tunnel network settings")
         }
-
-        func getSystemProxyStatus() throws -> LibboxSystemProxyStatus {
-            // Hop runs a full TUN, not a system HTTP proxy.
-            LibboxSystemProxyStatus()
-        }
-
-        func setSystemProxyEnabled(_: Bool) throws {}
-
-        func writeDebugMessage(_ message: String?) {
-            guard let message else { return }
-            provider?.writeTunnelLog(message)
-        }
+        try result.get()
     }
 
-    // MARK: - Supporting types
-
-    /// NWPathMonitor invokes its handler from a Sendable closure; libbox owns the
-    /// listener lifetime and expects updates from that monitor queue.
-    private final class DefaultInterfaceListener: @unchecked Sendable {
-        private let listener: LibboxInterfaceUpdateListenerProtocol
-
-        init(_ listener: LibboxInterfaceUpdateListenerProtocol) {
-            self.listener = listener
-        }
-
-        func notify(of path: Network.NWPath) {
-            HopPlatformInterface.notify(listener, of: path)
-        }
-    }
-
-    /// `setTunnelNetworkSettings` completes asynchronously, while libbox's TUN
-    /// callback is synchronous. The lock protects the callback result handoff.
-    private final class NetworkSettingsResult: @unchecked Sendable {
-        private let lock = NSLock()
-        private var result: Result<Void, Error>?
-
-        func set(_ result: Result<Void, Error>) {
-            lock.lock()
-            defer { lock.unlock() }
-            self.result = result
-        }
-
-        func get() throws {
-            lock.lock()
-            defer { lock.unlock() }
-            guard let result else {
-                throw HopTunnelError("setTunnelNetworkSettings completed without a result")
+    /// NetworkExtension does not expose its utun descriptor as public API, and
+    /// the old `packetFlow.socket.fileDescriptor` KVC path returns nil on
+    /// modern iOS. Xray v26.6.27's own iOS integration guide specifies this
+    /// bounded getsockopt lookup after `setTunnelNetworkSettings` completes.
+    private static func networkExtensionTunnelDescriptor() -> TunnelDescriptor? {
+        for fd in Int32(3) ... Int32(1024) {
+            if let name = utunName(for: fd) {
+                return TunnelDescriptor(fileDescriptor: fd, interfaceName: name)
             }
-            try result.get()
         }
+        return nil
     }
 
-    /// Adapts a Swift array to libbox's pull-style network-interface iterator.
-    private final class NetworkInterfaceIterator: NSObject, LibboxNetworkInterfaceIteratorProtocol {
-        private var iterator: IndexingIterator<[LibboxNetworkInterface]>
-        private var current: LibboxNetworkInterface?
-
-        init(_ interfaces: [LibboxNetworkInterface]) {
-            iterator = interfaces.makeIterator()
+    private static func utunName(for fd: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(IFNAMSIZ))
+        var length = socklen_t(buffer.count)
+        // SYSPROTO_CONTROL = 2 and UTUN_OPT_IFNAME = 2. These constants are
+        // used by Xray's own Darwin fd discovery example but are not public
+        // NetworkExtension API.
+        let result = buffer.withUnsafeMutableBytes { bytes in
+            getsockopt(fd, 2, 2, bytes.baseAddress, &length)
         }
+        guard result == 0 else { return nil }
+        let end = buffer.firstIndex(of: 0) ?? buffer.endIndex
+        let name = String(decoding: buffer[..<end].map(UInt8.init(bitPattern:)), as: UTF8.self)
+        return name.hasPrefix("utun") ? name : nil
+    }
+}
 
-        func hasNext() -> Bool {
-            current = iterator.next()
-            return current != nil
-        }
+private final class NetworkSettingsResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Void, Error>?
 
-        func next() -> LibboxNetworkInterface? {
-            current
-        }
+    func set(_ result: Result<Void, Error>) {
+        lock.lock()
+        self.result = result
+        lock.unlock()
     }
 
-    struct HopTunnelError: LocalizedError {
-        let message: String
-        init(_ message: String) {
-            self.message = message
+    func get() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let result else {
+            throw HopTunnelError("setTunnelNetworkSettings completed without a result")
         }
-
-        var errorDescription: String? {
-            message
-        }
+        try result.get()
     }
-#endif
+}
+
+struct HopTunnelError: LocalizedError {
+    let message: String
+
+    init(_ message: String) {
+        self.message = message
+    }
+
+    var errorDescription: String? {
+        message
+    }
+}

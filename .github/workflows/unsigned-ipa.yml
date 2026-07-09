@@ -5,11 +5,13 @@ on:
   push:
     paths:
       - ".github/workflows/unsigned-ipa.yml"
-      - "Frameworks/Libbox.xcframework.sha256"
+      - "Frameworks/LibXray.xcframework.sha256"
+      - "Geodata/**"
       - "Hop/**"
       - "Hop.xcodeproj/**"
       - "HopTunnel/**"
       - "Shared/**"
+      - "XrayBridge/**"
       - "project.yml"
       - "scripts/**"
 
@@ -18,6 +20,10 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # scripts/build-libxray.sh verifies this exact toolchain before running any
+  # upstream code. Go's built-in toolchain manager supplies it from the
+  # bootstrap Go installation on the runner.
+  GOTOOLCHAIN: go1.26.5
 
 jobs:
   unsigned-ipa:
@@ -66,48 +72,53 @@ jobs:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
-          key: ${{ runner.os }}-go-libbox-${{ hashFiles('scripts/build-libbox.sh') }}
+          key: ${{ runner.os }}-go-libxray-${{ hashFiles('scripts/build-libxray.sh', 'XrayBridge/go.mod', 'XrayBridge/go.sum') }}
           restore-keys: |
-            ${{ runner.os }}-go-libbox-
+            ${{ runner.os }}-go-libxray-
 
-      - name: Record committed libbox provenance
+      - name: Record committed LibXray provenance
         run: |
           set -euo pipefail
           # Snapshot the reviewed, repo-committed engine digest BEFORE
-          # build-libbox.sh rebuilds the engine and refreshes the manifest —
+          # build-libxray.sh rebuilds the engine and refreshes the manifest —
           # otherwise the later verify pass only compares the fresh build
           # against itself and the committed provenance never gates anything.
-          cp Frameworks/Libbox.xcframework.sha256 /tmp/libbox-committed.sha256
+          cp Frameworks/LibXray.xcframework.sha256 /tmp/libxray-committed.sha256
 
-      - name: Build pinned libbox engine
-        run: scripts/build-libbox.sh
+      - name: Build pinned Xray engine
+        run: scripts/build-libxray.sh
 
       - name: Compare engine digest against committed provenance
         run: |
           set -euo pipefail
-          committed="$(awk '{print $1}' /tmp/libbox-committed.sha256)"
-          rebuilt="$(awk '{print $1}' Frameworks/Libbox.xcframework.sha256)"
+          committed="$(awk '{print $1}' /tmp/libxray-committed.sha256)"
+          rebuilt="$(awk '{print $1}' Frameworks/LibXray.xcframework.sha256)"
           {
-            echo "### Libbox provenance"
+            echo "### LibXray provenance"
             echo
             echo "- Committed manifest digest: \`${committed}\`"
             echo "- CI-rebuilt engine digest: \`${rebuilt}\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          if [[ "$committed" == "$rebuilt" ]]; then
-            echo "- Digests match: the CI build reproduced the committed engine." >> "$GITHUB_STEP_SUMMARY"
-          else
-            # Not fatal: gomobile output is not bit-reproducible across
-            # Xcode/Go toolchain versions, so a mismatch alone is expected.
-            # The enforced supply-chain control is the pinned-commit check in
-            # build-libbox.sh (the tag must resolve to SING_BOX_COMMIT before
-            # any upstream code runs). This step makes the divergence visible
-            # instead of silently re-recording whatever was built.
-            echo "- Digests differ. Expected when the CI toolchain differs from the one that produced the committed engine; the pinned sing-box commit check in scripts/build-libbox.sh remains the integrity gate." >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning title=Libbox digest differs from committed manifest::CI rebuilt the engine from the pinned commit, but the binary digest differs from Frameworks/Libbox.xcframework.sha256 (toolchain difference or upstream build change)."
-          fi
+          test "$committed" = "$rebuilt"
+          echo "- Digests match: the CI build reproduced the committed engine." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify generated inputs and Go bridge
+        run: |
+          set -euo pipefail
+          scripts/verify-geodata.sh
+          scripts/generate-xray-client-schema.sh --check
+          (cd XrayBridge && go test ./... && go vet ./...)
 
       - name: Generate Xcode project
         run: xcodegen generate
+
+      - name: Run unit tests
+        run: |
+          xcodebuild test \
+            -project Hop.xcodeproj \
+            -scheme Hop \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Build unsigned app
         run: |

@@ -92,15 +92,25 @@ extension ProxyImportService {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Hysteria2 requires auth/password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .hysteria2(Hysteria2Options(password: auth, obfs: keyed["obfs"], obfsPassword: keyedValue(keyed, "obfsparam", "obfs-param", "obfs_password", "obfs-password"))), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
+            profile = ProxyProfile(
+                name: name,
+                endpoint: Endpoint(host: host, port: port),
+                options: .hysteria2(Hysteria2Options(
+                    password: auth,
+                    obfs: keyed["obfs"],
+                    obfsPassword: keyedValue(keyed, "obfsparam", "obfs-param", "obfs_password", "obfs-password"),
+                    up: keyedValue(keyed, "up", "upmbps"),
+                    down: keyedValue(keyed, "down", "downmbps"),
+                    ports: keyed["ports"],
+                    hopIntervalSeconds: Int(keyedValue(keyed, "hop-interval", "hop_interval") ?? ""),
+                    udpIdleTimeoutSeconds: Int(keyedValue(keyed, "udp-idle-timeout", "udp_idle_timeout") ?? ""),
+                )),
+                security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security,
+                transport: TransportOptions(type: .hysteria),
+            )
         case "tuic":
-            guard let password = keyed["password"] ?? values[safe: 3],
-                  let user = keyed["user"] ?? keyed["uuid"] ?? values[safe: 2]
-            else {
-                result.warnings.append(ImportWarning(message: "Skipped \(name): TUIC requires user and password."))
-                return
-            }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .tuic(TUICOptions(uuid: user, password: password, congestionControl: keyedValue(keyed, "congestion-control", "congestion_control", "congestioncontrol"))), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security)
+            result.warnings.append(ImportWarning(message: "Skipped \(name): TUIC is not supported by Xray-core v26.6.27."))
+            profile = nil
         case "http", "https":
             profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .http(HTTPOptions(username: values[safe: 2], password: values[safe: 3])), security: security)
         case "socks5", "socks5-tls":
@@ -282,6 +292,14 @@ extension ProxyImportService {
                 alpn: alpn,
                 allowInsecure: boolOption(keyedValue(keyed, "allowinsecure", "allow_insecure", "allow-insecure", "skip-common-name-verify", "skipcertverify", "skip_cert_verify", "skip-cert-verify")),
                 utlsFingerprint: fingerprint,
+                pinnedPeerCertSHA256: keyedValue(keyed, "pcs", "pinnedpeercertsha256", "pinned_peer_cert_sha256", "pinned-peer-cert-sha256"),
+                verifyPeerCertByName: keyedValue(keyed, "vcn", "verifypeercertbyname", "verify_peer_cert_by_name", "verify-peer-cert-by-name"),
+                echConfigList: keyedValue(keyed, "ech", "echconfiglist", "ech_config_list", "ech-config-list"),
+                curvePreferences: alpnValues(from: keyedValue(keyed, "curves", "curvepreferences", "curve_preferences", "curve-preferences")),
+                minVersion: keyedValue(keyed, "minver", "minversion", "min_version", "min-version"),
+                maxVersion: keyedValue(keyed, "maxver", "maxversion", "max_version", "max-version"),
+                cipherSuites: keyedValue(keyed, "ciphers", "ciphersuites", "cipher_suites", "cipher-suites"),
+                enableSessionResumption: boolOption(keyedValue(keyed, "sessionresumption", "session_resumption", "session-resumption")),
             ),
         )
     }
@@ -294,6 +312,12 @@ extension ProxyImportService {
             TransportOptions(type: .grpc, serviceName: keyedValue(keyed, "service-name", "service_name", "servicename", "grpc-service-name", "grpc_service_name"))
         case "http", "httpupgrade", "http-upgrade":
             TransportOptions(type: .httpUpgrade, path: keyed["path"], host: keyed["host"], serviceName: nil)
+        case "xhttp", "splithttp":
+            TransportOptions(type: .xhttp, path: keyed["path"], host: keyed["host"], xhttpMode: keyed["mode"])
+        case "kcp", "mkcp":
+            TransportOptions(type: .mKCP)
+        case "hysteria":
+            TransportOptions(type: .hysteria)
         default:
             .tcp
         }

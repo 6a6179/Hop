@@ -8,7 +8,8 @@ struct DashboardView: View {
         @Bindable var store = store
         let state = store.tunnel.state
         let enabledGroups = store.groups.filter(\.isEnabled)
-        let connectionActionDisabled = state.isInFlight || store.profiles.isEmpty
+        let selectedTarget = store.selectedTarget
+        let connectionActionDisabled = state.isInFlight || store.profiles.isEmpty || selectedTarget == nil
 
         Form {
             Section {
@@ -22,9 +23,9 @@ struct DashboardView: View {
                     Task {
                         if store.tunnel.state.isConnected {
                             await store.tunnel.disconnect()
-                        } else {
+                        } else if let selectedTarget {
                             await store.tunnel.connect(
-                                target: store.selectedTarget ?? store.defaultTarget,
+                                target: selectedTarget,
                                 profiles: store.profiles,
                                 groups: store.groups,
                                 routingMode: store.routingMode,
@@ -39,6 +40,12 @@ struct DashboardView: View {
             }
 
             Section("Outbound") {
+                Picker("Mode", selection: $store.routingMode) {
+                    ForEach(RoutingMode.allCases, id: \.self) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+
                 Picker("Active", selection: $store.selectedTarget) {
                     Text("Direct").tag(Optional(OutboundTarget.direct))
 
@@ -80,20 +87,6 @@ struct DashboardView: View {
                     }
                 }
             }
-
-            Section("Routing & Traffic") {
-                Picker("Mode", selection: $store.routingMode) {
-                    ForEach(RoutingMode.allCases, id: \.self) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-
-                // The traffic counters tick once per second while connected.
-                // They live in their own child view so @Observable tracking
-                // re-renders only these rows — not this whole Form, whose
-                // outbound Picker can hold hundreds of profile rows.
-                TrafficSummaryRows()
-            }
         }
         .contentMargins(.top, 8, for: .scrollContent)
         .listSectionSpacing(.compact)
@@ -112,49 +105,6 @@ struct DashboardView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: state)
         .navigationTitle("Hop")
         .navigationBarTitleDisplayMode(.inline)
-    }
-}
-
-/// The per-second telemetry rows. Isolated so the dashboard's heavier
-/// content doesn't recompute every status tick (see the call site).
-private struct TrafficSummaryRows: View {
-    @Environment(HopStore.self) private var store
-
-    var body: some View {
-        let counters = store.tunnel.counters
-        let speedSummary = "↑ \(counters.uplinkBytesPerSecond.formatted(.byteCount(style: .file)))/s · ↓ \(counters.downlinkBytesPerSecond.formatted(.byteCount(style: .file)))/s"
-        let transferSummary = "↑ \(counters.uplinkBytes.formatted(.byteCount(style: .file))) · ↓ \(counters.downlinkBytes.formatted(.byteCount(style: .file)))"
-
-        LabeledContent("Speed") {
-            Text(speedSummary)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-
-        LabeledContent("Transferred") {
-            Text(transferSummary)
-                .monospacedDigit()
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-
-        NavigationLink {
-            ConnectionsView()
-        } label: {
-            LabeledContent("Connections") {
-                Text("\(counters.activeConnections) active")
-                    .foregroundStyle(.secondary)
-            }
-        }
-
-        if let telemetryError = store.tunnel.telemetryError, store.tunnel.state.isConnected {
-            Text("Telemetry unavailable: \(telemetryError)")
-                .font(.footnote)
-                .foregroundStyle(.orange)
-        }
     }
 }
 

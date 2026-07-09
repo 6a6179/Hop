@@ -1,90 +1,82 @@
+import Darwin
 import Foundation
 import NetworkExtension
 
-#if canImport(Libbox)
-    @preconcurrency import Libbox
+#if canImport(LibXray)
+    @preconcurrency import LibXray
 #endif
 
-/// The provider is handed from NetworkExtension's callback thread to a worker
-/// queue after start options are snapshotted into value types.
+private enum TunnelRuntimeFiles {
+    static let configFileName = "hop-xray.json"
+    static let tunnelLogFileName = "hop-tunnel.log"
+}
+
+/// Runs one serialized Xray instance over NetworkExtension's system-owned
+/// utun descriptor. All engine calls happen outside `serviceStateLock`: the Go
+/// bridge owns callbacks and shutdown work that must never re-enter a held lock.
 final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
-    private var logURL: URL?
-    /// Serializes log appends: lines arrive from the start worker, NE
-    /// callbacks, and libbox Go threads, and concurrent seek-to-end + write
-    /// pairs on separate file handles would interleave mid-line.
+    private static let maxConfigBytes = 1024 * 1024
+    private static let maxTunnelLogBytes = 1_048_576
+    private static let tunnelLogTrimBytes = 262_144
+    private static let maxLogMessageCharacters = 4096
+
+    /// Leave margin below the approximately 50 MiB iOS packet-tunnel ceiling.
+    private static let softMemoryLimitBytes: UInt64 = 42 * 1024 * 1024
+    private static let hardMemoryLimitBytes: UInt64 = 46 * 1024 * 1024
+    private static let softMemoryResetBytes: UInt64 = 40 * 1024 * 1024
+
+    private lazy var platformInterface = HopPlatformInterface(provider: self)
+    private let serviceStateLock = NSLock()
+    private let memoryQueue = DispatchQueue(label: "cat.string.hop.tunnel-memory", qos: .utility)
     private let tunnelLogLock = NSLock()
 
-    // Bound the shared tunnel log so a noisy/malicious proxy condition can't
-    // grow it without limit and later exhaust disk or freeze the log UI.
-    private static let maxTunnelLogBytes = 1_048_576 // 1 MB
-    private static let tunnelLogTrimBytes = 262_144 // keep ~256 KB tail on rotation
+    private var xrayStarted = false
+    private var memoryWatchdog: DispatchSourceTimer?
+    private var softMemoryWarningActive = false
+    private var logURL: URL?
 
-    /// Costly to construct, so one per provider instead of one per log line;
-    /// only touched under `tunnelLogLock`.
     private let tunnelLogDateFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
     }()
 
-    #if canImport(Libbox)
-        private lazy var platformInterface = HopPlatformInterface(provider: self)
-        /// Guards the libbox service state below. It is written by the start
-        /// worker, cleared from the NE callback thread in `stopTunnel`, and read
-        /// by `reloadService` on libbox's Go command-server thread — three
-        /// uncoordinated threads under `@unchecked Sendable`.
-        private let serviceStateLock = NSLock()
-        private var commandServer: LibboxCommandServer?
-        // Retain the last config + nonce for reloads. Normal shared-file starts
-        // keep a tokenized config and resolve credentials in memory; degraded
-        // inline starts may keep an already-resolved config, but only in the
-        // extension process, not in providerConfiguration or on disk.
-        private var lastRawConfig: String?
-        private var configSecretNonce: String?
-        private var lastConfigSecretsAreResolved = false
-    #endif
-
-    /// iOS kill-switch setting threaded from the app. When true, the engine is
-    /// told to include all networks so the OS drops traffic if the tunnel dies.
-    private(set) var includeAllNetworksSetting = false
-
-    override func startTunnel(options startOptions: [String: NSObject]?, completionHandler: @escaping @Sendable (Error?) -> Void) {
+    override func startTunnel(
+        options startOptions: [String: NSObject]?,
+        completionHandler: @escaping @Sendable (Error?) -> Void,
+    ) {
         let request = TunnelStartRequest(
             options: startOptions,
             providerConfiguration: (protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration,
         )
 
-        // libbox starts the engine synchronously, and during start it calls back
-        // into `openTun`, which blocks on `setTunnelNetworkSettings`. Running
-        // that on the NE callback thread can deadlock, so hop to a worker thread.
+        // Applying NE settings and starting Go are synchronous from Swift's
+        // perspective. Never block NetworkExtension's callback thread.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             self?.startTunnelOnWorker(request: request, completionHandler: completionHandler)
         }
     }
 
-    private func startTunnelOnWorker(request: TunnelStartRequest, completionHandler: @escaping @Sendable (Error?) -> Void) {
+    private func startTunnelOnWorker(
+        request: TunnelStartRequest,
+        completionHandler: @escaping @Sendable (Error?) -> Void,
+    ) {
         do {
             configureLogURL(request: request)
             writeTunnelLog("PacketTunnelProvider.startTunnel invoked")
             writeTunnelLog("Start option keys: \(request.visibleOptionKeys.joined(separator: ", "))")
 
-            includeAllNetworksSetting = request.includeAllNetworks
-
             let rawConfig = try loadConfig(request: request)
-            // Normal generated configs carry secret *references*, not
-            // credentials. The nonce gates which tokens are resolvable so
-            // import-supplied fields can't forge one. Degraded inline starts
-            // mark the config as already resolved and skip token resolution.
-            let nonce = request.secretNonce
-            guard !nonce.isEmpty else { throw TunnelProviderError.missingSecretNonce }
+            guard !request.secretNonce.isEmpty else {
+                throw TunnelProviderError.missingSecretNonce
+            }
 
-            #if canImport(Libbox)
-                try startService(rawConfig: rawConfig, nonce: nonce, request: request)
-                writeTunnelLog("sing-box service started")
+            #if canImport(LibXray)
+                try startService(rawConfig: rawConfig, request: request)
+                writeTunnelLog("Xray service started")
                 completionHandler(nil)
             #else
-                writeTunnelLog("Startup failed: \(TunnelProviderError.libboxUnavailable.localizedDescription)")
-                completionHandler(TunnelProviderError.libboxUnavailable)
+                throw TunnelProviderError.xrayUnavailable
             #endif
         } catch {
             writeTunnelLog("Startup failed: \(error.diagnosticDescription)")
@@ -94,189 +86,252 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
         writeTunnelLog("PacketTunnelProvider.stopTunnel reason=\(reason.rawValue)")
-        #if canImport(Libbox)
-            // Take and clear the service state BEFORE closing anything, so a
-            // concurrent `reloadService` on the libbox Go thread sees nil and
-            // no-ops instead of reloading a server that is being torn down.
-            // (The libbox calls themselves stay outside the lock: closeService
-            // can call back into command-server handlers, and re-entering the
-            // lock from those would deadlock.)
-            serviceStateLock.lock()
-            let server = commandServer
-            commandServer = nil
-            lastRawConfig = nil
-            configSecretNonce = nil
-            lastConfigSecretsAreResolved = false
-            serviceStateLock.unlock()
-            do {
-                try server?.closeService()
-            } catch {
-                writeTunnelLog("stopService error: \(error.diagnosticDescription)")
-            }
-            platformInterface.reset()
-            server?.close()
-        #endif
+        stopService(logErrors: true)
         completionHandler()
     }
 
-    #if canImport(Libbox)
-        private func startService(rawConfig: String, nonce: String, request: TunnelStartRequest) throws {
-            // Resolve secrets up front so we fail closed before touching the
-            // engine. `resolved` stays a local — handed to libbox and then
-            // released — so credentials don't linger on the provider for the
-            // tunnel's lifetime.
-            let resolved = try resolveConfig(rawConfig: rawConfig, nonce: nonce, secretsAreResolved: request.configSecretsAreResolved)
-            writeTunnelLog("Loaded tunnel settings (\(resolved.utf8.count) bytes)")
+    #if canImport(LibXray)
+        private func startService(rawConfig: String, request: TunnelStartRequest) throws {
+            let resolved = try resolveConfig(
+                rawConfig: rawConfig,
+                nonce: request.secretNonce,
+                secretsAreResolved: request.configSecretsAreResolved,
+            )
+            let config = try configWithBoundedEngineLogging(resolved)
+            writeTunnelLog("Loaded Xray settings (\(config.utf8.count) bytes)")
 
-            let container = appGroupContainer(request: request)
-            let workingPath = container.appendingPathComponent("Working", isDirectory: true)
-            let tempPath = container.appendingPathComponent("Temp", isDirectory: true)
-            try? FileManager.default.createDirectory(at: workingPath, withIntermediateDirectories: true)
-            try? FileManager.default.createDirectory(at: tempPath, withIntermediateDirectories: true)
-
-            let setup = LibboxSetupOptions()
-            setup.basePath = container.path
-            setup.workingPath = workingPath.path
-            setup.tempPath = tempPath.path
-            setup.logMaxLines = 3000
-            // Require this token on every command-socket call. The app's
-            // telemetry client reads the same shared-Keychain value, so a
-            // process with only App Group container access (enough to reach the
-            // unix socket) still can't drive the tunnel without it.
-            let commandServerSecret = SecretStore.runtime.commandServerSecret()
-            guard !commandServerSecret.isEmpty else {
-                throw TunnelProviderError.missingCommandServerSecret
-            }
-            setup.commandServerSecret = commandServerSecret
-
-            var setupError: NSError?
-            LibboxSetup(setup, &setupError)
-            if let setupError { throw setupError }
-
-            var stderrError: NSError?
-            LibboxRedirectStderr(tempPath.appendingPathComponent("stderr.log").path, &stderrError)
-            if let stderrError {
-                writeTunnelLog("Could not redirect stderr: \(stderrError.localizedDescription)")
+            if let footprint = Self.physicalFootprintBytes(), footprint >= Self.hardMemoryLimitBytes {
+                throw TunnelProviderError.memoryBudgetExceeded(footprint)
             }
 
-            // Packet tunnel extensions run under a tight memory ceiling.
-            LibboxSetMemoryLimit(true)
+            let descriptor = try platformInterface.configure(
+                dnsServers: request.dnsServers,
+                mtu: request.tunnelMTU,
+                includeAllNetworks: request.includeAllNetworks,
+            )
+            writeTunnelLog(
+                "Applied NetworkExtension settings mtu=\(HopPlatformInterface.clampedMTU(request.tunnelMTU)) interface=\(descriptor.interfaceName)",
+            )
 
-            var serverError: NSError?
-            let server = LibboxNewCommandServer(platformInterface, platformInterface, &serverError)
-            if let serverError { throw serverError }
-            guard let server else { throw HopTunnelError("libbox returned a nil command server") }
-            try server.start()
-            serviceStateLock.lock()
-            commandServer = server
-            lastRawConfig = rawConfig
-            configSecretNonce = nonce
-            lastConfigSecretsAreResolved = request.configSecretsAreResolved
-            serviceStateLock.unlock()
-            try server.startOrReloadService(resolved, options: LibboxOverrideOptions())
-        }
+            // A provider process should never retain an earlier instance, but
+            // fail safely after an interrupted start instead of overlapping two
+            // Go cores under the memory ceiling.
+            try XrayBridge.stop()
 
-        /// Invoked by libbox's `serviceStop` command. Stops the sing-box
-        /// service but keeps the command server (the socket) and the retained
-        /// config/nonce alive: the server is not being torn down — a later
-        /// `serviceReload` legitimately restarts the service from the retained
-        /// state. Full teardown (close + clear state) happens only in
-        /// `stopTunnel`.
-        func stopService() {
-            serviceStateLock.lock()
-            let server = commandServer
-            serviceStateLock.unlock()
+            let assetPath = try VerifiedXrayGeodata.assetDirectory(in: .main)
             do {
-                try server?.closeService()
+                try XrayBridge.start(
+                    configJSON: config,
+                    tunFileDescriptor: descriptor.fileDescriptor,
+                    assetPath: assetPath,
+                )
             } catch {
-                writeTunnelLog("stopService error: \(error.diagnosticDescription)")
+                try? XrayBridge.stop()
+                throw error
             }
-            platformInterface.reset()
-        }
 
-        /// Invoked by libbox on its Go command-server thread.
-        func reloadService() throws {
+            let footprint = Self.physicalFootprintBytes() ?? 0
+            guard footprint < Self.hardMemoryLimitBytes else {
+                try? XrayBridge.stop()
+                throw TunnelProviderError.memoryBudgetExceeded(footprint)
+            }
+
             serviceStateLock.lock()
-            let server = commandServer
-            let rawConfig = lastRawConfig
-            let nonce = configSecretNonce
-            let secretsAreResolved = lastConfigSecretsAreResolved
+            xrayStarted = true
+            softMemoryWarningActive = footprint >= Self.softMemoryLimitBytes
             serviceStateLock.unlock()
-            guard let server, let rawConfig, let nonce else { return }
-            setReasserting(true)
-            defer { setReasserting(false) }
-            // Re-resolve tokenized configs for reloads; inline-resolved configs
-            // are already marked and returned unchanged.
-            let resolved = try resolveConfig(rawConfig: rawConfig, nonce: nonce, secretsAreResolved: secretsAreResolved)
-            try server.startOrReloadService(resolved, options: LibboxOverrideOptions())
-        }
 
-        /// `reasserting` is a KVO-published NE property; mutating it from the
-        /// libbox Go thread is an unsynchronized ObjC property write. The main
-        /// queue is serial, so the true→false order is preserved.
-        private func setReasserting(_ value: Bool) {
-            DispatchQueue.main.async { [weak self] in
-                self?.reasserting = value
+            if footprint >= Self.softMemoryLimitBytes {
+                try? XrayBridge.collectMemory()
+                let relievedFootprint = Self.physicalFootprintBytes() ?? footprint
+                serviceStateLock.lock()
+                softMemoryWarningActive = relievedFootprint >= Self.softMemoryLimitBytes
+                serviceStateLock.unlock()
+                writeTunnelLog("Memory watchdog warning at startup: \(Self.formatBytes(relievedFootprint))")
             }
+            startMemoryWatchdog()
         }
     #endif
 
-    /// Resolves secret tokens from the shared Keychain in memory and fails
-    /// closed if any nonce-matching token is unresolvable — that means the
-    /// shared Keychain is unreachable (e.g. the keychain-access-groups
-    /// entitlement was dropped during signing), and starting anyway would
-    /// run the tunnel with blank credentials.
+    private func stopService(logErrors: Bool) {
+        serviceStateLock.lock()
+        let shouldStop = xrayStarted
+        xrayStarted = false
+        softMemoryWarningActive = false
+        let watchdog = memoryWatchdog
+        memoryWatchdog = nil
+        serviceStateLock.unlock()
+
+        watchdog?.cancel()
+        #if canImport(LibXray)
+            if shouldStop {
+                do {
+                    try XrayBridge.stop()
+                } catch where logErrors {
+                    writeTunnelLog("Xray stop error: \(error.diagnosticDescription)")
+                } catch {}
+            }
+        #endif
+        platformInterface.reset()
+    }
+
+    private func startMemoryWatchdog() {
+        let timer = DispatchSource.makeTimerSource(queue: memoryQueue)
+        // A saturated download can fill several TCP receive windows before a
+        // one-second timer fires. Sample cheaply at 4 Hz so the hard stop still
+        // has room to run before iOS jetsams the extension.
+        timer.schedule(
+            deadline: .now() + .milliseconds(250),
+            repeating: .milliseconds(250),
+            leeway: .milliseconds(50),
+        )
+        timer.setEventHandler { [weak self] in
+            self?.sampleMemoryAndEnforceLimits()
+        }
+        timer.resume()
+
+        serviceStateLock.lock()
+        if xrayStarted, memoryWatchdog == nil {
+            memoryWatchdog = timer
+            serviceStateLock.unlock()
+        } else {
+            serviceStateLock.unlock()
+            timer.cancel()
+        }
+    }
+
+    private func sampleMemoryAndEnforceLimits() {
+        guard let footprint = Self.physicalFootprintBytes() else {
+            return
+        }
+
+        serviceStateLock.lock()
+        guard xrayStarted else {
+            serviceStateLock.unlock()
+            return
+        }
+        if footprint >= Self.hardMemoryLimitBytes {
+            xrayStarted = false
+            let watchdog = memoryWatchdog
+            memoryWatchdog = nil
+            serviceStateLock.unlock()
+
+            watchdog?.cancel()
+            writeTunnelLog(
+                "Memory watchdog hard limit reached: \(Self.formatBytes(footprint)); stopping Xray before jetsam",
+            )
+            #if canImport(LibXray)
+                try? XrayBridge.stop()
+            #endif
+            platformInterface.reset()
+            cancelTunnelWithError(TunnelProviderError.memoryBudgetExceeded(footprint))
+            return
+        }
+
+        let shouldLogSoftWarning = footprint >= Self.softMemoryLimitBytes && !softMemoryWarningActive
+        if footprint >= Self.softMemoryLimitBytes {
+            softMemoryWarningActive = true
+        } else if footprint < Self.softMemoryResetBytes {
+            softMemoryWarningActive = false
+        }
+        serviceStateLock.unlock()
+
+        if shouldLogSoftWarning {
+            #if canImport(LibXray)
+                // Ask Go to return idle pages before the process moves any
+                // closer to the hard stop.
+                try? XrayBridge.collectMemory()
+            #endif
+            let relievedFootprint = Self.physicalFootprintBytes() ?? footprint
+            writeTunnelLog("Memory watchdog soft limit reached: \(Self.formatBytes(relievedFootprint))")
+        }
+    }
+
     private func resolveConfig(rawConfig: String, nonce: String, secretsAreResolved: Bool) throws -> String {
         guard !secretsAreResolved else {
             return rawConfig
         }
-
         let (config, unresolvedSecrets) = SecretResolver.resolve(rawConfig, nonce: nonce)
-        if unresolvedSecrets > 0 {
+        guard unresolvedSecrets == 0 else {
             throw TunnelProviderError.unresolvedSecrets(unresolvedSecrets)
         }
         return config
     }
 
-    private func loadConfig(request: TunnelStartRequest) throws -> String {
-        if let configContent = request.optionConfigContent {
-            writeTunnelLog("Using inline tunnel settings from start options")
-            return configContent
+    /// The current single-Invoke bridge has no bounded log callback. Disable
+    /// direct engine file/console logs and keep lifecycle/errors on Hop's
+    /// sanitized, rotating provider log instead.
+    private func configWithBoundedEngineLogging(_ config: String) throws -> String {
+        guard config.utf8.count <= Self.maxConfigBytes,
+              let data = config.data(using: .utf8),
+              var root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            throw TunnelProviderError.invalidConfig
         }
+        let requestedLevel = (root["log"] as? [String: Any])?["loglevel"] as? String ?? "warning"
+        root["log"] = [
+            "access": "none",
+            "dnsLog": false,
+            "error": "none",
+            "loglevel": requestedLevel,
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        guard encoded.count <= Self.maxConfigBytes,
+              let result = String(data: encoded, encoding: .utf8)
+        else {
+            throw TunnelProviderError.invalidConfig
+        }
+        return result
+    }
 
-        if let configPath = request.optionConfigPath {
-            guard isWithinAppGroupContainer(configPath, request: request) else {
+    private func loadConfig(request: TunnelStartRequest) throws -> String {
+        if let content = request.optionConfigContent {
+            writeTunnelLog("Using inline tunnel settings from start options")
+            return try checkedInlineConfig(content)
+        }
+        if let path = request.optionConfigPath {
+            guard isWithinAppGroupContainer(path, request: request) else {
                 throw TunnelProviderError.configPathOutsideContainer
             }
             writeTunnelLog("Reading tunnel settings from shared storage")
-            return try readAuthenticatedConfig(at: URL(fileURLWithPath: configPath))
+            return try readAuthenticatedConfig(at: URL(fileURLWithPath: path))
         }
-
-        if let configContent = request.providerConfigContent {
+        if let content = request.providerConfigContent {
             writeTunnelLog("Using inline tunnel settings from provider configuration")
-            return configContent
+            return try checkedInlineConfig(content)
         }
-
-        if let configPath = request.providerConfigPath {
-            guard isWithinAppGroupContainer(configPath, request: request) else {
+        if let path = request.providerConfigPath {
+            guard isWithinAppGroupContainer(path, request: request) else {
                 throw TunnelProviderError.configPathOutsideContainer
             }
             writeTunnelLog("Reading tunnel settings from provider configuration")
-            return try readAuthenticatedConfig(at: URL(fileURLWithPath: configPath))
+            return try readAuthenticatedConfig(at: URL(fileURLWithPath: path))
         }
-
         if let appGroup = request.appGroup,
            let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
         {
             writeTunnelLog("Reading tunnel settings from App Group container")
-            return try readAuthenticatedConfig(at: container.appendingPathComponent("hop-sing-box.json"))
+            return try readAuthenticatedConfig(at: container.appendingPathComponent(TunnelRuntimeFiles.configFileName))
         }
-
         throw TunnelProviderError.missingConfig
     }
 
+    private func checkedInlineConfig(_ config: String) throws -> String {
+        guard config.utf8.count <= Self.maxConfigBytes else {
+            throw TunnelProviderError.configTooLarge
+        }
+        return config
+    }
+
     private func readAuthenticatedConfig(at url: URL) throws -> String {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        if let size = attributes[.size] as? NSNumber, size.intValue > Self.maxConfigBytes {
+            throw TunnelProviderError.configTooLarge
+        }
         let data = try Data(contentsOf: url)
+        guard data.count <= Self.maxConfigBytes else {
+            throw TunnelProviderError.configTooLarge
+        }
         let secret = SecretStore.runtime.tunnelConfigAuthenticationSecret()
         guard !secret.isEmpty else {
             throw TunnelProviderError.missingConfigAuthenticationSecret
@@ -288,26 +343,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             throw TunnelProviderError.configAuthenticationFailed
         }
         guard let config = String(data: data, encoding: .utf8) else {
-            throw TunnelProviderError.missingConfig
+            throw TunnelProviderError.invalidConfig
         }
         return config
     }
 
-    private func appGroupContainer(request: TunnelStartRequest) -> URL {
-        if let appGroup = request.appGroup,
-           let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
-        {
-            return container
-        }
-        // Engine still runs; shared state/logs just won't reach the app.
-        return FileManager.default.temporaryDirectory
-    }
-
-    /// Confirms a config path handed to us via start options / provider
-    /// configuration resolves inside the App Group container before we read it,
-    /// so a tampered app-side state can't point the extension at an arbitrary
-    /// file (path traversal). The legitimate path is always
-    /// `RuntimeEnvironment.configFileURL`, which lives in this container.
     private func isWithinAppGroupContainer(_ path: String, request: TunnelStartRequest) -> Bool {
         guard let appGroup = request.appGroup,
               let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
@@ -323,43 +363,34 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         if let appGroup = request.appGroup,
            let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
         {
-            logURL = container.appendingPathComponent("hop-tunnel.log")
-            return
-        }
-
-        if let configPath = request.optionConfigPath ?? request.providerConfigPath {
-            logURL = URL(fileURLWithPath: configPath).deletingLastPathComponent().appendingPathComponent("hop-tunnel.log")
+            logURL = container.appendingPathComponent(TunnelRuntimeFiles.tunnelLogFileName)
+        } else if let configPath = request.optionConfigPath ?? request.providerConfigPath {
+            logURL = URL(fileURLWithPath: configPath)
+                .deletingLastPathComponent()
+                .appendingPathComponent(TunnelRuntimeFiles.tunnelLogFileName)
         }
     }
 
     func writeTunnelLog(_ message: String) {
-        guard let logURL else {
-            return
-        }
-
-        // Collapse line breaks so one call is one log line. Messages can carry
-        // remote-proxy-controlled text (libbox debug output), and an embedded
-        // newline would let a malicious server forge timestamped entries in the
-        // log the app displays (log injection).
+        guard let logURL else { return }
         let sanitized = message
             .components(separatedBy: .newlines)
             .joined(separator: " ")
+            .prefix(Self.maxLogMessageCharacters)
 
         tunnelLogLock.lock()
         defer { tunnelLogLock.unlock() }
-
         do {
-            try FileManager.default.createDirectory(at: logURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(
+                at: logURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true,
+            )
             rotateTunnelLogIfNeeded(at: logURL)
-
             let line = "[\(tunnelLogDateFormatter.string(from: Date()))] \(sanitized)\n"
             let data = Data(line.utf8)
-
             if FileManager.default.fileExists(atPath: logURL.path) {
                 let handle = try FileHandle(forWritingTo: logURL)
-                defer {
-                    try? handle.close()
-                }
+                defer { try? handle.close() }
                 try handle.seekToEnd()
                 try handle.write(contentsOf: data)
             } else {
@@ -370,33 +401,49 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         }
     }
 
-    /// Keeps only the most recent tail once the shared log passes its size cap,
-    /// dropping the partial leading line so the rotated file starts cleanly.
     private func rotateTunnelLogIfNeeded(at logURL: URL) {
         let attributes = try? FileManager.default.attributesOfItem(atPath: logURL.path)
         guard let size = attributes?[.size] as? Int, size > Self.maxTunnelLogBytes else {
             return
         }
-
         do {
-            let tail: Data
             let handle = try FileHandle(forReadingFrom: logURL)
+            let tail: Data
             do {
                 defer { try? handle.close() }
                 try handle.seek(toOffset: UInt64(size - Self.tunnelLogTrimBytes))
                 tail = try handle.readToEnd() ?? Data()
             }
-
-            let trimmed: Data = if let newline = tail.firstIndex(of: 0x0A) {
-                tail.suffix(from: tail.index(after: newline))
-            } else {
-                tail
-            }
-            try trimmed.write(to: logURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            let trimmed = tail.firstIndex(of: 0x0A).map { tail.suffix(from: tail.index(after: $0)) } ?? tail[...]
+            try Data(trimmed).write(
+                to: logURL,
+                options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication],
+            )
         } catch {
-            // If rotation fails, truncate so growth is still bounded.
             try? Data().write(to: logURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         }
+    }
+
+    private static func physicalFootprintBytes() -> UInt64? {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<natural_t>.stride,
+        )
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return info.phys_footprint
+    }
+
+    private static func clampedInt64(_ value: UInt64) -> Int64 {
+        Int64(min(value, UInt64(Int64.max)))
+    }
+
+    fileprivate static func formatBytes(_ bytes: UInt64) -> String {
+        ByteCountFormatter.string(fromByteCount: clampedInt64(bytes), countStyle: .memory)
     }
 }
 
@@ -409,6 +456,8 @@ private struct TunnelStartRequest {
     let secretNonce: String
     let configSecretsAreResolved: Bool
     let includeAllNetworks: Bool
+    let dnsServers: [String]
+    let tunnelMTU: Int
     let visibleOptionKeys: [String]
 
     init(options: [String: NSObject]?, providerConfiguration: [String: Any]?) {
@@ -420,22 +469,34 @@ private struct TunnelStartRequest {
         secretNonce = (options?["secretNonce"] as? String) ?? (providerConfiguration?["secretNonce"] as? String) ?? ""
         configSecretsAreResolved = ((options?["configSecrets"] as? String) ?? (providerConfiguration?["configSecrets"] as? String)) == "resolved"
         includeAllNetworks = ((options?["includeAllNetworks"] as? String) ?? (providerConfiguration?["includeAllNetworks"] as? String)) == "true"
+        dnsServers = Self.csv((options?["dnsServers"] as? String) ?? (providerConfiguration?["dnsServers"] as? String) ?? "")
+        let mtu = Int((options?["tunnelMTU"] as? String) ?? (providerConfiguration?["tunnelMTU"] as? String) ?? "")
+        tunnelMTU = HopPlatformInterface.clampedMTU(mtu ?? XrayTunnelNetworkDefaults.mtu)
 
         let hiddenKeys: Set = ["configContent", "configPath"]
         let keys = options?.keys.filter { !hiddenKeys.contains($0) }.sorted() ?? []
         visibleOptionKeys = keys.isEmpty ? ["none"] : keys
+    }
+
+    private static func csv(_ value: String) -> [String] {
+        value
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 }
 
 private enum TunnelProviderError: LocalizedError {
     case missingConfig
     case missingSecretNonce
+    case configTooLarge
+    case invalidConfig
     case configPathOutsideContainer
     case missingConfigAuthenticationSecret
     case configAuthenticationFailed
-    case missingCommandServerSecret
     case unresolvedSecrets(Int)
-    case libboxUnavailable
+    case memoryBudgetExceeded(UInt64)
+    case xrayUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -443,25 +504,111 @@ private enum TunnelProviderError: LocalizedError {
             "The Hop tunnel extension could not find the tunnel settings."
         case .missingSecretNonce:
             "The Hop tunnel extension received no secret nonce, so credentials cannot be resolved safely. Reconnect from the app."
+        case .configTooLarge:
+            "The tunnel configuration exceeds the 1 MiB extension limit."
+        case .invalidConfig:
+            "The tunnel configuration is not a valid Xray JSON object."
         case .configPathOutsideContainer:
-            "The Hop tunnel extension was handed a config path outside the shared App Group container and refused to read it."
+            "The Hop tunnel extension refused a config path outside the shared App Group container."
         case .missingConfigAuthenticationSecret:
-            "The Hop tunnel extension could not read the tunnel config authentication key from the shared Keychain. Verify the keychain-access-groups entitlement is present on both the app and the tunnel extension."
+            "The Hop tunnel extension could not read the tunnel config authentication key from the shared Keychain."
         case .configAuthenticationFailed:
-            "The Hop tunnel extension refused to load tunnel settings because their App Group integrity check failed. Reconnect from the app to rewrite the config."
-        case .missingCommandServerSecret:
-            "The Hop tunnel extension could not read the command-server authentication token from the shared Keychain, so it refused to start an unauthenticated command socket. Verify the keychain-access-groups entitlement is present on both the app and the tunnel extension."
+            "The Hop tunnel extension refused tunnel settings whose App Group integrity check failed."
         case let .unresolvedSecrets(count):
-            "\(count) credential reference(s) could not be resolved from the shared Keychain. Verify the keychain-access-groups entitlement is present on both the app and the tunnel extension."
-        case .libboxUnavailable:
-            "Libbox.xcframework is not linked yet. Run scripts/build-libbox.sh, then regenerate the project."
+            "\(count) credential reference(s) could not be resolved from the shared Keychain."
+        case let .memoryBudgetExceeded(bytes):
+            "The tunnel stopped at \(PacketTunnelProvider.formatBytes(bytes)) to stay below the iOS Network Extension memory ceiling."
+        case .xrayUnavailable:
+            "LibXray.xcframework is not linked. Build the pinned framework and regenerate the project."
         }
     }
 }
 
+#if canImport(LibXray)
+    /// Minimal adapter for libXray's gomobile package function. The upstream
+    /// API is deliberately a single JSON request/response entry point.
+    private enum XrayBridge {
+        static func start(configJSON: String, tunFileDescriptor: Int32, assetPath: String) throws {
+            _ = try invoke(
+                method: "start",
+                fields: [
+                    "assetDirectory": assetPath,
+                    "configJSON": configJSON,
+                    "tunFD": tunFileDescriptor,
+                ],
+                as: EmptyResponse.self,
+            )
+        }
+
+        static func stop() throws {
+            _ = try invoke(method: "stop", as: EmptyResponse.self)
+        }
+
+        static func collectMemory() throws {
+            _ = try invoke(method: "collectMemory", as: EmptyResponse.self)
+        }
+
+        private static func invoke<Response: Decodable>(
+            method: String,
+            fields: [String: Any] = [:],
+            as _: Response.Type,
+        ) throws -> Response? {
+            var request: [String: Any] = [
+                "version": 1,
+                "method": method,
+            ]
+            for (key, value) in fields {
+                request[key] = value
+            }
+            let data = try JSONSerialization.data(withJSONObject: request, options: [])
+            guard let json = String(data: data, encoding: .utf8) else {
+                throw TunnelProviderError.xrayUnavailable
+            }
+
+            let rawResponse = stringValue(LibXrayInvoke(json))
+            guard let responseData = rawResponse.data(using: .utf8) else {
+                throw TunnelProviderError.xrayUnavailable
+            }
+            let response = try JSONDecoder().decode(InvokeResponse<Response>.self, from: responseData)
+            guard response.version == 1, response.ok else {
+                throw NSError(
+                    domain: "Hop.Xray",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: response.error?.message ?? "Xray returned an unknown error."],
+                )
+            }
+            return response.result
+        }
+
+        /// gomobile nullability has changed across toolchain versions; these
+        /// overloads accept either generated Swift signature without force unwraps.
+        private static func stringValue(_ value: String) -> String {
+            value
+        }
+
+        private static func stringValue(_ value: String?) -> String {
+            value ?? ""
+        }
+
+        private struct InvokeResponse<Response: Decodable>: Decodable {
+            let version: Int
+            let ok: Bool
+            let result: Response?
+            let error: BridgeError?
+        }
+
+        private struct BridgeError: Decodable {
+            let code: String
+            let message: String
+        }
+
+        private struct EmptyResponse: Decodable {}
+    }
+#endif
+
 private extension Error {
     var diagnosticDescription: String {
-        let nsError = self as NSError
-        return "\(localizedDescription) [domain=\(nsError.domain), code=\(nsError.code)]"
+        let error = self as NSError
+        return "\(localizedDescription) [domain=\(error.domain), code=\(error.code)]"
     }
 }

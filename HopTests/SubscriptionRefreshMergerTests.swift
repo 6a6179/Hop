@@ -142,11 +142,13 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         XCTAssertEqual(merged.security, existing.security)
         XCTAssertEqual(merger.securityDowngradeWarnings.count, 1)
 
-        // …but moving up to REALITY is an upgrade and applies.
+        // Automatic refreshes preserve the existing layer even when the
+        // provider calls the change an upgrade; the user must review which
+        // server-authentication mechanism is replacing TLS.
         var upgradeMerger = SubscriptionRefreshMerger(profiles: [demoted], groups: [], selectedTarget: nil)
         upgradeMerger.merge(ImportResult(profiles: [existing]))
-        XCTAssertEqual(upgradeMerger.profiles.first?.security.layer, .reality)
-        XCTAssertTrue(upgradeMerger.securityDowngradeWarnings.isEmpty)
+        XCTAssertEqual(upgradeMerger.profiles.first?.security.layer, .tls)
+        XCTAssertFalse(upgradeMerger.securityDowngradeWarnings.isEmpty)
     }
 
     func testRefreshStillAppliesLegitimateSecurityUpgrade() throws {
@@ -161,6 +163,223 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         let merged = try XCTUnwrap(merger.profiles.first)
         XCTAssertEqual(merged.security.tls?.allowInsecure, false, "turning verification on is not a downgrade")
         XCTAssertTrue(merger.securityDowngradeWarnings.isEmpty)
+    }
+
+    func testDetectsAndPreservesAllPinnedSecurityChangeCategories() throws {
+        let subscriptionID = UUID()
+        var existing = ProxyProfile(
+            name: "Tokyo",
+            endpoint: Endpoint(host: "old.example.com", port: 443),
+            options: .vless(VLESSOptions(uuid: "user", flow: "xtls-rprx-vision", encryption: "old-auth")),
+            security: .reality(RealityOptions(
+                publicKey: "OLD-REALITY",
+                shortID: "abcd",
+                serverName: "old.example.com",
+                mldsa65Verify: "OLD-MLDSA",
+            )),
+            subscriptionID: subscriptionID,
+        )
+        existing.security.tls?.pinnedPeerCertSHA256 = "OLD-PIN"
+        existing.security.tls?.verifyPeerCertByName = "old.example.com"
+        existing.security.tls?.echConfigList = "OLD-ECH"
+        existing.security.tls?.curvePreferences = ["X25519MLKEM768", "X25519"]
+        existing.security.tls?.minVersion = "1.3"
+
+        var imported = existing
+        imported.id = UUID()
+        imported.endpoint = Endpoint(host: "new.example.com", port: 443)
+        imported.options = .vless(VLESSOptions(uuid: "user", flow: "xtls-rprx-vision", encryption: "new-auth"))
+        imported.security.reality?.publicKey = "NEW-REALITY"
+        imported.security.reality?.mldsa65Verify = "NEW-MLDSA"
+        imported.security.tls?.pinnedPeerCertSHA256 = "NEW-PIN"
+        imported.security.tls?.verifyPeerCertByName = "new.example.com"
+        imported.security.tls?.echConfigList = "NEW-ECH"
+        imported.security.tls?.curvePreferences = ["X25519Kyber768Draft00", "X25519"]
+        imported.security.tls?.minVersion = "1.2"
+
+        let preview = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+        let changes = try XCTUnwrap(preview.securityCriticalChanges(in: [imported]).first)
+        XCTAssertEqual(changes.profileName, "Tokyo")
+        XCTAssertEqual(Set(changes.fields), Set([
+            .tlsMinimumVersion,
+            .certificatePins,
+            .verificationNames,
+            .ech,
+            .postQuantumCurves,
+            .vlessEncryption,
+            .realityPublicKey,
+            .realityMLDSA,
+        ]))
+
+        var automatic = preview
+        automatic.merge(ImportResult(profiles: [imported]))
+        let preserved = try XCTUnwrap(automatic.profiles.first)
+        XCTAssertEqual(preserved.security.tls?.minVersion, "1.3")
+        XCTAssertEqual(preserved.security.tls?.pinnedPeerCertSHA256, "OLD-PIN")
+        XCTAssertEqual(preserved.security.tls?.verifyPeerCertByName, "old.example.com")
+        XCTAssertEqual(preserved.security.tls?.echConfigList, "OLD-ECH")
+        XCTAssertEqual(preserved.security.tls?.curvePreferences, ["X25519MLKEM768", "X25519"])
+        XCTAssertEqual(preserved.security.reality?.publicKey, "OLD-REALITY")
+        XCTAssertEqual(preserved.security.reality?.mldsa65Verify, "OLD-MLDSA")
+        guard case let .vless(preservedVLESS) = preserved.options else {
+            return XCTFail("Expected VLESS options")
+        }
+        XCTAssertEqual(preservedVLESS.encryption, "old-auth")
+
+        var reviewed = preview
+        reviewed.merge(ImportResult(profiles: [imported]), securityPolicy: .applyReviewedChanges)
+        let applied = try XCTUnwrap(reviewed.profiles.first)
+        XCTAssertEqual(applied.security.tls?.minVersion, "1.2")
+        XCTAssertEqual(applied.security.tls?.pinnedPeerCertSHA256, "NEW-PIN")
+        XCTAssertEqual(applied.security.reality?.publicKey, "NEW-REALITY")
+        XCTAssertEqual(applied.security.reality?.mldsa65Verify, "NEW-MLDSA")
+        guard case let .vless(appliedVLESS) = applied.options else {
+            return XCTFail("Expected VLESS options")
+        }
+        XCTAssertEqual(appliedVLESS.encryption, "new-auth")
+    }
+
+    func testSecurityLayerChangeRequiresReviewAndReviewedPolicyAppliesIt() throws {
+        let subscriptionID = UUID()
+        let existing = trojanProfile(name: "Tokyo", host: "old.example.com", subscriptionID: subscriptionID)
+        var imported = trojanProfile(name: "Tokyo", host: "new.example.com", subscriptionID: subscriptionID)
+        imported.security = .reality(RealityOptions(
+            publicKey: "NEW-REALITY",
+            shortID: "abcd",
+            serverName: "new.example.com",
+        ))
+        let preview = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        let changes = try XCTUnwrap(preview.securityCriticalChanges(in: [imported]).first)
+        XCTAssertTrue(changes.fields.contains(.securityLayer))
+
+        var reviewed = preview
+        reviewed.merge(
+            ImportResult(profiles: [imported]),
+            securityPolicy: .applyReviewedChanges,
+        )
+        XCTAssertEqual(reviewed.profiles.first?.security.layer, .reality)
+        XCTAssertEqual(reviewed.profiles.first?.security.reality?.publicKey, "NEW-REALITY")
+    }
+
+    func testReviewedSecurityChangeStillCannotEnableAllowInsecure() throws {
+        let subscriptionID = UUID()
+        let existing = trojanProfile(name: "Tokyo", host: "old.example.com", subscriptionID: subscriptionID)
+        var imported = trojanProfile(name: "Tokyo", host: "new.example.com", subscriptionID: subscriptionID)
+        imported.security.tls?.allowInsecure = true
+        imported.security.tls?.pinnedPeerCertSHA256 = "NEW-PIN"
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        merger.merge(
+            ImportResult(profiles: [imported]),
+            securityPolicy: .applyReviewedChanges,
+        )
+
+        let merged = try XCTUnwrap(merger.profiles.first)
+        XCTAssertEqual(merged.security.tls?.allowInsecure, false)
+        XCTAssertEqual(merged.security.tls?.pinnedPeerCertSHA256, "NEW-PIN")
+    }
+
+    func testReviewedLayerChangeCannotIntroduceAllowInsecure() throws {
+        let subscriptionID = UUID()
+        var existing = trojanProfile(name: "Tokyo", host: "old.example.com", subscriptionID: subscriptionID)
+        existing.security = .none
+        var imported = trojanProfile(name: "Tokyo", host: "new.example.com", subscriptionID: subscriptionID)
+        imported.security.tls?.allowInsecure = true
+        var merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+
+        merger.merge(
+            ImportResult(profiles: [imported]),
+            securityPolicy: .applyReviewedChanges,
+        )
+
+        let merged = try XCTUnwrap(merger.profiles.first)
+        XCTAssertEqual(merged.security.layer, .tls)
+        XCTAssertEqual(merged.security.tls?.allowInsecure, false)
+    }
+
+    @MainActor
+    func testManualRefreshBlocksThenAppliesReviewedSecurityChanges() {
+        let subscription = SubscriptionSource(name: "Provider", url: "https://example.com/sub")
+        var existing = trojanProfile(name: "Tokyo", host: "old.example.com", subscriptionID: subscription.id)
+        existing.security.tls?.pinnedPeerCertSHA256 = "OLD-PIN"
+        var imported = trojanProfile(name: "Tokyo", host: "new.example.com", subscriptionID: subscription.id)
+        imported.security.tls?.pinnedPeerCertSHA256 = "NEW-PIN"
+        let store = HopStore(
+            profiles: [existing],
+            groups: [],
+            subscriptions: [subscription],
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
+        )
+
+        let outcome = store.reviewSubscriptionRefresh(ImportResult(profiles: [imported]), for: subscription)
+        guard case let .needsSecurityConfirmation(result, changes, reviewedInsecureProfileNames) = outcome else {
+            return XCTFail("Expected a blocking security confirmation")
+        }
+        XCTAssertTrue(reviewedInsecureProfileNames.isEmpty)
+        XCTAssertEqual(changes.map(\.fields), [[.certificatePins]])
+        XCTAssertEqual(store.profiles.first?.security.tls?.pinnedPeerCertSHA256, "OLD-PIN")
+
+        let confirmed = store.confirmSecuritySubscriptionRefresh(
+            result,
+            reviewedChanges: changes,
+            reviewedInsecureProfileNames: reviewedInsecureProfileNames,
+            for: subscription,
+        )
+        guard case .applied = confirmed else {
+            return XCTFail("Expected confirmed refresh to apply")
+        }
+        XCTAssertEqual(store.profiles.first?.endpoint.host, "new.example.com")
+        XCTAssertEqual(store.profiles.first?.security.tls?.pinnedPeerCertSHA256, "NEW-PIN")
+    }
+
+    @MainActor
+    func testManualRefreshRequiresBothConfirmationsWhenBothRisksArePresent() {
+        let subscription = SubscriptionSource(name: "Provider", url: "https://example.com/sub")
+        var existing = trojanProfile(name: "Tokyo", host: "old.example.com", subscriptionID: subscription.id)
+        existing.security.tls?.pinnedPeerCertSHA256 = "OLD-PIN"
+        var changed = trojanProfile(name: "Tokyo", host: "new.example.com", subscriptionID: subscription.id)
+        changed.security.tls?.pinnedPeerCertSHA256 = "NEW-PIN"
+        let insecure = insecureTrojanProfile(name: "Legacy", subscriptionID: subscription.id)
+        let store = HopStore(
+            profiles: [existing],
+            subscriptions: [subscription],
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
+        )
+
+        let initial = store.reviewSubscriptionRefresh(
+            ImportResult(profiles: [changed, insecure]),
+            for: subscription,
+        )
+        guard case let .needsInsecureConfirmation(result, names) = initial else {
+            return XCTFail("Expected allow-insecure confirmation first")
+        }
+        XCTAssertEqual(names, ["Legacy"])
+
+        let afterInsecure = store.confirmInsecureSubscriptionRefresh(
+            result,
+            reviewedProfileNames: names,
+            for: subscription,
+        )
+        guard case let .needsSecurityConfirmation(reviewResult, changes, reviewedNames) = afterInsecure else {
+            return XCTFail("Expected the independent security-change confirmation")
+        }
+        XCTAssertEqual(reviewedNames, names)
+        XCTAssertEqual(changes.map(\.fields), [[.certificatePins]])
+        XCTAssertEqual(store.profiles.count, 1, "nothing applies between the two confirmations")
+
+        let applied = store.confirmSecuritySubscriptionRefresh(
+            reviewResult,
+            reviewedChanges: changes,
+            reviewedInsecureProfileNames: reviewedNames,
+            for: subscription,
+        )
+        guard case .applied = applied else {
+            return XCTFail("Expected the twice-reviewed refresh to apply")
+        }
+        XCTAssertEqual(store.profiles.count, 2)
+        XCTAssertEqual(store.profiles.first { $0.name == "Tokyo" }?.security.tls?.pinnedPeerCertSHA256, "NEW-PIN")
+        XCTAssertEqual(store.profiles.first { $0.name == "Legacy" }?.security.tls?.allowInsecure, true)
     }
 
     func testImportedGroupWithoutImportedTypeAlwaysInserts() {
@@ -280,6 +499,7 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
 
         store.confirmInsecureSubscriptionRefresh(
             ImportResult(profiles: [insecureTrojanProfile(name: rawName, subscriptionID: subscription.id)]),
+            reviewedProfileNames: [ImportPolicy.sanitizeImportedName(rawName, fallback: "Imported Node")],
             for: subscription,
         )
 
@@ -336,7 +556,7 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
 
     // MARK: - REALITY public-key change warning
 
-    func testRealityPublicKeyChangeAppliesNewKeyAndAppendsWarning() throws {
+    func testAutomaticMergePreservesRealityPublicKeyAndAppendsWarning() throws {
         let subscriptionID = UUID()
         var existing = trojanProfile(name: "Tokyo", host: "jp.example.com", subscriptionID: subscriptionID)
         existing.security = .reality(RealityOptions(publicKey: "OLDKEY", shortID: "abcd"))
@@ -347,7 +567,7 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         merger.merge(ImportResult(profiles: [imported]))
 
         let merged = try XCTUnwrap(merger.profiles.first)
-        XCTAssertEqual(merged.security.reality?.publicKey, "NEWKEY", "the new REALITY public key must be applied")
+        XCTAssertEqual(merged.security.reality?.publicKey, "OLDKEY", "an unreviewed refresh must keep the existing REALITY key")
         XCTAssertEqual(merger.securityDowngradeWarnings.count, 1)
         XCTAssertTrue(merger.securityDowngradeWarnings[0].contains("Tokyo"), "warning must name the profile")
         XCTAssertTrue(merger.securityDowngradeWarnings[0].lowercased().contains("reality") || merger.securityDowngradeWarnings[0].lowercased().contains("public key"), "warning must mention the REALITY key change")

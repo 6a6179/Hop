@@ -66,7 +66,6 @@ struct ImportTextSheet: View {
                             Label("Preview Import", systemImage: "eye")
                         }
                     }
-                    .buttonStyle(.glass)
                     .disabled(isLoading || trimmedImportText.isEmpty)
                 } header: {
                     Text("Paste Import")

@@ -1,0 +1,44 @@
+diff --git a/proxy/tun/stack_gvisor.go b/proxy/tun/stack_gvisor.go
+index 8584616..ab506ca 100644
+--- a/proxy/tun/stack_gvisor.go
++++ b/proxy/tun/stack_gvisor.go
+@@ -27,2 +27,2 @@ const (
+-	tcpRXBufDefSize = tcp.DefaultSendBufferSize
+-	tcpRXBufMaxSize = 8 << 20 // 8MiB
++	tcpRXBufDefSize = 256 << 10 // 256KiB
++	tcpRXBufMaxSize = 256 << 10 // 256KiB
+@@ -31,2 +31,2 @@ const (
+-	tcpTXBufDefSize = tcp.DefaultReceiveBufferSize
+-	tcpTXBufMaxSize = 6 << 20 // 6MiB
++	tcpTXBufDefSize = 256 << 10 // 256KiB
++	tcpTXBufMaxSize = 256 << 10 // 256KiB
+@@ -69 +69 @@ func (t *stackGVisor) Start() error {
+-	tcpForwarder := tcp.NewForwarder(ipStack, 0, 65535, func(r *tcp.ForwarderRequest) {
++	tcpForwarder := tcp.NewForwarder(ipStack, tcpRXBufDefSize, 65535, func(r *tcp.ForwarderRequest) {
+@@ -104 +104 @@ func (t *stackGVisor) Start() error {
+-		data := pkt.Clone().Data().AsRange().ToSlice()
++		data := pkt.Data().AsRange().ToSlice()
+@@ -239 +239,3 @@ func createStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
+-	mOpt := tcpip.TCPModerateReceiveBufferOption(true)
++	// iOS packet-tunnel extensions have a hard physical-footprint ceiling.
++	// Keep receive auto-tuning disabled in addition to the fixed range below.
++	mOpt := tcpip.TCPModerateReceiveBufferOption(false)
+diff --git a/proxy/tun/tun_darwin.go b/proxy/tun/tun_darwin.go
+index fdaafd3..375701b 100644
+--- a/proxy/tun/tun_darwin.go
++++ b/proxy/tun/tun_darwin.go
+@@ -227,0 +228,3 @@ func (t *DarwinTun) ReadPacket() (byte, *stack.PacketBuffer, error) {
++	// MakeWithData owns a copy, so retaining the Xray buffer doubles every
++	// queued packet's storage until gVisor releases it.
++	b.Release()
+@@ -231,3 +233,0 @@ func (t *DarwinTun) ReadPacket() (byte, *stack.PacketBuffer, error) {
+-		OnRelease: func() {
+-			b.Release()
+-		},
+diff --git a/proxy/tun/udp_fullcone.go b/proxy/tun/udp_fullcone.go
+index 1a1cb08..fb55d8c 100644
+--- a/proxy/tun/udp_fullcone.go
++++ b/proxy/tun/udp_fullcone.go
+@@ -63 +63 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+-		egress := make(chan *packet, 1024)
++		egress := make(chan *packet, 64)

@@ -169,6 +169,7 @@ struct AppSettings: Hashable, Codable {
     var autoRefreshSubscriptions: Bool = false
     var logRetention: LogRetention = .fiveHundred
     var latencyTestMethod: LatencyTestMethod = .tcp
+    var xrayAdvanced: XrayAdvancedDocument? = nil
 
     /// Age beyond which a subscription counts as stale for foreground
     /// auto-refresh.
@@ -196,5 +197,6 @@ extension AppSettings {
         autoRefreshSubscriptions = try container.decodeIfPresent(Bool.self, forKey: .autoRefreshSubscriptions) ?? defaults.autoRefreshSubscriptions
         logRetention = try container.decodeIfPresent(LogRetention.self, forKey: .logRetention) ?? defaults.logRetention
         latencyTestMethod = try container.decodeIfPresent(LatencyTestMethod.self, forKey: .latencyTestMethod) ?? defaults.latencyTestMethod
+        xrayAdvanced = try container.decodeIfPresent(XrayAdvancedDocument.self, forKey: .xrayAdvanced)
     }
 }
