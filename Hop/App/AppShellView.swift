@@ -16,7 +16,9 @@ struct AppShellView: View {
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack {
-                DashboardView()
+                DashboardView {
+                    selectedTab = .profiles
+                }
             }
             .tabItem {
                 Label("Dashboard", systemImage: "gauge")

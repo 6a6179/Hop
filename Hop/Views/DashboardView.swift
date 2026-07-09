@@ -4,12 +4,19 @@ struct DashboardView: View {
     @Environment(HopStore.self) private var store
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private let openProfiles: () -> Void
+
+    init(openProfiles: @escaping () -> Void = {}) {
+        self.openProfiles = openProfiles
+    }
+
     var body: some View {
         @Bindable var store = store
         let state = store.tunnel.state
         let enabledGroups = store.groups.filter(\.isEnabled)
         let selectedTarget = store.selectedTarget
-        let connectionActionDisabled = state.isInFlight || store.profiles.isEmpty || selectedTarget == nil
+        let needsProfile = store.profiles.isEmpty && !state.isConnected
+        let connectionActionDisabled = state.isInFlight || (!state.isConnected && !needsProfile && selectedTarget == nil)
 
         Form {
             Section {
@@ -18,11 +25,13 @@ struct DashboardView: View {
                     profileName: store.selectedTargetDisplayName,
                     routingMode: store.routingMode,
                     isDisabled: connectionActionDisabled,
-                    isMissingProfiles: store.profiles.isEmpty,
+                    showsSetupAction: needsProfile,
                 ) {
                     Task {
                         if store.tunnel.state.isConnected {
                             await store.tunnel.disconnect()
+                        } else if needsProfile {
+                            openProfiles()
                         } else if let selectedTarget {
                             await store.tunnel.connect(
                                 target: selectedTarget,
@@ -35,8 +44,7 @@ struct DashboardView: View {
                         }
                     }
                 }
-                .listRowInsets(EdgeInsets(top: 8, leading: 0, bottom: 8, trailing: 0))
-                .listRowBackground(Color.clear)
+                .listRowInsets(EdgeInsets(top: 18, leading: 16, bottom: 16, trailing: 16))
             }
 
             Section("Outbound") {
@@ -46,43 +54,41 @@ struct DashboardView: View {
                     }
                 }
 
-                Picker("Active", selection: $store.selectedTarget) {
-                    Text("Direct").tag(Optional(OutboundTarget.direct))
+                if store.profiles.isEmpty {
+                    LabeledContent("Outbound") {
+                        Text("Not configured")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Picker("Outbound", selection: $store.selectedTarget) {
+                        Text("Direct").tag(Optional(OutboundTarget.direct))
 
-                    if !enabledGroups.isEmpty {
-                        Section("Groups") {
-                            ForEach(enabledGroups) { group in
-                                Text(group.name).tag(Optional(OutboundTarget.group(group.id)))
+                        if !enabledGroups.isEmpty {
+                            Section("Groups") {
+                                ForEach(enabledGroups) { group in
+                                    Text(group.name).tag(Optional(OutboundTarget.group(group.id)))
+                                }
+                            }
+                        }
+
+                        Section("Nodes") {
+                            ForEach(store.profiles) { profile in
+                                Text(profile.name).tag(Optional(OutboundTarget.profile(profile.id)))
                             }
                         }
                     }
 
-                    Section("Nodes") {
-                        ForEach(store.profiles) { profile in
-                            Text(profile.name).tag(Optional(OutboundTarget.profile(profile.id)))
-                        }
-                    }
-                }
-
-                if let profile = store.selectedProfile, store.selectedGroup == nil {
-                    LabeledContent("Protocol") {
-                        Text("\(profile.proto.displayName) · \(profile.displaySecurity)")
-                            .foregroundStyle(.secondary)
-                    }
-                    LabeledContent("Server", value: "\(profile.endpoint.host):\(profile.endpoint.port)")
-                } else if let group = store.selectedGroup {
-                    LabeledContent("Type", value: group.type.displayName)
-                    LabeledContent("Members", value: "\(group.members.count)")
-                } else {
-                    Label {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("No outbound selected")
-                            Text("Select or import a proxy profile or group before connecting.")
-                                .font(.footnote)
+                    if let profile = store.selectedProfile, store.selectedGroup == nil {
+                        LabeledContent("Protocol") {
+                            Text("\(profile.proto.displayName) · \(profile.displaySecurity)")
                                 .foregroundStyle(.secondary)
                         }
-                    } icon: {
-                        Image(systemName: "server.rack")
+                        LabeledContent("Server", value: "\(profile.endpoint.host):\(profile.endpoint.port)")
+                    } else if let group = store.selectedGroup {
+                        LabeledContent("Type", value: group.type.displayName)
+                        LabeledContent("Members", value: "\(group.members.count)")
+                    } else if selectedTarget == nil {
+                        Label("Select an outbound before connecting.", systemImage: "server.rack")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -94,7 +100,7 @@ struct DashboardView: View {
         .background {
             LinearGradient(
                 colors: [
-                    state.accent.opacity(0.16),
+                    state.accent.opacity(0.10),
                     Color(uiColor: .systemGroupedBackground),
                 ],
                 startPoint: .top,
@@ -168,77 +174,60 @@ private extension TunnelConnectionState {
     var isInFlight: Bool {
         self == .connecting || self == .disconnecting
     }
-
-    var buttonAccessibilityLabel: String {
-        switch self {
-        case .connected:
-            "Disconnect from selected profile"
-        case .connecting:
-            "Connecting to selected profile"
-        case .disconnecting:
-            "Disconnecting from selected profile"
-        case .failed, .disconnected:
-            "Connect to selected profile"
-        }
-    }
 }
 
 private struct ConnectWidget: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     let state: TunnelConnectionState
     let profileName: String
     let routingMode: RoutingMode
     let isDisabled: Bool
-    let isMissingProfiles: Bool
+    let showsSetupAction: Bool
     let action: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .center, spacing: 14) {
-                ConnectionStatusGlyph(state: state, size: 50)
+            let statusLayout = dynamicTypeSize.isAccessibilitySize
+                ? AnyLayout(VStackLayout(alignment: .leading, spacing: 12))
+                : AnyLayout(HStackLayout(alignment: .center, spacing: 14))
+
+            statusLayout {
+                ConnectionStatusGlyph(state: state, size: 46)
 
                 ConnectionStatusText(
                     state: state,
                     profileName: profileName,
                     routingMode: routingMode,
+                    showsSetupAction: showsSetupAction,
                 )
             }
 
             Button(action: action) {
-                ConnectButtonLabel(state: state)
+                ConnectButtonLabel(state: state, showsSetupAction: showsSetupAction)
             }
             .buttonStyle(.plain)
-            .background(state.buttonTint.opacity(isDisabled ? 0.55 : 1), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .background(buttonTint.opacity(isDisabled ? 0.45 : 1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .disabled(isDisabled)
-            .accessibilityLabel(Text(state.buttonAccessibilityLabel))
-
-            if isMissingProfiles {
-                Label("Import a profile before connecting.", systemImage: "server.rack")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
+            .accessibilityLabel(actionAccessibilityLabel)
+            .accessibilityHint(isDisabled && !state.isInFlight ? "Select an outbound before connecting." : "")
         }
-        .padding(16)
-        .background {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            state.accent.opacity(state == .disconnected ? 0.10 : 0.18),
-                            Color(uiColor: .secondarySystemGroupedBackground),
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing,
-                    ),
-                )
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(state.accent.opacity(state == .disconnected ? 0.12 : 0.22))
-        }
-        .shadow(color: state.accent.opacity(0.08), radius: 14, y: 8)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: state)
+    }
+
+    private var buttonTint: Color {
+        showsSetupAction ? .accentColor : state.buttonTint
+    }
+
+    private var actionAccessibilityLabel: Text {
+        if showsSetupAction {
+            Text("Open Profiles to add a profile")
+        } else if state.isConnected {
+            Text("Disconnect VPN")
+        } else {
+            Text("Connect VPN")
+        }
     }
 }
 
@@ -246,6 +235,7 @@ private struct ConnectionStatusText: View {
     let state: TunnelConnectionState
     let profileName: String
     let routingMode: RoutingMode
+    let showsSetupAction: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -255,15 +245,19 @@ private struct ConnectionStatusText: View {
                 .allowsTightening(true)
                 .minimumScaleFactor(0.85)
                 .truncationMode(.tail)
-            Text(profileName)
+            Text(showsSetupAction ? "Add a profile to begin" : profileName)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Text("\(routingMode.title) routing")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(state.accent)
-                .lineLimit(1)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            if !showsSetupAction {
+                Text("\(routingMode.title) routing")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(state.accent)
+                    .lineLimit(1)
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .layoutPriority(1)
         .accessibilityElement(children: .combine)
     }
@@ -309,17 +303,20 @@ private struct ConnectionStatusGlyph: View {
 
 private struct ConnectButtonLabel: View {
     let state: TunnelConnectionState
+    let showsSetupAction: Bool
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: state.buttonSymbol)
+            Image(systemName: showsSetupAction ? "plus" : state.buttonSymbol)
                 .font(.caption.weight(.semibold))
-            Text(state.buttonTitle)
+            Text(showsSetupAction ? "Add Profile" : state.buttonTitle)
         }
         .font(.headline.weight(.semibold))
         .foregroundStyle(.white)
-        .lineLimit(1)
+        .lineLimit(2)
+        .multilineTextAlignment(.center)
         .padding(.horizontal, 16)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, minHeight: 50)
         .contentShape(.rect)
     }
