@@ -48,13 +48,11 @@ struct XrayConfigBuilder {
     ) throws -> String {
         try validateGlobalAdvanced(settings.xrayAdvanced)
 
-        let resolver = XrayReachabilityResolver(profiles: profiles, groups: groups)
+        let resolver = XrayReachabilityResolver(profiles: profiles, groups: groups, limits: limits)
         let selectedDestination = try resolver.resolve(routingMode == .direct ? .direct : selectedTarget)
-        if routingMode == .rule {
-            for rule in rules where rule.target != .selectedProxy {
-                _ = try resolver.resolve(rule.target)
-            }
-        }
+        let ruleDestinations = try routingMode == .rule ? rules.map { rule in
+            rule.target == .selectedProxy ? selectedDestination : try resolver.resolve(rule.target)
+        } : []
 
         let reachableProfiles = profiles.filter { resolver.profileIDs.contains($0.id) }
         try require(
@@ -108,6 +106,7 @@ struct XrayConfigBuilder {
                 mode: routingMode,
                 rules: rules,
                 selected: selectedDestination,
+                ruleDestinations: ruleDestinations,
                 resolver: resolver,
                 sniff: settings.sniffTraffic,
             )),
@@ -163,6 +162,13 @@ struct XrayConfigBuilder {
         } catch {
             return [XrayValidationIssue(path: "/", message: error.localizedDescription)]
         }
+    }
+
+    /// Reuses the pinned runtime policy during persistence migration without
+    /// admitting a profile or starting the core.
+    func validateTLSOptionsForMigration(_ tls: TLSOptions) throws {
+        try validateCertificatePins(tls.pinnedPeerCertSHA256, path: "/migration/security/tls/pinnedPeerCertSHA256")
+        try validateTLSOptions(tls, path: "/migration/security/tls")
     }
 }
 
@@ -256,11 +262,10 @@ private extension XrayConfigBuilder {
 
     static let muxAdvancedKeys: Set<String> = ["enabled", "concurrency", "xudpConcurrency", "xudpProxyUDP443"]
     static let proxyAdvancedKeys: Set<String> = ["tag", "transportLayer"]
-    static let tlsAdvancedKeys: Set<String> = [
-        "serverName", "alpn", "enableSessionResumption", "disableSystemRoot", "minVersion", "maxVersion",
-        "cipherSuites", "fingerprint", "curvePreferences", "pinnedPeerCertSha256",
-        "verifyPeerCertByName", "echConfigList", "echSockopt",
-    ]
+    // Security-critical TLS settings are typed so subscription review and
+    // central validation cannot be bypassed by filling an otherwise-empty raw
+    // field. These remaining long-tail settings cannot change trust policy.
+    static let tlsAdvancedKeys: Set<String> = ["alpn", "enableSessionResumption", "echSockopt"]
     static let realityAdvancedKeys: Set<String> = ["fingerprint", "serverName", "password", "shortId", "mldsa65Verify", "spiderX"]
     static let finalMaskAdvancedKeys: Set<String> = ["tcp", "udp", "quicParams"]
     static let socketAdvancedKeys: Set<String> = [
@@ -297,6 +302,21 @@ private extension XrayConfigBuilder {
         "statsUserUplink",
         "transport",
         "url",
+        "downloadSettings",
+        "echConfigList",
+    ]
+    static let memorySensitiveKeys: Set<String> = [
+        "concurrency", "xudpConcurrency", "maxConcurrency", "maxConnections",
+        "scMaxBufferedPosts", "scMaxEachPostBytes", "uplinkChunkSize", "xPaddingBytes",
+        "bufferSize", "initial_windows_size",
+        "initStreamReceiveWindow", "maxStreamReceiveWindow",
+        "initConnectionReceiveWindow", "maxConnectionReceiveWindow", "maxIncomingStreams",
+        "rand", "length", "lengths", "maxSplit", "packetSize",
+        "paddingMin", "paddingMax", "padding_min", "padding_max",
+    ]
+    static let finalMaskGeneratedSizeKeys: Set<String> = [
+        "rand", "length", "lengths", "maxSplit", "packetSize",
+        "paddingMin", "paddingMax", "padding_min", "padding_max",
     ]
 
     func require(_ condition: @autoclosure () -> Bool, path: String, _ message: String) throws {
@@ -560,6 +580,19 @@ private extension XrayConfigBuilder {
             let values = suites.split(separator: ":").map(String.init)
             try require(values.allSatisfy(Self.tlsCipherSuites.contains), path: "\(path)/cipherSuites", "TLS cipher suite is not supported by the pinned Go TLS runtime.")
         }
+        if let ech = nonempty(tls.echConfigList) {
+            try require(
+                !ech.contains("://"),
+                path: "\(path)/echConfigList",
+                "Resolver-form ECH is not supported; use an inline base64 ECHConfigList.",
+            )
+            let normalized = ech.replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\n", with: "")
+            try require(
+                Data(base64Encoded: normalized)?.isEmpty == false,
+                path: "\(path)/echConfigList",
+                "ECHConfigList must be valid standard base64.",
+            )
+        }
     }
 
     func validateVLESSEncryption(_ encryption: String?, path: String) throws {
@@ -587,6 +620,15 @@ private extension XrayConfigBuilder {
 
     func validateTransport(_ transport: TransportOptions, profilePath: String) throws {
         if let xhttpExtra = transport.xhttpExtra {
+            if let object = xhttpExtra.objectValue,
+               object.keys.contains(where: { jsonKeyEquals($0, "downloadSettings") })
+            {
+                try require(
+                    false,
+                    path: "\(profilePath)/transport/xhttpExtra/downloadSettings",
+                    "XHTTP downloadSettings must use reviewed typed configuration.",
+                )
+            }
             try validateObject(xhttpExtra, allowed: transportAdvancedKeys(for: .xhttp), path: "\(profilePath)/transport/xhttpExtra")
             try validateForbiddenFields(xhttpExtra, path: "\(profilePath)/transport/xhttpExtra")
         }
@@ -711,6 +753,25 @@ private extension XrayConfigBuilder {
         }
     }
 
+    func validateCaseInsensitiveKeys(_ object: JSONObject, allowed: Set<String>, path: String) throws {
+        var seen: Set<String> = []
+        for key in object.keys.sorted() {
+            guard let canonical = allowed.first(where: { jsonKeyEquals(key, $0) }) else {
+                try require(false, path: "\(path)/\(key)", "Unknown or server-only Xray field.")
+                continue
+            }
+            try require(
+                seen.insert(canonical).inserted,
+                path: "\(path)/\(key)",
+                "JSON object contains duplicate keys that differ only by case.",
+            )
+        }
+    }
+
+    func jsonKeyEquals(_ lhs: String, _ rhs: String) -> Bool {
+        lhs.caseInsensitiveCompare(rhs) == .orderedSame
+    }
+
     func validateObject(_ value: JSONValue, allowed: Set<String>, path: String) throws {
         guard let object = value.objectValue else {
             try require(false, path: path, "Xray section must be a JSON object.")
@@ -774,7 +835,7 @@ private extension XrayConfigBuilder {
                 "sessionIDKey", "sessionIDTable", "sessionIDLength", "seqPlacement", "seqKey", "uplinkDataPlacement",
                 "uplinkDataKey", "uplinkChunkSize", "noGRPCHeader", "noSSEHeader", "scMaxEachPostBytes",
                 "scMinPostsIntervalMs", "scMaxBufferedPosts", "scStreamUpServerSecs", "serverMaxHeaderBytes",
-                "xmux", "downloadSettings", "extra",
+                "xmux", "extra",
             ]
         case .mKCP:
             ["mtu", "tti", "uplinkCapacity", "downlinkCapacity", "cwndMultiplier", "maxSendingWindow"]
@@ -804,9 +865,23 @@ private extension XrayConfigBuilder {
             try require(pools.count <= 2, path: "/settings/xrayAdvanced/fakeDns", "At most two FakeDNS pools are allowed on iOS.")
             var totalEntries = 0
             for (index, pool) in pools.enumerated() {
-                try validateObject(pool, allowed: ["ipPool", "poolSize"], path: "/settings/xrayAdvanced/fakeDns/\(index)")
-                let entries = pool.objectValue?["poolSize"]?.integerValue ?? 0
-                try require(entries >= 0, path: "/settings/xrayAdvanced/fakeDns/\(index)/poolSize", "FakeDNS pool size cannot be negative.")
+                let path = "/settings/xrayAdvanced/fakeDns/\(index)"
+                guard let object = pool.objectValue else {
+                    try require(false, path: path, "Xray section must be a JSON object.")
+                    continue
+                }
+                try validateCaseInsensitiveKeys(object, allowed: ["ipPool", "poolSize"], path: path)
+                let rawEntries = try uniqueCaseInsensitiveValue("poolSize", in: object, path: path)
+                if rawEntries != nil {
+                    try require(
+                        rawEntries?.integerValue != nil,
+                        path: "\(path)/poolSize",
+                        "FakeDNS pool size must be an in-range integer.",
+                    )
+                }
+                let entries = rawEntries?.integerValue ?? 0
+                try require(entries >= 0, path: "\(path)/poolSize", "FakeDNS pool size cannot be negative.")
+                try require(entries <= limits.maxFakeDNSPoolEntries, path: "\(path)/poolSize", "FakeDNS pool size exceeds the \(limits.maxFakeDNSPoolEntries)-entry iOS limit.")
                 totalEntries += entries
             }
             try require(totalEntries <= limits.maxFakeDNSPoolEntries, path: "/settings/xrayAdvanced/fakeDns", "FakeDNS exceeds the \(limits.maxFakeDNSPoolEntries)-entry iOS limit.")
@@ -819,7 +894,7 @@ private extension XrayConfigBuilder {
             for key in object.keys.sorted() {
                 let childPath = "\(path)/\(key)"
                 try require(
-                    !Self.forbiddenAdvancedKeys.contains(key) || permittedClientSecretPath(childPath),
+                    !Self.forbiddenAdvancedKeys.contains(where: { jsonKeyEquals(key, $0) }) || permittedClientSecretPath(childPath),
                     path: childPath,
                     "Security-sensitive, secret, or server-only fields cannot be supplied in advanced JSON.",
                 )
@@ -837,17 +912,24 @@ private extension XrayConfigBuilder {
     }
 
     func permittedClientSecretPath(_ path: String) -> Bool {
+        // Sidecar rewriting recognizes ASCII field names. Keep permission
+        // equally narrow: Unicode-folded lookalikes are forbidden above but
+        // never admitted as persistable secret paths.
         let components = path.split(separator: "/").map { $0.lowercased() }
         if Array(components.suffix(3)) == ["xrayadvanced", "settings", "seed"] {
             return true
         }
-        guard components.contains("finalmask"), components.count >= 2,
-              components[components.count - 2] == "settings"
+        guard components.contains("finalmask"), components.count >= 4 else {
+            return false
+        }
+        let suffix = Array(components.suffix(4))
+        guard ["tcp", "udp"].contains(suffix[0]), Int(suffix[1]) != nil,
+              suffix[2] == "settings"
         else { return false }
-        if components.last == "password" {
+        if suffix[3] == "password" {
             return true
         }
-        return components.last == "url" && components.contains("udp")
+        return suffix[0] == "udp" && suffix[3] == "url"
     }
 
     func streamDictionary(for profile: ProxyProfile) throws -> JSONObject {
@@ -1146,6 +1228,7 @@ private extension XrayConfigBuilder {
         mode: RoutingMode,
         rules: [RoutingRule],
         selected: XrayResolvedTarget,
+        ruleDestinations: [XrayResolvedTarget],
         resolver: XrayReachabilityResolver,
         sniff: Bool,
     ) throws -> JSONObject {
@@ -1159,7 +1242,7 @@ private extension XrayConfigBuilder {
         ]
         if mode == .rule {
             for (index, rule) in rules.enumerated() {
-                try resultRules.append(.object(routingRuleDictionary(rule, index: index, selected: selected, resolver: resolver, sniff: sniff)))
+                try resultRules.append(.object(routingRuleDictionary(rule, index: index, destination: ruleDestinations[index], sniff: sniff)))
             }
         }
 
@@ -1191,8 +1274,7 @@ private extension XrayConfigBuilder {
     func routingRuleDictionary(
         _ rule: RoutingRule,
         index: Int,
-        selected: XrayResolvedTarget,
-        resolver: XrayReachabilityResolver,
+        destination: XrayResolvedTarget,
         sniff: Bool,
     ) throws -> JSONObject {
         let path = "/routing/rules/\(index)"
@@ -1202,7 +1284,6 @@ private extension XrayConfigBuilder {
         }
 
         var result: JSONObject = ["type": .string("field")]
-        let destination = rule.target == .selectedProxy ? selected : try resolver.resolve(rule.target)
         setRouteTarget(destination, in: &result)
         let values = stringList(rule.value)
 
@@ -1353,29 +1434,26 @@ private extension XrayConfigBuilder {
     func validateMemorySensitiveValue(_ value: JSONValue, path: String) throws {
         switch value {
         case let .object(object):
+            var protectedKeys: Set<String> = []
             for key in object.keys.sorted() {
                 guard let child = object[key] else { continue }
                 let childPath = "\(path)/\(key)"
-                let maximum: Int? = switch key {
-                case "concurrency": limits.maxMuxConcurrency
-                case "xudpConcurrency": limits.maxXUDPConcurrency
-                case "maxConcurrency": limits.maxXHTTPConnections
-                case "maxConnections": limits.maxXHTTPConnections
-                case "scMaxBufferedPosts": limits.maxXHTTPBufferedPosts
-                case "scMaxEachPostBytes", "uplinkChunkSize": limits.maxXHTTPPostBytes
-                case "xPaddingBytes": limits.maxXHTTPPostBytes
-                case "bufferSize": limits.maxPolicyBufferSizeKiB
-                case "initial_windows_size": limits.maxGRPCInitialWindowBytes
-                case "initStreamReceiveWindow", "maxStreamReceiveWindow": limits.maxQUICStreamWindowBytes
-                case "initConnectionReceiveWindow", "maxConnectionReceiveWindow": limits.maxQUICConnectionWindowBytes
-                case "maxIncomingStreams": limits.maxQUICIncomingStreams
-                case "rand", "length", "lengths", "maxSplit", "packetSize", "paddingMin", "paddingMax": limits.maxFinalMaskGeneratedPayloadBytes
-                default: nil
+                let canonicalKey = Self.memorySensitiveKeys.first(where: { jsonKeyEquals(key, $0) })
+                let isFinalMask = jsonKeyEquals(key, "finalmask")
+                if let protectedKey = canonicalKey ?? (isFinalMask ? "finalmask" : nil) {
+                    try require(
+                        protectedKeys.insert(protectedKey).inserted,
+                        path: childPath,
+                        "JSON object contains duplicate protected keys that differ only by case.",
+                    )
                 }
-                if let maximum, let explicit = numericUpperBound(child) {
+                if let canonicalKey,
+                   let explicit = numericUpperBound(child)
+                {
+                    let maximum = memoryLimit(for: canonicalKey)
                     try require(explicit <= maximum, path: childPath, "Value \(explicit) exceeds the iOS memory limit of \(maximum).")
                 }
-                if key == "finalmask" {
+                if isFinalMask {
                     try validateFinalMask(child, path: childPath)
                 }
                 try validateMemorySensitiveValue(child, path: childPath)
@@ -1389,29 +1467,235 @@ private extension XrayConfigBuilder {
         }
     }
 
+    func memoryLimit(for canonicalKey: String) -> Int {
+        switch canonicalKey {
+        case "concurrency": limits.maxMuxConcurrency
+        case "xudpConcurrency": limits.maxXUDPConcurrency
+        case "maxConcurrency", "maxConnections": limits.maxXHTTPConnections
+        case "scMaxBufferedPosts": limits.maxXHTTPBufferedPosts
+        case "scMaxEachPostBytes", "uplinkChunkSize", "xPaddingBytes": limits.maxXHTTPPostBytes
+        case "bufferSize": limits.maxPolicyBufferSizeKiB
+        case "initial_windows_size": limits.maxGRPCInitialWindowBytes
+        case "initStreamReceiveWindow", "maxStreamReceiveWindow": limits.maxQUICStreamWindowBytes
+        case "initConnectionReceiveWindow", "maxConnectionReceiveWindow": limits.maxQUICConnectionWindowBytes
+        case "maxIncomingStreams": limits.maxQUICIncomingStreams
+        case "rand", "length", "lengths", "maxSplit", "packetSize",
+             "paddingMin", "paddingMax", "padding_min", "padding_max":
+            limits.maxFinalMaskGeneratedPayloadBytes
+        default:
+            preconditionFailure("Unregistered memory-sensitive JSON key: \(canonicalKey)")
+        }
+    }
+
     func validateFinalMask(_ value: JSONValue, path: String) throws {
         guard let object = value.objectValue else {
             try require(false, path: path, "FinalMask must be a JSON object.")
             return
         }
-        let layers = (object["tcp"]?.arrayValue?.count ?? 0) + (object["udp"]?.arrayValue?.count ?? 0)
+        let tcp = try uniqueCaseInsensitiveValue("tcp", in: object, path: path)
+        let udp = try uniqueCaseInsensitiveValue("udp", in: object, path: path)
+        let layers = (tcp?.arrayValue?.count ?? 0) + (udp?.arrayValue?.count ?? 0)
         try require(layers <= limits.maxFinalMaskLayers, path: path, "FinalMask exceeds the \(limits.maxFinalMaskLayers)-layer iOS limit.")
         let size = (try? JSONSerialization.data(withJSONObject: value.foundationValue, options: [])).map(\.count) ?? Int.max
         try require(size <= limits.maxFinalMaskGeneratedPayloadBytes, path: path, "FinalMask exceeds the \(limits.maxFinalMaskGeneratedPayloadBytes)-byte iOS payload limit.")
         try validateFinalMaskGeneratedPayload(value, path: path)
+        try validateFinalMaskNetworkDestinations(udp, path: "\(path)/udp")
+    }
+
+    func validateFinalMaskNetworkDestinations(_ value: JSONValue?, path: String) throws {
+        guard let value else { return }
+        guard let layers = value.arrayValue else {
+            try require(false, path: path, "FinalMask UDP layers must be an array.")
+            return
+        }
+
+        for (index, layer) in layers.enumerated() {
+            let layerPath = "\(path)/\(index)"
+            guard let layerObject = layer.objectValue else {
+                try require(false, path: layerPath, "FinalMask layers must be JSON objects.")
+                continue
+            }
+            guard let typeValue = try uniqueCaseInsensitiveValue("type", in: layerObject, path: layerPath),
+                  let type = typeValue.stringValue?.lowercased()
+            else {
+                try require(false, path: "\(layerPath)/type", "FinalMask layer type must be a string.")
+                continue
+            }
+
+            let settingsValue = try uniqueCaseInsensitiveValue("settings", in: layerObject, path: layerPath)
+            if type == "xdns" {
+                try validateXDNSFinalMaskSettings(settingsValue, path: "\(layerPath)/settings")
+            } else if type == "realm" {
+                try validateRealmFinalMaskSettings(settingsValue, path: "\(layerPath)/settings")
+            } else if let settings = settingsValue?.objectValue,
+                      try uniqueCaseInsensitiveValue("url", in: settings, path: "\(layerPath)/settings") != nil
+            {
+                try require(false, path: "\(layerPath)/settings/url", "Only validated Realm layers may contain a control URL.")
+            }
+        }
+    }
+
+    func validateXDNSFinalMaskSettings(_ value: JSONValue?, path: String) throws {
+        guard let settings = value?.objectValue else {
+            try require(false, path: path, "XDNS settings must be a JSON object.")
+            return
+        }
+        guard let resolverValue = try uniqueCaseInsensitiveValue("resolvers", in: settings, path: path),
+              let resolvers = resolverValue.arrayValue,
+              !resolvers.isEmpty
+        else {
+            try require(false, path: "\(path)/resolvers", "XDNS resolvers must be a nonempty array.")
+            return
+        }
+        try require(
+            resolvers.count <= limits.maxXDNSResolvers,
+            path: "\(path)/resolvers",
+            "XDNS exceeds the \(limits.maxXDNSResolvers)-resolver iOS limit.",
+        )
+        let legacyDomain = try uniqueCaseInsensitiveValue("domain", in: settings, path: path)
+        let serverDomains = try uniqueCaseInsensitiveValue("domains", in: settings, path: path)
+        if legacyDomain != nil || serverDomains != nil {
+            try require(false, path: "\(path)/domains", "XDNS server domains cannot be supplied in a client configuration.")
+        }
+        for (index, resolver) in resolvers.enumerated() {
+            let resolverPath = "\(path)/resolvers/\(index)"
+            guard let raw = resolver.stringValue,
+                  let host = xdnsResolverHost(raw),
+                  ImportPolicy.isPublicIPAddressLiteral(host)
+            else {
+                try require(false, path: resolverPath, "XDNS resolvers must use a public IP literal and a port from 1 through 65535.")
+                continue
+            }
+        }
+    }
+
+    func xdnsResolverHost(_ raw: String) -> String? {
+        guard raw == raw.trimmingCharacters(in: .whitespacesAndNewlines),
+              let separator = raw.range(of: "+udp://"),
+              raw[separator.upperBound...].range(of: "+udp://") == nil
+        else { return nil }
+
+        let query = String(raw[..<separator.lowerBound])
+        guard !query.isEmpty else { return nil }
+        let queryParts = query.split(separator: ":", omittingEmptySubsequences: false)
+        guard queryParts.count <= 2,
+              !queryParts[0].isEmpty,
+              queryParts.count == 1 || ["", "txt", "a", "aaaa"].contains(queryParts[1].lowercased())
+        else { return nil }
+
+        return splitHostPort(String(raw[separator.upperBound...]))?.host
+    }
+
+    func validateRealmFinalMaskSettings(_ value: JSONValue?, path: String) throws {
+        guard let settings = value?.objectValue else {
+            try require(false, path: path, "Realm settings must be a JSON object.")
+            return
+        }
+        guard let urlValue = try uniqueCaseInsensitiveValue("url", in: settings, path: path),
+              let rawURL = urlValue.stringValue
+        else {
+            try require(false, path: "\(path)/url", "Realm control URL must be a string.")
+            return
+        }
+        if !rawURL.hasPrefix("##HOP_SECRET:") || !rawURL.hasSuffix("##") {
+            guard let components = URLComponents(string: rawURL),
+                  components.scheme?.lowercased() == "realm",
+                  let user = components.user,
+                  !user.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  components.password == nil,
+                  let host = components.host,
+                  allowedImportedSecondaryHost(host),
+                  !components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).isEmpty,
+                  components.query == nil,
+                  components.fragment == nil,
+                  components.port.map({ (1 ... 65535).contains($0) }) ?? true
+            else {
+                try require(false, path: "\(path)/url", "Realm control URLs must use realm:// with a token, allowed host, optional valid port, and Realm ID.")
+                return
+            }
+        }
+
+        guard let stunValue = try uniqueCaseInsensitiveValue("stunServers", in: settings, path: path),
+              let stunServers = stunValue.arrayValue,
+              !stunServers.isEmpty
+        else {
+            try require(false, path: "\(path)/stunServers", "Realm STUN servers must be a nonempty array.")
+            return
+        }
+        try require(
+            stunServers.count <= limits.maxRealmSTUNServers,
+            path: "\(path)/stunServers",
+            "Realm exceeds the \(limits.maxRealmSTUNServers)-server iOS STUN limit.",
+        )
+        for (index, server) in stunServers.enumerated() {
+            let serverPath = "\(path)/stunServers/\(index)"
+            guard let raw = server.stringValue,
+                  let endpoint = splitHostPort(raw),
+                  ImportPolicy.isPublicIPAddressLiteral(endpoint.host)
+            else {
+                try require(false, path: serverPath, "Realm STUN servers must use a public IP literal and a port from 1 through 65535.")
+                continue
+            }
+        }
+    }
+
+    func splitHostPort(_ raw: String) -> (host: String, port: Int)? {
+        guard raw == raw.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        let host: String
+        let portString: String
+        if raw.hasPrefix("[") {
+            guard let close = raw.firstIndex(of: "]"),
+                  raw.index(after: close) < raw.endIndex,
+                  raw[raw.index(after: close)] == ":"
+            else { return nil }
+            host = String(raw[raw.index(after: raw.startIndex) ..< close])
+            portString = String(raw[raw.index(close, offsetBy: 2)...])
+        } else {
+            guard let separator = raw.lastIndex(of: ":") else { return nil }
+            host = String(raw[..<separator])
+            portString = String(raw[raw.index(after: separator)...])
+            guard !host.contains(":") else { return nil }
+        }
+        guard !host.isEmpty, let port = Int(portString), (1 ... 65535).contains(port) else { return nil }
+        return (host, port)
+    }
+
+    func allowedImportedSecondaryHost(_ rawHost: String) -> Bool {
+        let host = rawHost.hasPrefix("[") && rawHost.hasSuffix("]")
+            ? String(rawHost.dropFirst().dropLast())
+            : rawHost
+        guard !host.isEmpty,
+              !host.contains(where: \.isWhitespace),
+              !ImportPolicy.isDisallowedRemoteHost(host),
+              !ImportPolicy.resolvedAddressesAreDisallowed(host)
+        else { return false }
+        if ImportPolicy.isIPAddressLiteral(host) {
+            return ImportPolicy.isPublicIPAddressLiteral(host)
+        }
+        return !host.contains(":") && !host.contains("%")
+    }
+
+    func uniqueCaseInsensitiveValue(_ name: String, in object: JSONObject, path: String) throws -> JSONValue? {
+        let matches = object.keys.filter { jsonKeyEquals($0, name) }
+        try require(matches.count <= 1, path: "\(path)/\(name)", "JSON object contains duplicate keys that differ only by case.")
+        return matches.first.flatMap { object[$0] }
     }
 
     func validateFinalMaskGeneratedPayload(_ value: JSONValue, path: String) throws {
         switch value {
         case let .object(object):
-            let generatedSizeKeys: Set = [
-                "rand", "length", "lengths", "maxSplit", "packetSize",
-                "paddingMin", "paddingMax", "padding_min", "padding_max",
-            ]
+            var seenGeneratedKeys: Set<String> = []
             for (key, child) in object {
                 let childPath = "\(path)/\(key)"
-                if generatedSizeKeys.contains(key), let upperBound = largestInteger(in: child) {
-                    try require(upperBound <= limits.maxFinalMaskGeneratedPayloadBytes, path: childPath, "FinalMask may generate \(upperBound) bytes, above the \(limits.maxFinalMaskGeneratedPayloadBytes)-byte iOS limit.")
+                if let canonicalKey = Self.finalMaskGeneratedSizeKeys.first(where: { jsonKeyEquals(key, $0) }) {
+                    try require(
+                        seenGeneratedKeys.insert(canonicalKey).inserted,
+                        path: childPath,
+                        "FinalMask contains duplicate generated-size keys that differ only by case.",
+                    )
+                    if let upperBound = numericUpperBound(child) {
+                        try require(upperBound <= limits.maxFinalMaskGeneratedPayloadBytes, path: childPath, "FinalMask may generate \(upperBound) bytes, above the \(limits.maxFinalMaskGeneratedPayloadBytes)-byte iOS limit.")
+                    }
                 }
                 try validateFinalMaskGeneratedPayload(child, path: childPath)
             }
@@ -1510,32 +1794,22 @@ private extension XrayConfigBuilder {
     }
 
     func numericUpperBound(_ value: JSONValue) -> Int? {
-        if let integer = value.integerValue {
-            return integer
+        switch value {
+        case .number:
+            return value.integerValue ?? Int.max
+        case let .string(string):
+            let components = string.split(whereSeparator: { $0 == "-" || $0 == ":" })
+            guard !components.isEmpty else { return nil }
+            let values = components.map { Int($0.trimmingCharacters(in: .whitespaces)) }
+            guard values.allSatisfy({ $0 != nil }) else { return Int.max }
+            return values.compactMap(\.self).max()
+        case let .array(values):
+            return values.compactMap(numericUpperBound).max()
+        case let .object(object):
+            return object.values.compactMap(numericUpperBound).max()
+        case .bool, .null:
+            return nil
         }
-        if let string = value.stringValue {
-            return string.split(whereSeparator: { $0 == "-" || $0 == ":" }).compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }.max()
-        }
-        if let object = value.objectValue {
-            return [object["to"]?.integerValue, object["from"]?.integerValue].compactMap(\.self).max()
-        }
-        if let array = value.arrayValue {
-            return array.compactMap(numericUpperBound).max()
-        }
-        return nil
-    }
-
-    func largestInteger(in value: JSONValue) -> Int? {
-        if let direct = numericUpperBound(value) {
-            return direct
-        }
-        if let values = value.arrayValue {
-            return values.compactMap(largestInteger).max()
-        }
-        if let object = value.objectValue {
-            return object.values.compactMap(largestInteger).max()
-        }
-        return nil
     }
 
     func nonempty(_ value: String?) -> String? {
@@ -1582,36 +1856,53 @@ private struct XrayResolvedURLGroup {
 private final class XrayReachabilityResolver {
     let profiles: [ProxyProfile]
     let groups: [ProxyGroup]
+    private let maxGroupDepth: Int
+    private let maxResolutionSteps: Int
     private let profilesByID: [ProxyProfile.ID: ProxyProfile]
     private let groupsByID: [ProxyGroup.ID: ProxyGroup]
-    private let profilesByName: [String: ProxyProfile]
-    private let groupsByName: [String: ProxyGroup]
+    private let profilesByName: [String: [ProxyProfile]]
+    private let groupsByName: [String: [ProxyGroup]]
+    private var resolutionSteps = 0
+    private var budgetViolation: XrayValidationIssue?
+    private var ambiguityViolation: XrayValidationIssue?
 
     private(set) var profileIDs: Set<ProxyProfile.ID> = []
     private(set) var urlGroups: [ProxyGroup.ID: XrayResolvedURLGroup] = [:]
 
-    init(profiles: [ProxyProfile], groups: [ProxyGroup]) {
+    init(profiles: [ProxyProfile], groups: [ProxyGroup], limits: IOSRuntimeLimits) {
         self.profiles = profiles
         self.groups = groups
+        maxGroupDepth = limits.maxProxyGroupDepth
+        maxResolutionSteps = limits.maxProxyGroupResolutionSteps
         profilesByID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
         groupsByID = Dictionary(uniqueKeysWithValues: groups.map { ($0.id, $0) })
-        profilesByName = Dictionary(profiles.map { ($0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
-        groupsByName = Dictionary(groups.map { ($0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), $0) }, uniquingKeysWith: { first, _ in first })
+        profilesByName = Dictionary(grouping: profiles) { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        groupsByName = Dictionary(grouping: groups) { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
     }
 
     func resolve(_ target: OutboundTarget) throws -> XrayResolvedTarget {
         var activeGroups: Set<ProxyGroup.ID> = []
-        return try resolve(target, activeGroups: &activeGroups)
+        do {
+            return try resolve(target, activeGroups: &activeGroups, groupDepth: 0)
+        } catch {
+            try rethrowFatalViolation()
+            throw error
+        }
     }
 
-    private func resolve(_ target: OutboundTarget, activeGroups: inout Set<ProxyGroup.ID>) throws -> XrayResolvedTarget {
+    private func resolve(
+        _ target: OutboundTarget,
+        activeGroups: inout Set<ProxyGroup.ID>,
+        groupDepth: Int,
+    ) throws -> XrayResolvedTarget {
+        try consumeResolutionStep()
         switch target {
         case .selectedProxy:
             if let profile = profiles.first {
                 return resolved(profile)
             }
             if let group = groups.first(where: \.isEnabled) {
-                return try resolve(group, activeGroups: &activeGroups)
+                return try resolve(group, activeGroups: &activeGroups, groupDepth: groupDepth + 1)
             }
             return try fail("/selectedTarget", "No runnable proxy is available.")
         case .direct:
@@ -1627,7 +1918,7 @@ private final class XrayReachabilityResolver {
             guard let group = groupsByID[id] else {
                 return try fail("/selectedTarget", "Referenced proxy group no longer exists.")
             }
-            return try resolve(group, activeGroups: &activeGroups)
+            return try resolve(group, activeGroups: &activeGroups, groupDepth: groupDepth + 1)
         case let .named(name):
             let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             if normalized == "direct" {
@@ -1637,19 +1928,34 @@ private final class XrayReachabilityResolver {
                 return .outbound("reject")
             }
             if normalized == "proxy" {
-                return try resolve(.selectedProxy, activeGroups: &activeGroups)
+                return try resolve(.selectedProxy, activeGroups: &activeGroups, groupDepth: groupDepth)
             }
-            if let profile = profilesByName[normalized] {
+            let namedProfiles = profilesByName[normalized] ?? []
+            let namedGroups = groupsByName[normalized] ?? []
+            guard namedProfiles.count + namedGroups.count <= 1 else {
+                let issue = XrayValidationIssue(
+                    path: "/selectedTarget",
+                    message: "Named target \(name) is ambiguous; use a UUID-bound profile or group target.",
+                )
+                ambiguityViolation = issue
+                throw XrayConfigError.validationFailed([issue])
+            }
+            if let profile = namedProfiles.first {
                 return resolved(profile)
             }
-            if let group = groupsByName[normalized] {
-                return try resolve(group, activeGroups: &activeGroups)
+            if let group = namedGroups.first {
+                return try resolve(group, activeGroups: &activeGroups, groupDepth: groupDepth + 1)
             }
             return try fail("/selectedTarget", "Named target \(name) does not exist.")
         }
     }
 
-    private func resolve(_ group: ProxyGroup, activeGroups: inout Set<ProxyGroup.ID>) throws -> XrayResolvedTarget {
+    private func resolve(
+        _ group: ProxyGroup,
+        activeGroups: inout Set<ProxyGroup.ID>,
+        groupDepth: Int,
+    ) throws -> XrayResolvedTarget {
+        try requireGroupDepth(groupDepth)
         guard group.isEnabled else {
             return try fail("/groups/\(group.id)", "Proxy group is disabled.")
         }
@@ -1660,27 +1966,35 @@ private final class XrayReachabilityResolver {
 
         switch group.type {
         case .select:
-            if let selected = group.defaultTarget,
-               let destination = try? resolve(selected, activeGroups: &activeGroups)
-            {
-                return destination
+            var attempted: Set<OutboundTarget> = []
+            if let selected = group.defaultTarget {
+                attempted.insert(deduplicationKey(for: selected))
+                do {
+                    return try resolve(selected, activeGroups: &activeGroups, groupDepth: groupDepth)
+                } catch {
+                    try rethrowFatalViolation()
+                }
             }
-            for member in group.members {
-                if let destination = try? resolve(member, activeGroups: &activeGroups) {
-                    return destination
+            for member in group.members where attempted.insert(deduplicationKey(for: member)).inserted {
+                do {
+                    return try resolve(member, activeGroups: &activeGroups, groupDepth: groupDepth)
+                } catch {
+                    try rethrowFatalViolation()
                 }
             }
             return try fail("/groups/\(group.id)/members", "Manual group has no runnable member.")
         case .urlTest:
             var tags: [String] = []
-            for member in group.members {
-                let destination = try resolve(member, activeGroups: &activeGroups)
+            var seenTags: Set<String> = []
+            var attempted: Set<OutboundTarget> = []
+            for member in group.members where attempted.insert(deduplicationKey(for: member)).inserted {
+                let destination = try resolve(member, activeGroups: &activeGroups, groupDepth: groupDepth)
                 guard case let .outbound(tag) = destination,
                       tag.hasPrefix("proxy-")
                 else {
                     return try fail("/groups/\(group.id)/members", "URL-test groups may contain profile or manual-group profile members only.")
                 }
-                if !tags.contains(tag) {
+                if seenTags.insert(tag).inserted {
                     tags.append(tag)
                 }
             }
@@ -1694,6 +2008,11 @@ private final class XrayReachabilityResolver {
         }
     }
 
+    private func deduplicationKey(for target: OutboundTarget) -> OutboundTarget {
+        guard case let .named(name) = target else { return target }
+        return .named(name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
     private func resolved(_ profile: ProxyProfile) -> XrayResolvedTarget {
         profileIDs.insert(profile.id)
         return .outbound(XrayConfigBuilder.tag(for: profile))
@@ -1701,5 +2020,39 @@ private final class XrayReachabilityResolver {
 
     private func fail<T>(_ path: String, _ message: String) throws -> T {
         throw XrayConfigError.validationFailed([XrayValidationIssue(path: path, message: message)])
+    }
+
+    private func consumeResolutionStep() throws {
+        try rethrowFatalViolation()
+        guard resolutionSteps < maxResolutionSteps else {
+            let issue = XrayValidationIssue(
+                path: "/groups",
+                message: "Proxy-group resolution exceeds the iOS work limit of \(maxResolutionSteps) steps.",
+            )
+            budgetViolation = issue
+            throw XrayConfigError.validationFailed([issue])
+        }
+        resolutionSteps += 1
+    }
+
+    private func requireGroupDepth(_ depth: Int) throws {
+        try rethrowFatalViolation()
+        guard depth <= maxGroupDepth else {
+            let issue = XrayValidationIssue(
+                path: "/groups",
+                message: "Proxy-group dependency depth exceeds the iOS limit of \(maxGroupDepth).",
+            )
+            budgetViolation = issue
+            throw XrayConfigError.validationFailed([issue])
+        }
+    }
+
+    private func rethrowFatalViolation() throws {
+        if let budgetViolation {
+            throw XrayConfigError.validationFailed([budgetViolation])
+        }
+        if let ambiguityViolation {
+            throw XrayConfigError.validationFailed([ambiguityViolation])
+        }
     }
 }

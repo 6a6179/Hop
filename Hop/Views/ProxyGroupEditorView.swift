@@ -33,6 +33,9 @@ struct ProxyGroupEditorView: View {
                 }
 
                 Section {
+                    Toggle("Direct", isOn: memberBinding(for: .direct))
+                    Toggle("Reject", isOn: memberBinding(for: .reject))
+
                     ForEach(store.profiles) { profile in
                         Toggle(profile.name, isOn: memberBinding(for: .profile(profile.id)))
                     }
@@ -43,7 +46,7 @@ struct ProxyGroupEditorView: View {
                 } header: {
                     Text("Members")
                 } footer: {
-                    Text("Groups can contain nodes and other groups. Avoid circular group nesting.")
+                    Text("Review Direct and Reject alongside nodes and nested groups. Avoid circular group nesting.")
                 }
 
                 Section("Default") {
@@ -108,8 +111,9 @@ struct ProxyGroupEditorView: View {
     }
 }
 
-private struct ProxyGroupEditorDraft {
+struct ProxyGroupEditorDraft {
     let id: UUID
+    let subscriptionID: SubscriptionSource.ID?
     var name: String
     var type: ProxyGroupType
     var members: [OutboundTarget]
@@ -124,6 +128,7 @@ private struct ProxyGroupEditorDraft {
 
     init(group: ProxyGroup) {
         id = group.id
+        subscriptionID = group.subscriptionID
         name = group.name
         type = group.type
         members = group.members
@@ -151,6 +156,7 @@ private struct ProxyGroupEditorDraft {
 
         return ProxyGroup(
             id: id,
+            subscriptionID: subscriptionID,
             name: trimmedName,
             type: type,
             members: members,

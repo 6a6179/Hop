@@ -67,6 +67,9 @@ struct ProxyGroupTestOptions: Hashable, Codable {
 
 struct ProxyGroup: Identifiable, Hashable, Codable {
     var id: UUID
+    /// Subscription provenance. `nil` means the group was created manually or
+    /// predates provenance tracking; it must never match a remote refresh.
+    var subscriptionID: SubscriptionSource.ID?
     var name: String
     var type: ProxyGroupType
     var members: [OutboundTarget]
@@ -79,6 +82,7 @@ struct ProxyGroup: Identifiable, Hashable, Codable {
 
     init(
         id: UUID = UUID(),
+        subscriptionID: SubscriptionSource.ID? = nil,
         name: String,
         type: ProxyGroupType,
         members: [OutboundTarget],
@@ -90,6 +94,7 @@ struct ProxyGroup: Identifiable, Hashable, Codable {
         lastLatencyMilliseconds: Int? = nil,
     ) {
         self.id = id
+        self.subscriptionID = subscriptionID
         self.name = name
         self.type = type
         self.members = members
@@ -139,17 +144,23 @@ struct ImportResult: Hashable, Codable {
     var groups: [ProxyGroup]
     var rules: [RoutingRule]
     var warnings: [ImportWarning]
+    /// Set only by a parser that recognized an explicitly empty profile/group
+    /// inventory. `nil` keeps older encoded values compatible and prevents an
+    /// arbitrary empty/rules-only result from deleting a subscription snapshot.
+    var validatedEmptySubscriptionSnapshot: Bool?
 
     init(
         profiles: [ProxyProfile] = [],
         groups: [ProxyGroup] = [],
         rules: [RoutingRule] = [],
         warnings: [ImportWarning] = [],
+        validatedEmptySubscriptionSnapshot: Bool? = nil,
     ) {
         self.profiles = profiles
         self.groups = groups
         self.rules = rules
         self.warnings = warnings
+        self.validatedEmptySubscriptionSnapshot = validatedEmptySubscriptionSnapshot
     }
 
     var isEmpty: Bool {
@@ -168,14 +179,100 @@ struct ImportResult: Hashable, Codable {
         "\(profiles.count) nodes, \(groups.count) groups, \(rules.count) rules, \(warnings.count) warnings"
     }
 
-    func markingProfiles(subscriptionID: SubscriptionSource.ID) -> ImportResult {
+    func markingSubscriptionOwnership(subscriptionID: SubscriptionSource.ID) -> ImportResult {
         var copy = self
         copy.profiles = profiles.map {
             var profile = $0
             profile.subscriptionID = subscriptionID
             return profile
         }
+        copy.groups = groups.map {
+            var group = $0
+            group.subscriptionID = subscriptionID
+            return group
+        }
+        copy.groups = Self.bindingOwnedNamedReferences(
+            profiles: copy.profiles,
+            groups: copy.groups,
+        )
         return copy
+    }
+
+    /// Converts subscription-owned named group references into UUID references
+    /// inside the same ownership namespace. Unresolved names are removed rather
+    /// than falling through to the global name resolver and another source.
+    static func bindingOwnedNamedReferences(
+        profiles: [ProxyProfile],
+        groups: [ProxyGroup],
+    ) -> [ProxyGroup] {
+        var profileIDs: [SubscriptionSource.ID: [String: ProxyProfile.ID]] = [:]
+        for profile in profiles {
+            guard let owner = profile.subscriptionID else { continue }
+            let name = normalizedTargetName(profile.name)
+            if profileIDs[owner]?[name] == nil {
+                profileIDs[owner, default: [:]][name] = profile.id
+            }
+        }
+        var groupIDs: [SubscriptionSource.ID: [String: ProxyGroup.ID]] = [:]
+        for group in groups {
+            guard let owner = group.subscriptionID else { continue }
+            let name = normalizedTargetName(group.name)
+            if groupIDs[owner]?[name] == nil {
+                groupIDs[owner, default: [:]][name] = group.id
+            }
+        }
+
+        return groups.map { original in
+            guard let owner = original.subscriptionID else { return original }
+            var group = original
+            func bound(_ target: OutboundTarget) -> OutboundTarget? {
+                if case .selectedProxy = target {
+                    return nil
+                }
+                guard case let .named(name) = target else { return target }
+                let normalized = normalizedTargetName(name)
+                switch normalized {
+                case "direct":
+                    return .direct
+                case "reject":
+                    return .reject
+                case "proxy":
+                    return nil
+                default:
+                    if let id = profileIDs[owner]?[normalized] {
+                        return .profile(id)
+                    }
+                    if let id = groupIDs[owner]?[normalized] {
+                        return .group(id)
+                    }
+                    return nil
+                }
+            }
+
+            let hadDefaultTarget = group.defaultTarget != nil
+            group.members = group.members.compactMap(bound)
+            group.defaultTarget = group.defaultTarget.flatMap(bound)
+            if hadDefaultTarget,
+               group.defaultTarget.map({ !group.members.contains($0) }) ?? true
+            {
+                group.defaultTarget = group.members.first
+            }
+            if group.members.isEmpty {
+                group.isEnabled = false
+            }
+            return group
+        }
+    }
+
+    private static func normalizedTargetName(_ name: String) -> String {
+        name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// Compatibility spelling retained for callers outside the subscription
+    /// UI; it now marks groups too so no ingestion path can create split
+    /// provenance.
+    func markingProfiles(subscriptionID: SubscriptionSource.ID) -> ImportResult {
+        markingSubscriptionOwnership(subscriptionID: subscriptionID)
     }
 
     func droppingRules() -> ImportResult {
@@ -185,6 +282,27 @@ struct ImportResult: Hashable, Codable {
         var copy = self
         copy.rules = []
         copy.warnings.append(ImportWarning(message: "Ignored \(rules.count) routing rule(s) from subscription data. Import rules manually to review and apply them."))
+        return copy
+    }
+
+    static let subscriptionGroupReviewWarning = "Subscription groups were saved disabled. Review each group's members and default target before enabling or selecting it."
+
+    /// Provider-controlled groups can hide DIRECT/REJECT defaults and nested
+    /// routing behavior behind a count-only preview. Keep new groups available,
+    /// but disabled, so `.selectedProxy`, named references, and nested groups
+    /// cannot activate one before the required review.
+    func requiringSubscriptionGroupReview() -> ImportResult {
+        guard !groups.isEmpty else { return self }
+        var copy = self
+        copy.groups = groups.map {
+            var group = $0
+            group.isEnabled = false
+            group.warning = "Review this subscription group's routing before enabling it."
+            return group
+        }
+        if !warnings.contains(where: { $0.message == Self.subscriptionGroupReviewWarning }) {
+            copy.warnings.insert(ImportWarning(message: Self.subscriptionGroupReviewWarning), at: 0)
+        }
         return copy
     }
 
@@ -244,6 +362,12 @@ struct ImportResult: Hashable, Codable {
         var trimmedWarnings = warnings
         trimmedWarnings.append(ImportWarning(message: "Import truncated to \(maxItems) items; \(total - maxItems) were dropped."))
 
-        return ImportResult(profiles: keptProfiles, groups: keptGroups, rules: keptRules, warnings: trimmedWarnings)
+        return ImportResult(
+            profiles: keptProfiles,
+            groups: keptGroups,
+            rules: keptRules,
+            warnings: trimmedWarnings,
+            validatedEmptySubscriptionSnapshot: validatedEmptySubscriptionSnapshot,
+        )
     }
 }

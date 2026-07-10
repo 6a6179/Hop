@@ -73,7 +73,7 @@ final class XrayConfigBuilderTests: XCTestCase {
                 utlsFingerprint: "chrome",
                 pinnedPeerCertSHA256: String(repeating: "ab", count: 32),
                 verifyPeerCertByName: "xhttp.example.com",
-                echConfigList: "https://dns.example/dns-query",
+                echConfigList: "AQIDBA==",
                 curvePreferences: ["X25519MLKEM768", "X25519"],
                 minVersion: "1.3",
                 maxVersion: "1.3",
@@ -84,6 +84,7 @@ final class XrayConfigBuilderTests: XCTestCase {
                 path: "/hop",
                 host: "cdn.example.com",
                 xhttpMode: "stream-up",
+                xhttpExtra: .object(["noSSEHeader": .bool(true)]),
             ),
         )
 
@@ -102,8 +103,102 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual((extra["scMaxBufferedPosts"] as? NSNumber)?.intValue, 2)
         XCTAssertEqual((extra["scMaxEachPostBytes"] as? NSNumber)?.intValue, 256 * 1024)
         XCTAssertEqual((xmux["maxConnections"] as? NSNumber)?.intValue, 2)
+        XCTAssertEqual(extra["noSSEHeader"] as? Bool, true)
 
         try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testRejectsOpaqueXHTTPDownloadSettingsAcrossTypedAndAdvancedPaths() {
+        var profile = basicVLESS()
+        profile.transport = TransportOptions(
+            type: .xhttp,
+            xhttpExtra: .object([
+                "downloadSettings": .object([
+                    "address": .string("downlink.example"),
+                    "port": .number(80),
+                    "network": .string("xhttp"),
+                    "security": .string("none"),
+                ]),
+            ]),
+        )
+        assertRejected(profile, contains: "/transport/xhttpExtra/downloadSettings")
+
+        profile = basicVLESS()
+        profile.transport = TransportOptions(type: .xhttp)
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "streamSettings": .object([
+                "xhttpSettings": .object([
+                    "extra": .object([
+                        "downloadSettings": .object([
+                            "address": .string("downlink.example"),
+                            "port": .number(80),
+                        ]),
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "cannot be supplied")
+
+        profile = basicVLESS()
+        profile.transport = TransportOptions(
+            type: .xhttp,
+            xhttpExtra: .object(["downloadſettings": .null]),
+        )
+        assertRejected(profile, contains: "/transport/xhttpExtra/downloadSettings")
+
+        profile = basicVLESS()
+        profile.transport = TransportOptions(type: .xhttp)
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "streamSettings": .object([
+                "xhttpSettings": .object([
+                    "extra": .object([
+                        "nested": .object(["downloadſettings": .null]),
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "cannot be supplied")
+
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "streamSettings": .object([
+                "xhttpSettings": .object([
+                    "extra": .object([
+                        "DownloadSettings": .null,
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "cannot be supplied")
+    }
+
+    func testECHAllowsInlineBase64AndRejectsResolverOrMalformedForms() throws {
+        var profile = basicVLESS()
+        profile.security.tls?.echConfigList = "AQIDBA=="
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let outbound = try profileOutbound(parse(json))
+        let stream = try XCTUnwrap(outbound["streamSettings"] as? [String: Any])
+        let tls = try XCTUnwrap(stream["tlsSettings"] as? [String: Any])
+        XCTAssertEqual(tls["echConfigList"] as? String, "AQIDBA==")
+
+        for unsafe in [
+            "https://dns.example/dns-query",
+            "example.com+udp://1.1.1.1:53",
+            "example.com+h2c://1.1.1.1/dns-query",
+            "not-base64!",
+        ] {
+            profile.security.tls?.echConfigList = unsafe
+            assertRejected(profile, contains: "/security/tls/echConfigList")
+        }
+
+        profile.security.tls?.echConfigList = nil
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "streamSettings": .object([
+                "tlsSettings": .object([
+                    "echConfigList": .string("https://127.0.0.1/dns-query"),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "cannot be supplied")
     }
 
     func testBuildsHysteria2FinalMaskWithinIOSLimits() async throws {
@@ -141,6 +236,230 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual(udp.first?["type"] as? String, "salamander")
 
         try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testFinalMaskAcceptsOnlyPublicLiteralXDNSResolvers() throws {
+        for resolver in [
+            "observe.invalid:txt+udp://1.1.1.1:53",
+            "observe.invalid:aaaa+udp://[2606:4700:4700::1111]:53",
+            "observe.invalid:aaaa+udp://[2001:4860:4860::8888]:53",
+            "observe.invalid:aaaa+udp://[64:ff9b::808:808]:53",
+        ] {
+            var profile = basicVLESS()
+            profile.transport.finalMask = xdnsFinalMask(resolver)
+            XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .global, rules: []), resolver)
+        }
+
+        for resolver in [
+            "observe.invalid:txt+udp://127.0.0.1:53",
+            "observe.invalid:txt+udp://10.0.0.1:53",
+            "observe.invalid:txt+udp://100.64.0.1:53",
+            "observe.invalid:txt+udp://169.254.169.254:53",
+            "observe.invalid:txt+udp://192.0.2.1:53",
+            "observe.invalid:txt+udp://[::1]:53",
+            "observe.invalid:txt+udp://[fe80::1]:53",
+            "observe.invalid:txt+udp://[fc00::1]:53",
+            "observe.invalid:txt+udp://[2001:db8::1]:53",
+            "observe.invalid:txt+udp://[2001:2::1]:53",
+            "observe.invalid:txt+udp://[3fff::1]:53",
+            "observe.invalid:txt+udp://[5f00::1]:53",
+            "observe.invalid:txt+udp://[100:0:0:1::1]:53",
+            "observe.invalid:txt+udp://[64:ff9b::c0a8:101]:53",
+            "observe.invalid:txt+udp://[::ffff:192.168.1.1]:53",
+            "observe.invalid:txt+udp://resolver.example:53",
+            "observe.invalid:txt+udp://1.1.1.1",
+            "observe.invalid:txt+udp://1.1.1.1:65536",
+            "observe.invalid:mx+udp://1.1.1.1:53",
+            "observe.invalid:txt+tcp://1.1.1.1:53",
+        ] {
+            var profile = basicVLESS()
+            profile.transport.finalMask = xdnsFinalMask(resolver)
+            assertRejected(profile, contains: "XDNS resolvers")
+        }
+    }
+
+    func testFinalMaskBoundsXDNSResolversAndRejectsServerDomains() {
+        let resolvers = [
+            "observe.invalid:txt+udp://1.1.1.1:53",
+            "observe.invalid:txt+udp://9.9.9.9:53",
+            "observe.invalid:txt+udp://8.8.8.8:53",
+            "observe.invalid:txt+udp://208.67.222.222:53",
+        ]
+        XCTAssertEqual(resolvers.count, IOSRuntimeLimits.default.maxXDNSResolvers)
+
+        var profile = basicVLESS()
+        profile.transport.finalMask = xdnsFinalMask(resolvers)
+        XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .global, rules: []))
+
+        profile.transport.finalMask = xdnsFinalMask(resolvers + ["observe.invalid:txt+udp://1.0.0.1:53"])
+        assertRejected(profile, contains: "resolver iOS limit")
+
+        for key in ["domain", "Domains"] {
+            profile.transport.finalMask = .object([
+                "udp": .array([
+                    .object([
+                        "type": .string("xdns"),
+                        "settings": .object([
+                            "resolvers": .array([.string(resolvers[0])]),
+                            key: key == "domain"
+                                ? .string("example.com")
+                                : .array([.string("example.com")]),
+                        ]),
+                    ]),
+                ]),
+            ])
+            assertRejected(profile, contains: "server domains")
+        }
+    }
+
+    func testFinalMaskDestinationValidationHandlesCaseVariantsAndRejectsDuplicates() {
+        var profile = basicVLESS()
+        profile.transport.finalMask = .object([
+            "UDP": .array([
+                .object([
+                    "Type": .string("XDNS"),
+                    "Settings": .object([
+                        "Resolvers": .array([.string("observe.invalid:txt+udp://127.0.0.1:53")]),
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "XDNS resolvers")
+
+        profile.transport.finalMask = .object([
+            "udp": .array([]),
+            "UDP": .array([]),
+        ])
+        assertRejected(profile, contains: "duplicate keys")
+
+        profile.transport.finalMask = .object([
+            "udp": .array([
+                .object([
+                    "type": .string("noise"),
+                    "Type": .string("xdns"),
+                    "settings": .object([:]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "duplicate keys")
+    }
+
+    func testFinalMaskForbiddenFieldsUseUnicodeFolding() {
+        for key in ["allowInſecure", "echConfigLiſt", "paſſword"] {
+            var profile = basicVLESS()
+            profile.transport.finalMask = .object([
+                "tcp": .array([
+                    .object([
+                        "type": .string("noise"),
+                        "settings": .object([
+                            "nested": .object([key: .string("unsafe")]),
+                        ]),
+                    ]),
+                ]),
+            ])
+            assertRejected(profile, contains: "cannot be supplied")
+        }
+
+        var profile = basicVLESS()
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "settings": .object(["ſeed": .string("must-not-persist")]),
+        ])
+        assertRejected(profile, contains: "cannot be supplied")
+    }
+
+    func testFinalMaskRequiresSecureRealmControlAndAllowedDestinations() async throws {
+        var profile = basicVLESS()
+        profile.transport.finalMask = realmFinalMask(url: "realm://token@1.1.1.1/realm-id")
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        try await XrayCoreClient.validate(configJSON: json)
+
+        profile.transport.finalMask = realmFinalMask(
+            url: "realm://token@1.1.1.1/realm-id",
+            stunServers: ["[2606:4700:4700::1111]:3478"],
+        )
+        XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .global, rules: []))
+        profile.transport.finalMask = realmFinalMask(
+            url: "realm://token@1.1.1.1/realm-id",
+            stunServers: ["[2001:4860:4860::8888]:3478"],
+        )
+        XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .global, rules: []))
+
+        let unsafeURLs = [
+            "realm+http://token@1.1.1.1/realm-id",
+            "ReAlM+HtTp://token@1.1.1.1/realm-id",
+            "realm://1.1.1.1/realm-id",
+            "realm://token:password@1.1.1.1/realm-id",
+            "realm://token@/realm-id",
+            "realm://token@1.1.1.1/",
+            "realm://token@127.0.0.1/realm-id",
+            "realm://token@2130706433/realm-id",
+            "realm://token@1.1.1.1:65536/realm-id",
+        ]
+        for url in unsafeURLs {
+            profile.transport.finalMask = realmFinalMask(url: url)
+            assertRejected(profile, contains: "Realm control URLs")
+        }
+
+        for stunServer in [
+            "stun.example.com:3478",
+            "127.0.0.1:3478",
+            "10.0.0.1:3478",
+            "192.0.2.1:3478",
+            "[::1]:3478",
+            "[2001:db8::1]:3478",
+            "[2001:2::1]:3478",
+            "[3fff::1]:3478",
+            "[5f00::1]:3478",
+            "[64:ff9b::c0a8:101]:3478",
+        ] {
+            profile.transport.finalMask = realmFinalMask(
+                url: "realm://token@1.1.1.1/realm-id",
+                stunServers: [stunServer],
+            )
+            assertRejected(profile, contains: "Realm STUN servers")
+        }
+
+        profile.transport.finalMask = realmFinalMask(
+            url: "realm://token@1.1.1.1/realm-id",
+            stunServers: Array(repeating: "1.1.1.1:3478", count: IOSRuntimeLimits.default.maxRealmSTUNServers + 1),
+        )
+        assertRejected(profile, contains: "iOS STUN limit")
+
+        profile.transport.finalMask = .object([
+            "udp": .array([
+                .object([
+                    "Type": .string("Realm"),
+                    "Settings": .object([
+                        "URL": .string("realm+http://token@1.1.1.1/realm-id"),
+                        "StunServers": .array([.string("1.1.1.1:3478")]),
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "Realm control URLs")
+
+        profile.transport.finalMask = .object([
+            "udp": .array([
+                .object([
+                    "type": .string("realm"),
+                    "settings": .object([
+                        "url": .string("realm://token@1.1.1.1/realm-id"),
+                        "URL": .string("realm+http://token@1.1.1.1/realm-id"),
+                        "stunServers": .array([.string("1.1.1.1:3478")]),
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "duplicate keys")
+    }
+
+    func testTokenizedRealmURLPassesSecondBuilderAdmission() throws {
+        var profile = basicVLESS()
+        profile.transport.finalMask = realmFinalMask(url: "realm://token@1.1.1.1/realm-id")
+        let tokenized = profile.tokenizingSecrets(nonce: "realm-test-nonce")
+        let json = try builder.build(profile: tokenized, routingMode: .global, rules: [])
+        XCTAssertTrue(json.contains("##HOP_SECRET:realm-test-nonce:"))
+        XCTAssertFalse(json.contains("realm://token@"))
     }
 
     func testBuildsWireGuardWithNoKernelTun() async throws {
@@ -319,11 +638,30 @@ final class XrayConfigBuilderTests: XCTestCase {
         settings.xrayAdvanced = XrayAdvancedDocument([
             "fakeDns": .object([
                 "ipPool": .string("198.18.0.0/15"),
-                "poolSize": .number(4097),
+                "PoolSize": .number(1024),
+            ]),
+        ])
+        try await XrayCoreClient.validate(configJSON: builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings))
+
+        settings.xrayAdvanced = XrayAdvancedDocument([
+            "fakeDns": .object([
+                "ipPool": .string("198.18.0.0/15"),
+                "poolſize": .number(4097),
             ]),
         ])
         XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings)) { error in
             XCTAssertTrue(error.localizedDescription.contains("4096-entry"))
+        }
+
+        settings.xrayAdvanced = XrayAdvancedDocument([
+            "fakeDns": .object([
+                "ipPool": .string("198.18.0.0/15"),
+                "poolSize": .number(1),
+                "PoolSize": .number(2),
+            ]),
+        ])
+        XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("duplicate keys"), "Unexpected error: \(error)")
         }
     }
 
@@ -435,6 +773,168 @@ final class XrayConfigBuilderTests: XCTestCase {
         try await XrayCoreClient.validate(configJSON: json)
     }
 
+    func testProxyGroupReachabilityEnforcesDepthAndWorkBudgets() throws {
+        let profile = basicVLESS()
+        let safe = selectGroupChain(
+            length: IOSRuntimeLimits.default.maxProxyGroupDepth,
+            terminal: .profile(profile.id),
+        )
+        XCTAssertNoThrow(try builder.build(
+            profiles: [profile],
+            groups: safe.groups,
+            selectedTarget: safe.selected,
+            routingMode: .global,
+            rules: [],
+        ))
+
+        let tooDeep = selectGroupChain(
+            length: IOSRuntimeLimits.default.maxProxyGroupDepth + 1,
+            terminal: .profile(profile.id),
+        )
+        XCTAssertThrowsError(try builder.build(
+            profiles: [profile],
+            groups: tooDeep.groups,
+            selectedTarget: tooDeep.selected,
+            routingMode: .global,
+            rules: [],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("dependency depth"), "Unexpected error: \(error)")
+        }
+
+        let missingMembers = (0 ... IOSRuntimeLimits.default.maxProxyGroupResolutionSteps)
+            .map { OutboundTarget.named("missing-\($0)") }
+        let exhausting = ProxyGroup(name: "Fallbacks", type: .select, members: missingMembers)
+        XCTAssertThrowsError(try builder.build(
+            profiles: [profile],
+            groups: [exhausting],
+            selectedTarget: .group(exhausting.id),
+            routingMode: .global,
+            rules: [],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("work limit"), "Unexpected error: \(error)")
+        }
+    }
+
+    func testRoutingAtomBoundaryDoesNotDoubleChargeTargetResolution() throws {
+        let rule = RoutingRule(kind: .final, value: "", target: .direct)
+        let maximumRules = Array(repeating: rule, count: IOSRuntimeLimits.default.maxRoutingAtoms)
+        XCTAssertNoThrow(try builder.build(
+            profile: basicVLESS(),
+            routingMode: .rule,
+            rules: maximumRules,
+        ))
+
+        let excessiveRules = maximumRules + [rule]
+        XCTAssertThrowsError(try builder.build(
+            profile: basicVLESS(),
+            routingMode: .rule,
+            rules: excessiveRules,
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Routing contains 4097 atoms"), "Unexpected error: \(error)")
+        }
+    }
+
+    func testProxyGroupDefaultMemberDedupAndCycleBehaviorRemainBounded() throws {
+        let profile = basicVLESS()
+        let failing = selectGroupChain(length: 14, terminal: .named("missing"))
+        XCTAssertThrowsError(try builder.build(
+            profiles: [profile],
+            groups: failing.groups,
+            selectedTarget: failing.selected,
+            routingMode: .global,
+            rules: [],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("no runnable member"), "Unexpected error: \(error)")
+            XCTAssertFalse(error.localizedDescription.contains("work limit"), "Unexpected error: \(error)")
+        }
+
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = ProxyGroup(id: firstID, name: "Cycle A", type: .urlTest, members: [.group(secondID)])
+        let second = ProxyGroup(id: secondID, name: "Cycle B", type: .urlTest, members: [.group(firstID)])
+        XCTAssertThrowsError(try builder.build(
+            profiles: [profile],
+            groups: [first, second],
+            selectedTarget: .group(firstID),
+            routingMode: .global,
+            rules: [],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("dependency cycle"), "Unexpected error: \(error)")
+        }
+    }
+
+    func testNamedTargetsFailClosedOnNormalizedNameAmbiguityAndRecoverWhenUnique() throws {
+        var manualProfile = basicVLESS()
+        manualProfile.name = "Shared Node"
+        let manualGroup = ProxyGroup(
+            name: "Manual",
+            type: .select,
+            members: [.named(" shared node ")],
+            defaultTarget: .named("SHARED NODE"),
+        )
+        let namedRule = RoutingRule(kind: .domain, value: "example.com", target: .named("Shared Node"))
+
+        XCTAssertNoThrow(try builder.build(
+            profiles: [manualProfile],
+            groups: [manualGroup],
+            selectedTarget: .group(manualGroup.id),
+            routingMode: .rule,
+            rules: [namedRule],
+        ))
+
+        var subscriptionProfile = manualProfile
+        subscriptionProfile.id = UUID()
+        subscriptionProfile.name = " shared NODE "
+        subscriptionProfile.subscriptionID = UUID()
+        XCTAssertThrowsError(try builder.build(
+            profiles: [manualProfile, subscriptionProfile],
+            groups: [manualGroup],
+            selectedTarget: .group(manualGroup.id),
+            routingMode: .rule,
+            rules: [namedRule],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("ambiguous"), "Unexpected error: \(error)")
+        }
+
+        XCTAssertNoThrow(try builder.build(
+            profiles: [manualProfile],
+            groups: [manualGroup],
+            selectedTarget: .group(manualGroup.id),
+            routingMode: .rule,
+            rules: [namedRule],
+        ))
+
+        let firstGroup = ProxyGroup(name: "Duplicate Group", type: .select, members: [.profile(manualProfile.id)])
+        let secondGroup = ProxyGroup(name: " duplicate group ", type: .select, members: [.profile(manualProfile.id)])
+        XCTAssertThrowsError(try builder.build(
+            profiles: [manualProfile],
+            groups: [firstGroup, secondGroup],
+            selectedTarget: .named("Duplicate Group"),
+            routingMode: .global,
+            rules: [],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("ambiguous"), "Unexpected error: \(error)")
+        }
+        XCTAssertNoThrow(try builder.build(
+            profiles: [manualProfile],
+            groups: [firstGroup, secondGroup],
+            selectedTarget: .group(firstGroup.id),
+            routingMode: .global,
+            rules: [],
+        ))
+
+        let collidingGroup = ProxyGroup(name: "Shared Node", type: .select, members: [.profile(manualProfile.id)])
+        XCTAssertThrowsError(try builder.build(
+            profiles: [manualProfile],
+            groups: [collidingGroup],
+            selectedTarget: .named("shared node"),
+            routingMode: .global,
+            rules: [],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("ambiguous"), "Unexpected error: \(error)")
+        }
+    }
+
     func testJSONValueAndAdvancedDocumentRoundTripAndLegacyTLSDecode() throws {
         let source = #"{"a":1,"array":[true,null,"x"],"object":{"b":2}}"#
         let document = try XrayAdvancedDocument(jsonString: source)
@@ -447,6 +947,158 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertFalse(tls.enableSessionResumption)
     }
 
+    func testJSONValueIntegerConversionUsesExactSignedRange() throws {
+        let twoTo63 = Double(bitPattern: 0x43E0_0000_0000_0000)
+        XCTAssertNil(JSONValue.number(twoTo63).integerValue)
+        XCTAssertEqual(JSONValue.number(Double(Int.min)).integerValue, Int.min)
+        XCTAssertEqual(JSONValue.number(twoTo63.nextDown).integerValue, Int(exactly: twoTo63.nextDown))
+        XCTAssertNil(JSONValue.number(1.5).integerValue)
+        XCTAssertNil(JSONValue.number(.nan).integerValue)
+        XCTAssertNil(JSONValue.number(.infinity).integerValue)
+
+        let decoded = try JSONDecoder().decode(JSONValue.self, from: Data("9223372036854775808".utf8))
+        XCTAssertEqual(decoded, .number(twoTo63))
+        XCTAssertNil(decoded.integerValue)
+    }
+
+    func testOutOfRangeMemoryBoundsFailClosedWithoutTrapping() throws {
+        let twoTo63 = Double(bitPattern: 0x43E0_0000_0000_0000)
+        let generatedSizes: [JSONValue] = [
+            .number(twoTo63),
+            .array([.number(twoTo63)]),
+            .object(["from": .number(1), "to": .number(twoTo63)]),
+            .object(["nested": .array([.number(twoTo63)])]),
+        ]
+        for generatedSize in generatedSizes {
+            var profile = basicVLESS()
+            profile.transport.finalMask = .object([
+                "tcp": .array([
+                    .object([
+                        "type": .string("noise"),
+                        "settings": .object(["length": generatedSize]),
+                    ]),
+                ]),
+            ])
+            assertRejected(profile, contains: "FinalMask may generate")
+        }
+
+        var profile = basicVLESS()
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "mux": .object(["concurrency": .number(twoTo63)]),
+        ])
+        assertRejected(profile, contains: "iOS memory limit")
+
+        var settings = AppSettings.defaults
+        settings.xrayAdvanced = XrayAdvancedDocument([
+            "fakeDns": .object([
+                "ipPool": .string("198.18.0.0/15"),
+                "poolSize": .number(twoTo63),
+            ]),
+        ])
+        XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("in-range integer"), "Unexpected error: \(error)")
+        }
+
+        settings.xrayAdvanced = XrayAdvancedDocument([
+            "fakeDns": .array([
+                .object(["ipPool": .string("198.18.0.0/16"), "poolSize": .number(4096)]),
+                .object(["ipPool": .string("198.19.0.0/16"), "poolSize": .number(4096)]),
+            ]),
+        ])
+        XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("4096-entry"), "Unexpected error: \(error)")
+        }
+    }
+
+    func testCaseFoldedMemoryBoundsAndCollisionsFailClosed() throws {
+        var profile = basicVLESS()
+        profile.transport.finalMask = .object([
+            "tcp": .array([
+                .object([
+                    "type": .string("noise"),
+                    "settings": .object(["Length": .number(64)]),
+                ]),
+            ]),
+        ])
+        XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .global, rules: []))
+
+        for key in ["Length", "PACKETSIZE", "Packetſize", "Padding_Max"] {
+            profile.transport.finalMask = .object([
+                "tcp": .array([
+                    .object([
+                        "type": .string("noise"),
+                        "settings": .object([
+                            key: .number(Double(IOSRuntimeLimits.default.maxFinalMaskGeneratedPayloadBytes + 1)),
+                        ]),
+                    ]),
+                ]),
+            ])
+            assertRejected(profile, contains: "FinalMask may generate")
+        }
+
+        profile.transport.finalMask = .object([
+            "tcp": .array([
+                .object([
+                    "type": .string("noise"),
+                    "settings": .object([
+                        "Concurrency": .number(Double(IOSRuntimeLimits.default.maxMuxConcurrency + 1)),
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "iOS memory limit")
+
+        profile.transport.finalMask = .object([
+            "tcp": .array([
+                .object([
+                    "type": .string("noise"),
+                    "settings": .object([
+                        "length": .number(1),
+                        "Length": .number(2),
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "duplicate generated-size keys")
+
+        profile.transport.finalMask = .object([
+            "tcp": .array([
+                .object([
+                    "type": .string("noise"),
+                    "settings": .object([
+                        "packetSize": .number(1),
+                        "packetſize": .number(2),
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "duplicate generated-size keys")
+
+        profile.transport.finalMask = .object([
+            "tcp": .array([
+                .object([
+                    "type": .string("noise"),
+                    "settings": .object([
+                        "concurrency": .number(1),
+                        "Concurrency": .number(2),
+                    ]),
+                ]),
+            ]),
+        ])
+        assertRejected(profile, contains: "duplicate protected keys")
+
+        profile = basicVLESS()
+        profile.transport = TransportOptions(
+            type: .xhttp,
+            xhttpExtra: .object([
+                "xmux": .object([
+                    "maxConnectionſ": .number(3),
+                ]),
+            ]),
+        )
+        assertRejected(profile, contains: "duplicate protected keys")
+    }
+
     private func basicVLESS() -> ProxyProfile {
         ProxyProfile(
             name: "VLESS",
@@ -454,6 +1106,59 @@ final class XrayConfigBuilderTests: XCTestCase {
             options: .vless(VLESSOptions(uuid: "11111111-1111-4111-8111-111111111111", encryption: "none")),
             security: .tls(TLSOptions(serverName: "example.com")),
         )
+    }
+
+    private func xdnsFinalMask(_ resolver: String) -> JSONValue {
+        xdnsFinalMask([resolver])
+    }
+
+    private func xdnsFinalMask(_ resolvers: [String]) -> JSONValue {
+        .object([
+            "udp": .array([
+                .object([
+                    "type": .string("xdns"),
+                    "settings": .object([
+                        "resolvers": .array(resolvers.map(JSONValue.string)),
+                    ]),
+                ]),
+            ]),
+        ])
+    }
+
+    private func realmFinalMask(
+        url: String,
+        stunServers: [String] = ["1.1.1.1:3478"],
+    ) -> JSONValue {
+        .object([
+            "udp": .array([
+                .object([
+                    "type": .string("realm"),
+                    "settings": .object([
+                        "url": .string(url),
+                        "stunServers": .array(stunServers.map(JSONValue.string)),
+                    ]),
+                ]),
+            ]),
+        ])
+    }
+
+    private func selectGroupChain(
+        length: Int,
+        terminal: OutboundTarget,
+    ) -> (groups: [ProxyGroup], selected: OutboundTarget) {
+        var groups: [ProxyGroup] = []
+        var target = terminal
+        for index in 0 ..< length {
+            let group = ProxyGroup(
+                name: "Chain \(index)",
+                type: .select,
+                members: [target],
+                defaultTarget: target,
+            )
+            groups.append(group)
+            target = .group(group.id)
+        }
+        return (groups, target)
     }
 
     private func assertRejected(_ profile: ProxyProfile, contains expected: String, file: StaticString = #filePath, line: UInt = #line) {

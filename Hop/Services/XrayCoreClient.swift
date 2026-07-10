@@ -22,15 +22,14 @@ enum XrayCoreClient {
                 guard let responseData = rawResponse.data(using: .utf8) else {
                     throw XrayCoreClientError.invalidBridgeEncoding
                 }
-                let response = try JSONDecoder().decode(XrayBridgeResponse.self, from: responseData)
+                guard let response = try? JSONDecoder().decode(XrayBridgeResponse.self, from: responseData) else {
+                    throw XrayCoreClientError.invalidBridgeEncoding
+                }
                 guard response.version == 1 else {
                     throw XrayCoreClientError.unsupportedBridgeVersion(response.version)
                 }
                 guard response.ok else {
-                    throw XrayCoreClientError.validationFailed(
-                        code: response.error?.code ?? "unknown",
-                        message: response.error?.message ?? "Xray rejected the configuration.",
-                    )
+                    throw XrayCoreClientError.validationFailed(code: response.error?.safeCode ?? "unknown")
                 }
             #else
                 throw XrayCoreClientError.frameworkUnavailable
@@ -53,7 +52,7 @@ enum XrayCoreClientError: LocalizedError {
     case frameworkUnavailable
     case invalidBridgeEncoding
     case unsupportedBridgeVersion(Int)
-    case validationFailed(code: String, message: String)
+    case validationFailed(code: String)
 
     var errorDescription: String? {
         switch self {
@@ -63,8 +62,8 @@ enum XrayCoreClientError: LocalizedError {
             "The Xray validation bridge returned invalid data."
         case let .unsupportedBridgeVersion(version):
             "The Xray bridge returned unsupported API version \(version)."
-        case let .validationFailed(code, message):
-            "Xray configuration validation failed (\(code)): \(message)"
+        case let .validationFailed(code):
+            "Xray configuration validation failed (\(XrayBridgeResponse.Failure.sanitizedCode(code))). Review the selected profile's settings."
         }
     }
 }

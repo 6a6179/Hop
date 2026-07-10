@@ -61,6 +61,38 @@ final class ImportSecurityTests: XCTestCase {
         }
     }
 
+    func testPublicLiteralClassifierRejectsSpecialIPv6AndEmbeddedPrivateIPv4() {
+        let rejected = [
+            "100:0:0:1::1",
+            "2001:2::1",
+            "2001:db8::1",
+            "2002:0808:0808::1",
+            "2620:4f:8000::1",
+            "3fff::1",
+            "5f00::1",
+            "64:ff9b::a00:1",
+            "64:ff9b::a9fe:a9fe",
+            "64:ff9b::c000:201",
+            "64:ff9b::c0a8:101",
+            "::ffff:10.0.0.1",
+            "::ffff:192.168.1.1",
+        ]
+        for address in rejected {
+            XCTAssertFalse(ImportPolicy.isPublicIPAddressLiteral(address), "\(address) must not be treated as public")
+            XCTAssertTrue(ImportPolicy.isDisallowedRemoteHost(address), "\(address) must be rejected without resolution")
+        }
+
+        for address in [
+            "2001:4860:4860::8888",
+            "2606:4700:4700::1111",
+            "64:ff9b::808:808",
+            "::ffff:8.8.8.8",
+        ] {
+            XCTAssertTrue(ImportPolicy.isPublicIPAddressLiteral(address), "\(address) should be accepted as a public literal")
+            XCTAssertFalse(ImportPolicy.isDisallowedRemoteHost(address), "\(address) should not require or fail resolution")
+        }
+    }
+
     func testResolvedAddressClassifierCatchesAlternateLoopbackForms() {
         // inet_pton rejects these, but the system resolver (and thus URLSession)
         // accepts them and they resolve to loopback. Resolved-address checking

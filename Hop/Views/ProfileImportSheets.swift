@@ -148,6 +148,9 @@ struct ImportTextSheet: View {
 
     private func save(_ importResult: ImportResult) {
         if let detectedSubscriptionURL {
+            let importResult = importResult
+                .droppingRules()
+                .requiringSubscriptionGroupReview()
             onSave(.subscription(
                 SubscriptionSource(
                     name: detectedSubscriptionURL.host() ?? "Subscription",
@@ -182,6 +185,8 @@ struct ImportTextSheet: View {
             Task {
                 do {
                     let result = try await importService.importSubscription(url: url)
+                        .droppingRules()
+                        .requiringSubscriptionGroupReview()
                     await MainActor.run {
                         detectedSubscriptionURL = url
                         importResult = result

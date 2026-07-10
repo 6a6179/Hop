@@ -62,12 +62,12 @@ enum JSONValue: Hashable, Codable, Sendable {
 
     var integerValue: Int? {
         guard case let .number(value) = self,
-              value.rounded() == value,
-              value >= Double(Int.min), value <= Double(Int.max)
+              value.isFinite,
+              value.rounded() == value
         else {
             return nil
         }
-        return Int(value)
+        return Int(exactly: value)
     }
 
     var foundationValue: Any {

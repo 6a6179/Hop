@@ -497,6 +497,7 @@ private enum TunnelProviderError: LocalizedError {
     case unresolvedSecrets(Int)
     case memoryBudgetExceeded(UInt64)
     case xrayUnavailable
+    case xrayFailure(code: String)
 
     var errorDescription: String? {
         switch self {
@@ -520,6 +521,8 @@ private enum TunnelProviderError: LocalizedError {
             "The tunnel stopped at \(PacketTunnelProvider.formatBytes(bytes)) to stay below the iOS Network Extension memory ceiling."
         case .xrayUnavailable:
             "LibXray.xcframework is not linked. Build the pinned framework and regenerate the project."
+        case let .xrayFailure(code):
+            "Xray rejected the tunnel configuration (\(XrayBridgeResponse.Failure.sanitizedCode(code)))."
         }
     }
 }
@@ -529,30 +532,28 @@ private enum TunnelProviderError: LocalizedError {
     /// API is deliberately a single JSON request/response entry point.
     private enum XrayBridge {
         static func start(configJSON: String, tunFileDescriptor: Int32, assetPath: String) throws {
-            _ = try invoke(
+            try invoke(
                 method: "start",
                 fields: [
                     "assetDirectory": assetPath,
                     "configJSON": configJSON,
                     "tunFD": tunFileDescriptor,
                 ],
-                as: EmptyResponse.self,
             )
         }
 
         static func stop() throws {
-            _ = try invoke(method: "stop", as: EmptyResponse.self)
+            try invoke(method: "stop")
         }
 
         static func collectMemory() throws {
-            _ = try invoke(method: "collectMemory", as: EmptyResponse.self)
+            try invoke(method: "collectMemory")
         }
 
-        private static func invoke<Response: Decodable>(
+        private static func invoke(
             method: String,
             fields: [String: Any] = [:],
-            as _: Response.Type,
-        ) throws -> Response? {
+        ) throws {
             var request: [String: Any] = [
                 "version": 1,
                 "method": method,
@@ -569,15 +570,15 @@ private enum TunnelProviderError: LocalizedError {
             guard let responseData = rawResponse.data(using: .utf8) else {
                 throw TunnelProviderError.xrayUnavailable
             }
-            let response = try JSONDecoder().decode(InvokeResponse<Response>.self, from: responseData)
-            guard response.version == 1, response.ok else {
-                throw NSError(
-                    domain: "Hop.Xray",
-                    code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: response.error?.message ?? "Xray returned an unknown error."],
-                )
+            guard let response = try? JSONDecoder().decode(XrayBridgeResponse.self, from: responseData) else {
+                throw TunnelProviderError.xrayUnavailable
             }
-            return response.result
+            guard response.version == 1 else {
+                throw TunnelProviderError.xrayFailure(code: "unsupported_version")
+            }
+            guard response.ok else {
+                throw TunnelProviderError.xrayFailure(code: response.error?.safeCode ?? "unknown")
+            }
         }
 
         /// gomobile nullability has changed across toolchain versions; these
@@ -589,20 +590,6 @@ private enum TunnelProviderError: LocalizedError {
         private static func stringValue(_ value: String?) -> String {
             value ?? ""
         }
-
-        private struct InvokeResponse<Response: Decodable>: Decodable {
-            let version: Int
-            let ok: Bool
-            let result: Response?
-            let error: BridgeError?
-        }
-
-        private struct BridgeError: Decodable {
-            let code: String
-            let message: String
-        }
-
-        private struct EmptyResponse: Decodable {}
     }
 #endif
 

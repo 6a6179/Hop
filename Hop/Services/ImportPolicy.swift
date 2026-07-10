@@ -26,6 +26,15 @@ enum ImportPolicy {
     /// from one import. Anything beyond this is dropped with a warning.
     static let maxImportedItems = 5000
 
+    /// Maximum encoded size retained across all subscription-owned profiles,
+    /// groups, and source records. Manual objects are outside this remote-data
+    /// budget and are never deleted to make room for a subscription.
+    static let maxRetainedSubscriptionBytes = maxDecodedBytes
+
+    /// Maximum Keychain items projected from subscription-owned profiles and
+    /// source URLs. This independently bounds credential enumeration work.
+    static let maxRetainedSubscriptionSecretItems = maxImportedItems * 8
+
     /// Maximum number of recursive base64 unwraps before giving up. Guards the
     /// `importText` re-entry path against deeply nested encoded payloads.
     static let maxDecodeDepth = 3
@@ -121,6 +130,33 @@ enum ImportPolicy {
             return nil
         }
         return addresses.first
+    }
+
+    /// Whether `host` is an IPv4 or IPv6 literal rather than a DNS name.
+    static func isIPAddressLiteral(_ host: String) -> Bool {
+        let host = unbracketedHost(host)
+        var ipv4 = in_addr()
+        if inet_pton(AF_INET, host, &ipv4) == 1 {
+            return true
+        }
+        var ipv6 = in6_addr()
+        return inet_pton(AF_INET6, host, &ipv6) == 1
+    }
+
+    /// Imported secondary destinations may use only public, non-reserved IP
+    /// literals. Hostnames deliberately return false so callers must choose an
+    /// explicit hostname policy rather than accidentally treating them as IPs.
+    static func isPublicIPAddressLiteral(_ host: String) -> Bool {
+        let host = unbracketedHost(host)
+        return isIPAddressLiteral(host) && !isPrivateOrReservedAddress(host)
+    }
+
+    private static func unbracketedHost(_ host: String) -> String {
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("["), trimmed.hasSuffix("]") else {
+            return trimmed
+        }
+        return String(trimmed.dropFirst().dropLast())
     }
 
     private static func resolvedAddresses(_ host: String) -> [String]? {
@@ -407,6 +443,7 @@ enum ImportPolicy {
         let value = UInt32(bigEndian: addr.s_addr)
         let a = (value >> 24) & 0xFF
         let b = (value >> 16) & 0xFF
+        let c = (value >> 8) & 0xFF
 
         switch a {
         case 0: // "this" network / 0.0.0.0
@@ -424,6 +461,8 @@ enum ImportPolicy {
         case 192 where b == 168: // 192.168.0.0/16 private
             return true
         case 192 where b == 0: // 192.0.0.0/24 + 192.0.2.0/24 test net
+            return true
+        case 192 where b == 88 && c == 99: // deprecated 6to4 relay anycast
             return true
         case 198 where (18 ... 19).contains(b): // 198.18.0.0/15 benchmark
             return true
@@ -448,24 +487,52 @@ enum ImportPolicy {
             return false
         }
 
-        if bytes.allSatisfy({ $0 == 0 }) { // :: unspecified
-            return true
+        func embeddedIPv4IsReserved() -> Bool {
+            isPrivateOrReservedIPv4("\(bytes[12]).\(bytes[13]).\(bytes[14]).\(bytes[15])")
         }
-        if bytes.dropLast().allSatisfy({ $0 == 0 }), bytes.last == 1 { // ::1 loopback
-            return true
-        }
-        if (bytes[0] & 0xFE) == 0xFC { // fc00::/7 unique local
-            return true
-        }
-        if bytes[0] == 0xFE, (bytes[1] & 0xC0) == 0x80 { // fe80::/10 link-local
-            return true
-        }
-        if bytes[0] == 0xFF { // ff00::/8 multicast
-            return true
-        }
-        // ::ffff:0:0/96 IPv4-mapped — classify the embedded IPv4 address.
+
+        // Go treats mapped and NAT64 well-known-prefix addresses as IPv4
+        // destinations. Preserve public embeddings, but never let either form
+        // disguise a private, metadata, documentation, or otherwise reserved
+        // IPv4 address.
         if bytes[0 ..< 10].allSatisfy({ $0 == 0 }), bytes[10] == 0xFF, bytes[11] == 0xFF {
-            return isPrivateOrReservedIPv4("\(bytes[12]).\(bytes[13]).\(bytes[14]).\(bytes[15])")
+            return embeddedIPv4IsReserved()
+        }
+        if bytes[0] == 0x00, bytes[1] == 0x64,
+           bytes[2] == 0xFF, bytes[3] == 0x9B,
+           bytes[4 ..< 12].allSatisfy({ $0 == 0 })
+        { // 64:ff9b::/96 globally reachable translation prefix
+            return embeddedIPv4IsReserved()
+        }
+
+        // IANA currently assigns ordinary globally routable IPv6 unicast only
+        // from 2000::/3. Everything else is reserved, scoped, multicast, or a
+        // special-purpose block handled above.
+        guard (bytes[0] & 0xE0) == 0x20 else {
+            return true
+        }
+
+        if bytes[0] == 0x20, bytes[1] == 0x01,
+           (bytes[2] & 0xFE) == 0
+        { // 2001::/23 IETF protocol assignments
+            return true
+        }
+        if bytes[0] == 0x20, bytes[1] == 0x01,
+           bytes[2] == 0x0D, bytes[3] == 0xB8
+        { // 2001:db8::/32 documentation
+            return true
+        }
+        if bytes[0] == 0x20, bytes[1] == 0x02 { // 2002::/16 deprecated 6to4
+            return true
+        }
+        if bytes[0] == 0x26, bytes[1] == 0x20,
+           bytes[2] == 0x00, bytes[3] == 0x4F,
+           bytes[4] == 0x80, bytes[5] == 0x00
+        { // 2620:4f:8000::/48 special-purpose AS112 service
+            return true
+        }
+        if bytes[0] == 0x3F { // IANA-reserved 3f00::/8, including 3fff::/20 documentation
+            return true
         }
         return false
     }

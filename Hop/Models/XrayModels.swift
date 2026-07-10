@@ -149,6 +149,8 @@ struct IOSRuntimeLimits: Hashable, Sendable {
     let maxProfileAdvancedBytes = 64 * 1024
     let maxGlobalAdvancedBytes = 256 * 1024
     let maxReachableOutbounds = 32
+    let maxProxyGroupDepth = 32
+    let maxProxyGroupResolutionSteps = 8192
     let maxRoutingAtoms = 4096
     let maxDNSServers = 8
     let maxFakeDNSPoolEntries = 4096
@@ -171,6 +173,8 @@ struct IOSRuntimeLimits: Hashable, Sendable {
     let maxHysteriaPortHops = 64
     let maxFinalMaskLayers = 4
     let maxFinalMaskGeneratedPayloadBytes = 64 * 1024
+    let maxXDNSResolvers = 4
+    let maxRealmSTUNServers = 4
     let maxWireGuardPeers = 4
     let maxConcurrentHeavyOutbounds = 1
     let memoryCollectionThresholdBytes = 42 * 1024 * 1024

@@ -417,6 +417,9 @@ struct ProfilesView: View {
     /// Sheet flows already ran the allow-insecure confirmation before handing
     /// the result over; manual refreshes gate new insecure nodes separately.
     private func saveImportedSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
+        let result = result
+            .droppingRules()
+            .requiringSubscriptionGroupReview()
         if let existing = store.subscriptions.first(where: { normalizedSubscriptionURL($0.url) == normalizedSubscriptionURL(subscription.url) }) {
             var refreshedSubscription = subscription
             refreshedSubscription.id = existing.id
@@ -424,22 +427,33 @@ struct ProfilesView: View {
                 refreshedSubscription.name = existing.name
             }
 
-            store.applySubscriptionRefresh(result, updating: refreshedSubscription)
-            selectedSection = .subscriptions
-            importNotice = ProfileImportNotice(
-                title: "Subscription Updated",
-                message: "\(result.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
-            )
+            if store.applySubscriptionRefresh(result, updating: refreshedSubscription) {
+                selectedSection = .subscriptions
+                importNotice = ProfileImportNotice(
+                    title: "Subscription Updated",
+                    message: "\(result.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
+                )
+            } else {
+                importNotice = ProfileImportNotice(
+                    title: "Subscription Not Updated",
+                    message: "The imported data exceeds Hop's retained subscription safety limit.",
+                )
+            }
         } else {
             addNewSubscription(subscription, result: result, addedTitle: addedTitle)
         }
     }
 
     private func addNewSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
-        store.applyImport(result)
-        store.addSubscription(subscription)
-        selectedSection = .subscriptions
-        importNotice = ProfileImportNotice(title: addedTitle, message: result.summary)
+        if store.applySubscriptionImport(result, adding: subscription) {
+            selectedSection = .subscriptions
+            importNotice = ProfileImportNotice(title: addedTitle, message: result.summary)
+        } else {
+            importNotice = ProfileImportNotice(
+                title: "Subscription Not Added",
+                message: "The imported data exceeds Hop's retained subscription safety limit.",
+            )
+        }
     }
 
     private func normalizedSubscriptionURL(_ value: String) -> String {

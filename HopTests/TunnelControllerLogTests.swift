@@ -25,6 +25,100 @@ final class TunnelControllerLogTests: XCTestCase {
         XCTAssertTrue(controller.logs[0].contains("Hello World"))
     }
 
+    func testCoreValidationFailureDropsRawBridgeMessageAndKeepsSafeCode() throws {
+        let marker = "UNIT_TEST_MARKER[not-a-secret]"
+        let responseData = Data(
+            """
+            {"version":1,"ok":false,"error":{"code":"invalid_config","message":"\(marker)"}}
+            """.utf8,
+        )
+        let response = try JSONDecoder().decode(XrayBridgeResponse.self, from: responseData)
+        let error = XrayCoreClientError.validationFailed(code: response.error?.safeCode ?? "unknown")
+        let controller = TunnelController(logs: [], maximumLogEntries: 100)
+        controller.appendTunnelStartFailure(error)
+
+        XCTAssertFalse(error.localizedDescription.contains(marker))
+        XCTAssertTrue(error.localizedDescription.contains("invalid_config"))
+        XCTAssertTrue(error.localizedDescription.contains("Review the selected profile's settings"))
+        XCTAssertFalse(controller.logs.joined().contains(marker))
+        XCTAssertTrue(controller.logs.joined().contains("invalid_config"))
+
+        let unknownCodeError = XrayCoreClientError.validationFailed(code: marker)
+        XCTAssertFalse(unknownCodeError.localizedDescription.contains(marker))
+        XCTAssertTrue(unknownCodeError.localizedDescription.contains("unknown"))
+    }
+
+    func testTunnelStartFailureDropsSecretBearingLocalizedDescription() {
+        let secret = "UNIT_TEST_PROFILE_SECRET"
+        let error = NSError(
+            domain: "NEVPNErrorDomain",
+            code: 5,
+            userInfo: [
+                NSLocalizedDescriptionKey: "Untrusted parser detail: \(secret)\nsecond diagnostic line",
+            ],
+        )
+        let controller = TunnelController(logs: [], maximumLogEntries: 100)
+
+        controller.appendTunnelStartFailure(error)
+
+        XCTAssertEqual(controller.logs.count, 2)
+        let entries = controller.logs.joined(separator: "\n")
+        XCTAssertFalse(entries.contains(secret))
+        XCTAssertFalse(entries.contains("Untrusted parser detail"))
+        XCTAssertTrue(entries.contains("domain=NEVPNErrorDomain"))
+        XCTAssertTrue(entries.contains("code=5"))
+        XCTAssertTrue(entries.contains("NetworkExtension IPC failed"))
+        XCTAssertTrue(controller.logs.allSatisfy { !$0.contains("\n") })
+    }
+
+    func testCachedDisconnectErrorDropsSecretBearingLocalizedDescription() {
+        let secret = "UNIT_TEST_CACHED_PROVIDER_SECRET"
+        let error = NSError(
+            domain: "NEVPNErrorDomain",
+            code: 5,
+            userInfo: [
+                NSLocalizedDescriptionKey: "Pre-fix provider detail: \(secret)",
+            ],
+        )
+        let controller = TunnelController(logs: [], maximumLogEntries: 100)
+
+        controller.appendLastDisconnectError(error)
+
+        let entries = controller.logs.joined(separator: "\n")
+        XCTAssertFalse(entries.contains(secret))
+        XCTAssertFalse(entries.contains("Pre-fix provider detail"))
+        XCTAssertTrue(entries.contains("Last disconnect error"))
+        XCTAssertTrue(entries.contains("domain=NEVPNErrorDomain"))
+        XCTAssertTrue(entries.contains("code=5"))
+        XCTAssertTrue(entries.contains("NetworkExtension IPC failed"))
+    }
+
+    func testLegacyExtensionLogGatePurgesBeforeImport() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TunnelControllerLogTests-\(UUID().uuidString)", isDirectory: true)
+        let logURL = directory.appendingPathComponent("hop-tunnel.log")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let marker = "UNIT_TEST_PRE_FIX_EXTENSION_SECRET"
+        try Data("Startup failed: \(marker)\n".utf8).write(to: logURL)
+        let controller = TunnelController(
+            logs: [],
+            maximumLogEntries: 100,
+            sharedLogStore: SharedTunnelLogStore(url: logURL),
+            requiresLegacyExtensionLogPurge: true,
+        )
+
+        await controller.syncExtensionLogs()
+
+        XCTAssertFalse(controller.logs.joined().contains(marker))
+        XCTAssertFalse(controller.requiresLegacyExtensionLogPurge)
+        XCTAssertTrue(try SharedTunnelLogStore(url: logURL).readLines().isEmpty)
+
+        try Data("current extension diagnostic\n".utf8).write(to: logURL)
+        await controller.syncExtensionLogs()
+        XCTAssertTrue(controller.logs.joined().contains("current extension diagnostic"))
+    }
+
     // MARK: - appendLogs ordering
 
     func testAppendLogsInsertsBothEntriesWithCorrectOrder() {

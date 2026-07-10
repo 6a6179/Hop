@@ -277,14 +277,18 @@ struct SharedTunnelLogStore {
     /// large file can never exhaust app memory or freeze the log UI.
     static let maxReadBytes = 512 * 1024
 
+    var url: URL
+
+    init(url: URL = RuntimeEnvironment.tunnelLogFileURL) {
+        self.url = url
+    }
+
     func clear() throws {
-        let url = RuntimeEnvironment.tunnelLogFileURL
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data().write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     func readLines() throws -> [String] {
-        let url = RuntimeEnvironment.tunnelLogFileURL
         guard FileManager.default.fileExists(atPath: url.path) else {
             return []
         }

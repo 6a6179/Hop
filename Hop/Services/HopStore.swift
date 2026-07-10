@@ -25,6 +25,12 @@ enum SubscriptionRefreshMode: Equatable {
     case automatic
 }
 
+private struct RetainedSubscriptionState: Encodable {
+    let profiles: [ProxyProfile]
+    let groups: [ProxyGroup]
+    let subscriptions: [SubscriptionSource]
+}
+
 @MainActor
 @Observable
 final class HopStore {
@@ -108,6 +114,12 @@ final class HopStore {
     /// Suppresses the per-`didSet` persist while a multi-property mutation runs;
     /// see `withBatchedPersist`.
     @ObservationIgnored private var persistBatchDepth = 0
+    @ObservationIgnored private let maxRetainedSubscriptionItems: Int
+    @ObservationIgnored private let maxRetainedSubscriptionSecretItems: Int
+    @ObservationIgnored private let maxRetainedSubscriptionBytes: Int
+    /// A rejected or missing state is not overwritten just because its shared
+    /// log was purged. Explicit state mutations make a new snapshot persistable.
+    @ObservationIgnored private var hasPersistableState: Bool
     /// Serial queue for state saves: each save encodes the full state, rewrites
     /// the Keychain secret set, and writes the file — work that visibly stalls
     /// the main thread when run inline. Serial ordering keeps the newest
@@ -126,12 +138,30 @@ final class HopStore {
         settings: AppSettings? = nil,
         tunnel: TunnelController? = nil,
         dataStore: HopAppDataStore = HopAppDataStore(),
+        maxRetainedSubscriptionItems: Int = ImportPolicy.maxImportedItems,
+        maxRetainedSubscriptionSecretItems: Int = ImportPolicy.maxRetainedSubscriptionSecretItems,
+        maxRetainedSubscriptionBytes: Int = ImportPolicy.maxRetainedSubscriptionBytes,
     ) {
         self.dataStore = dataStore
+        self.maxRetainedSubscriptionItems = maxRetainedSubscriptionItems
+        self.maxRetainedSubscriptionSecretItems = maxRetainedSubscriptionSecretItems
+        self.maxRetainedSubscriptionBytes = maxRetainedSubscriptionBytes
 
         let loaded = dataStore.load()
-        self.profiles = profiles ?? loaded?.profiles ?? []
-        self.groups = groups ?? loaded?.groups ?? []
+        hasPersistableState = loaded != nil
+        // A missing or rejected state cannot prove that its shared log is safe,
+        // while valid state records the retry independently of schema migration.
+        let requiresLegacyExtensionLogPurge = loaded == nil
+            || loaded?.legacyExtensionLogPurgePending == true
+        let resolvedProfiles = profiles ?? loaded?.profiles ?? []
+        let unresolvedGroups = groups ?? loaded?.groups ?? []
+        let resolvedGroups = ImportResult.bindingOwnedNamedReferences(
+            profiles: resolvedProfiles,
+            groups: unresolvedGroups,
+        )
+        let didBindLoadedGroupReferences = groups == nil && loaded != nil && resolvedGroups != unresolvedGroups
+        self.profiles = resolvedProfiles
+        self.groups = resolvedGroups
         self.subscriptions = subscriptions ?? loaded?.subscriptions ?? []
 
         // Resolve named rule configurations, migrating legacy single-list state
@@ -148,17 +178,34 @@ final class HopStore {
         self.selectedTarget = selectedTarget ?? loaded?.selectedTarget
         self.pendingXrayMigrationReport = pendingXrayMigrationReport ?? loaded?.pendingXrayMigrationReport
         self.settings = settings ?? loaded?.settings ?? .defaults
-        self.tunnel = tunnel ?? TunnelController(logs: loaded?.logs ?? [])
+        self.tunnel = tunnel ?? TunnelController(
+            logs: loaded?.logs ?? [],
+            sharedLogStore: dataStore.sharedLogStore,
+            requiresLegacyExtensionLogPurge: requiresLegacyExtensionLogPurge,
+        )
+        // Tests and previews may inject a controller; never let injection
+        // bypass a pending authenticated-state migration.
+        self.tunnel.requiresLegacyExtensionLogPurge = self.tunnel.requiresLegacyExtensionLogPurge
+            || requiresLegacyExtensionLogPurge
         self.tunnel.maximumLogEntries = self.settings.logRetention.rawValue
         self.tunnel.onLogsChanged = { [weak self] in
             self?.scheduleLogPersist()
         }
+        self.tunnel.onLegacyExtensionLogPurgeCompleted = { [weak self] in
+            guard let self else {
+                return
+            }
+            persistLoadedState()
+        }
+        // Resolve the gate before a brand-new user can save current data under
+        // the legacy schema. A failed clear remains pending and retryable.
+        try? self.tunnel.purgeLegacyExtensionLogIfNeeded()
         normalizeSelectedTarget()
 
         // Persist once if we upgraded an existing file from legacy rules, so the
         // migrated configuration IDs are stable across launches.
-        if resolved.didMigrate {
-            persist()
+        if resolved.didMigrate || didBindLoadedGroupReferences {
+            persistLoadedState()
         }
     }
 
@@ -326,10 +373,6 @@ final class HopStore {
         }
     }
 
-    func addSubscription(_ subscription: SubscriptionSource) {
-        subscriptions.insert(subscription, at: 0)
-    }
-
     func updateSubscription(_ subscription: SubscriptionSource) {
         guard let index = subscriptions.firstIndex(where: { $0.id == subscription.id }) else {
             return
@@ -338,7 +381,15 @@ final class HopStore {
     }
 
     func deleteSubscription(id: SubscriptionSource.ID) {
-        subscriptions.removeAll { $0.id == id }
+        let removedProfileIDs = Set(profiles.lazy.filter { $0.subscriptionID == id }.map(\.id))
+        let removedGroupIDs = Set(groups.lazy.filter { $0.subscriptionID == id }.map(\.id))
+        withBatchedPersist {
+            profiles.removeAll { removedProfileIDs.contains($0.id) }
+            groups.removeAll { removedGroupIDs.contains($0.id) }
+            repairReferences(removingProfiles: removedProfileIDs, groups: removedGroupIDs)
+            subscriptions.removeAll { $0.id == id }
+            normalizeSelectedTarget()
+        }
     }
 
     func selectRuleConfiguration(id: RuleConfiguration.ID) {
@@ -377,6 +428,68 @@ final class HopStore {
         }
     }
 
+    /// Persists a newly fetched subscription and its source-owned content as
+    /// one mutation. Subscription rules never enter active routing policy.
+    @discardableResult
+    func applySubscriptionImport(
+        _ untrustedResult: ImportResult,
+        adding subscription: SubscriptionSource,
+    ) -> Bool {
+        let result = preparedSubscriptionResult(untrustedResult, subscriptionID: subscription.id)
+        guard !result.isEmpty else {
+            tunnel.appendLog("Subscription import skipped: no runnable items found")
+            return false
+        }
+        let projectedSubscriptions = [subscription] + subscriptions
+        guard subscriptionInputFitsBudget(
+            result,
+            replacing: subscription.id,
+            subscriptions: projectedSubscriptions,
+        ) else {
+            tunnel.appendLog("Subscription import rejected: retained subscription data exceeds the app safety limit")
+            return false
+        }
+
+        // Provider groups may contain opaque DIRECT/REJECT defaults or nested
+        // policies. Save them for review, but never activate one as a side
+        // effect of importing a subscription.
+        let existingSelection = isValid(target: selectedTarget) ? selectedTarget : nil
+        let importedSelection = existingSelection ?? result.profiles.first.map { .profile($0.id) }
+        var merger = SubscriptionRefreshMerger(
+            profiles: profiles,
+            groups: groups,
+            selectedTarget: importedSelection,
+        )
+        merger.merge(result, replacingSnapshotFor: subscription.id)
+        guard subscriptionStateFitsBudget(
+            profiles: merger.profiles,
+            groups: merger.groups,
+            subscriptions: projectedSubscriptions,
+        ) else {
+            tunnel.appendLog("Subscription import rejected: retained subscription data exceeds the app safety limit")
+            return false
+        }
+
+        withBatchedPersist {
+            profiles = merger.profiles
+            groups = merger.groups
+            selectedTarget = merger.selectedTarget
+            subscriptions = projectedSubscriptions
+            repairReferences(
+                removingProfiles: merger.removedProfileIDs,
+                groups: merger.removedGroupIDs,
+                remappingProfiles: merger.profileIDReplacements,
+                remappingGroups: merger.groupIDReplacements,
+            )
+            normalizeSelectedTarget()
+        }
+        tunnel.appendLog("Imported subscription: \(result.summary)")
+        for warning in result.warnings.prefix(5) {
+            tunnel.appendLog("Import warning: \(warning.message)")
+        }
+        return true
+    }
+
     func applyImport(_ result: ImportResult) {
         guard !result.isEmpty else {
             tunnel.appendLog("Import skipped: no runnable items found")
@@ -396,15 +509,30 @@ final class HopStore {
         }
     }
 
+    @discardableResult
     func applySubscriptionRefresh(
-        _ result: ImportResult,
-        updating subscription: SubscriptionSource? = nil,
+        _ untrustedResult: ImportResult,
+        updating subscription: SubscriptionSource,
         securityPolicy: SubscriptionRefreshSecurityPolicy = .preserveExisting,
-    ) {
-        let result = result.sanitizingNames()
-        guard !result.isEmpty else {
+    ) -> Bool {
+        let result = preparedSubscriptionResult(untrustedResult, subscriptionID: subscription.id)
+        guard !result.isEmpty || result.validatedEmptySubscriptionSnapshot == true else {
             tunnel.appendLog("Subscription refresh skipped: no runnable items found")
-            return
+            return false
+        }
+        guard let subscriptionIndex = subscriptions.firstIndex(where: { $0.id == subscription.id }) else {
+            tunnel.appendLog("Subscription refresh skipped: source no longer exists")
+            return false
+        }
+        var projectedSubscriptions = subscriptions
+        projectedSubscriptions[subscriptionIndex] = subscription
+        guard subscriptionInputFitsBudget(
+            result,
+            replacing: subscription.id,
+            subscriptions: projectedSubscriptions,
+        ) else {
+            tunnel.appendLog("Subscription refresh rejected: retained subscription data exceeds the app safety limit")
+            return false
         }
 
         // Merge on value copies and assign each collection once: every
@@ -413,24 +541,34 @@ final class HopStore {
         // The subscription record updates inside the same batch — a refresh is
         // one logical mutation and persists once.
         var merger = SubscriptionRefreshMerger(profiles: profiles, groups: groups, selectedTarget: selectedTarget)
-        merger.merge(result, securityPolicy: securityPolicy)
+        merger.merge(
+            result,
+            securityPolicy: securityPolicy,
+            replacingSnapshotFor: subscription.id,
+        )
+        guard subscriptionStateFitsBudget(
+            profiles: merger.profiles,
+            groups: merger.groups,
+            subscriptions: projectedSubscriptions,
+        ) else {
+            tunnel.appendLog("Subscription refresh rejected: retained subscription data exceeds the app safety limit")
+            return false
+        }
+
         withBatchedPersist {
             profiles = merger.profiles
             groups = merger.groups
             selectedTarget = merger.selectedTarget
+            subscriptions = projectedSubscriptions
+            repairReferences(
+                removingProfiles: merger.removedProfileIDs,
+                groups: merger.removedGroupIDs,
+                remappingProfiles: merger.profileIDReplacements,
+                remappingGroups: merger.groupIDReplacements,
+            )
             normalizeSelectedTarget()
-            if let subscription, let index = subscriptions.firstIndex(where: { $0.id == subscription.id }) {
-                subscriptions[index] = subscription
-            }
         }
 
-        // Unlike a user-initiated import (which shows a preview), a refresh
-        // applies without review — so routing rules from the response are NOT
-        // installed. A subscription server could otherwise silently prepend
-        // rules that re-route chosen domains through an outbound it controls.
-        if !result.rules.isEmpty {
-            tunnel.appendLog("Ignored \(result.rules.count) routing rule(s) from subscription refresh. Import the subscription manually to review and apply rule changes.")
-        }
         for warning in merger.securityDowngradeWarnings.prefix(5) {
             tunnel.appendLog("Refresh warning: \(warning)")
         }
@@ -438,6 +576,7 @@ final class HopStore {
         for warning in result.warnings.prefix(5) {
             tunnel.appendLog("Import warning: \(warning.message)")
         }
+        return true
     }
 
     /// Fetches a subscription and merges the result, returning what happened so
@@ -465,9 +604,10 @@ final class HopStore {
 
         let result: ImportResult
         do {
-            result = try await importService.importSubscription(url: url)
-                .markingProfiles(subscriptionID: subscription.id)
-                .sanitizingNames()
+            result = try await preparedSubscriptionResult(
+                importService.importSubscription(url: url),
+                subscriptionID: subscription.id,
+            )
         } catch {
             return .failed(message: error.localizedDescription)
         }
@@ -480,8 +620,7 @@ final class HopStore {
         guard newInsecureNames.isEmpty else {
             return .needsInsecureConfirmation(result: result, newInsecureProfileNames: newInsecureNames)
         }
-        applyRefreshResult(result, for: subscription, securityPolicy: .preserveExisting)
-        return .applied(summary: result.summary)
+        return applyRefreshResult(result, for: subscription, securityPolicy: .preserveExisting)
     }
 
     /// Applies a refresh the user explicitly confirmed despite it introducing
@@ -511,9 +650,7 @@ final class HopStore {
         reviewedInsecureProfileNames: [String],
         for subscription: SubscriptionSource,
     ) -> SubscriptionRefreshOutcome {
-        let result = result
-            .markingProfiles(subscriptionID: subscription.id)
-            .sanitizingNames()
+        let result = preparedSubscriptionResult(result, subscriptionID: subscription.id)
         let newInsecureNames = SubscriptionRefreshMerger.newInsecureProfileNames(existing: profiles, imported: result.profiles)
         guard Self.reviewedNames(reviewedInsecureProfileNames, cover: newInsecureNames) else {
             return .needsInsecureConfirmation(result: result, newInsecureProfileNames: newInsecureNames)
@@ -522,8 +659,7 @@ final class HopStore {
         let changes = subscriptionSecurityChanges(in: result)
         guard changes == reviewedChanges else {
             if changes.isEmpty {
-                applyRefreshResult(result, for: subscription, securityPolicy: .preserveExisting)
-                return .applied(summary: result.summary)
+                return applyRefreshResult(result, for: subscription, securityPolicy: .preserveExisting)
             }
             return .needsSecurityConfirmation(
                 result: result,
@@ -532,8 +668,7 @@ final class HopStore {
             )
         }
 
-        applyRefreshResult(result, for: subscription, securityPolicy: .applyReviewedChanges)
-        return .applied(summary: result.summary)
+        return applyRefreshResult(result, for: subscription, securityPolicy: .applyReviewedChanges)
     }
 
     /// Refreshes every subscription that hasn't updated within
@@ -577,9 +712,7 @@ final class HopStore {
         for subscription: SubscriptionSource,
         reviewedInsecureProfileNames: [String] = [],
     ) -> SubscriptionRefreshOutcome {
-        let result = untrustedResult
-            .markingProfiles(subscriptionID: subscription.id)
-            .sanitizingNames()
+        let result = preparedSubscriptionResult(untrustedResult, subscriptionID: subscription.id)
         let newInsecureNames = SubscriptionRefreshMerger.newInsecureProfileNames(existing: profiles, imported: result.profiles)
         guard Self.reviewedNames(reviewedInsecureProfileNames, cover: newInsecureNames) else {
             return .needsInsecureConfirmation(result: result, newInsecureProfileNames: newInsecureNames)
@@ -594,8 +727,7 @@ final class HopStore {
             )
         }
 
-        applyRefreshResult(result, for: subscription, securityPolicy: .preserveExisting)
-        return .applied(summary: result.summary)
+        return applyRefreshResult(result, for: subscription, securityPolicy: .preserveExisting)
     }
 
     private func subscriptionSecurityChanges(in result: ImportResult) -> [SubscriptionSecurityChange] {
@@ -619,11 +751,130 @@ final class HopStore {
         _ result: ImportResult,
         for subscription: SubscriptionSource,
         securityPolicy: SubscriptionRefreshSecurityPolicy,
-    ) {
+    ) -> SubscriptionRefreshOutcome {
         var refreshed = subscription
         refreshed.lastUpdatedAt = .now
         refreshed.lastImportSummary = result.summary
-        applySubscriptionRefresh(result, updating: refreshed, securityPolicy: securityPolicy)
+        guard applySubscriptionRefresh(result, updating: refreshed, securityPolicy: securityPolicy) else {
+            return .failed(message: "The refresh exceeds the retained subscription safety limit.")
+        }
+        return .applied(summary: result.summary)
+    }
+
+    private func preparedSubscriptionResult(
+        _ result: ImportResult,
+        subscriptionID: SubscriptionSource.ID,
+    ) -> ImportResult {
+        result
+            .markingSubscriptionOwnership(subscriptionID: subscriptionID)
+            .droppingRules()
+            .sanitizingNames()
+            .requiringSubscriptionGroupReview()
+    }
+
+    private func subscriptionStateFitsBudget(
+        profiles: [ProxyProfile],
+        groups: [ProxyGroup],
+        subscriptions: [SubscriptionSource],
+    ) -> Bool {
+        let ownedProfiles = profiles.filter { $0.subscriptionID != nil }
+        let ownedGroups = groups.filter { $0.subscriptionID != nil }
+        guard ownedProfiles.count <= maxRetainedSubscriptionItems,
+              ownedGroups.count <= maxRetainedSubscriptionItems - ownedProfiles.count
+        else {
+            return false
+        }
+
+        var secretItemCount = subscriptions.count
+        guard secretItemCount <= maxRetainedSubscriptionSecretItems else { return false }
+        for profile in ownedProfiles {
+            let profileSecretCount = profile.keychainSecretItems.count
+            guard profileSecretCount <= maxRetainedSubscriptionSecretItems - secretItemCount else {
+                return false
+            }
+            secretItemCount += profileSecretCount
+        }
+
+        let retained = RetainedSubscriptionState(
+            profiles: ownedProfiles,
+            groups: ownedGroups,
+            subscriptions: subscriptions,
+        )
+        guard let encoded = try? JSONEncoder().encode(retained) else {
+            return false
+        }
+        return encoded.count <= maxRetainedSubscriptionBytes
+    }
+
+    /// Cheap pre-merge projection: the refreshing source's prior snapshot will
+    /// be replaced, so combine only other retained sources with the incoming
+    /// snapshot. This rejects cumulative excess before identity matching.
+    private func subscriptionInputFitsBudget(
+        _ result: ImportResult,
+        replacing subscriptionID: SubscriptionSource.ID,
+        subscriptions: [SubscriptionSource],
+    ) -> Bool {
+        let projectedProfiles = profiles.filter {
+            $0.subscriptionID != nil && $0.subscriptionID != subscriptionID
+        } + result.profiles
+        let projectedGroups = groups.filter {
+            $0.subscriptionID != nil && $0.subscriptionID != subscriptionID
+        } + result.groups
+        return subscriptionStateFitsBudget(
+            profiles: projectedProfiles,
+            groups: projectedGroups,
+            subscriptions: subscriptions,
+        )
+    }
+
+    private func repairReferences(
+        removingProfiles profileIDs: Set<ProxyProfile.ID>,
+        groups groupIDs: Set<ProxyGroup.ID>,
+        remappingProfiles profileIDMap: [ProxyProfile.ID: ProxyProfile.ID] = [:],
+        remappingGroups groupIDMap: [ProxyGroup.ID: ProxyGroup.ID] = [:],
+    ) {
+        guard !profileIDs.isEmpty || !groupIDs.isEmpty || !profileIDMap.isEmpty || !groupIDMap.isEmpty else { return }
+
+        func repaired(_ target: OutboundTarget) -> OutboundTarget? {
+            switch target {
+            case let .profile(id):
+                if profileIDs.contains(id) {
+                    return nil
+                }
+                return profileIDMap[id].map(OutboundTarget.profile) ?? target
+            case let .group(id):
+                if groupIDs.contains(id) {
+                    return nil
+                }
+                return groupIDMap[id].map(OutboundTarget.group) ?? target
+            case .selectedProxy, .direct, .reject, .named:
+                return target
+            }
+        }
+
+        groups = groups.map { group in
+            var group = group
+            let hadDefaultTarget = group.defaultTarget != nil
+            group.members = group.members.compactMap(repaired)
+            group.defaultTarget = group.defaultTarget.flatMap(repaired)
+            if hadDefaultTarget,
+               group.defaultTarget.map({ !group.members.contains($0) }) ?? true
+            {
+                group.defaultTarget = group.members.first
+            }
+            return group
+        }
+        for index in ruleConfigurations.indices {
+            ruleConfigurations[index].rules = ruleConfigurations[index].rules.compactMap { rule in
+                guard let target = repaired(rule.target) else { return nil }
+                var rule = rule
+                rule.target = target
+                return rule
+            }
+        }
+        if let selectedTarget {
+            self.selectedTarget = repaired(selectedTarget)
+        }
     }
 
     private func applyImportedRules(_ importedRules: [RoutingRule]) {
@@ -708,11 +959,23 @@ final class HopStore {
             guard !Task.isCancelled else {
                 return
             }
-            self?.persist()
+            self?.persistLoadedState()
         }
     }
 
     func persist() {
+        hasPersistableState = true
+        enqueuePersist()
+    }
+
+    private func persistLoadedState() {
+        guard hasPersistableState else {
+            return
+        }
+        enqueuePersist()
+    }
+
+    private func enqueuePersist() {
         let snapshot = HopAppData(
             profiles: profiles,
             groups: groups,
@@ -723,6 +986,8 @@ final class HopStore {
             logs: tunnel.logs,
             ruleConfigurations: ruleConfigurations,
             activeRuleConfigurationID: activeRuleConfigurationID,
+            schemaVersion: HopAppData.currentSchemaVersion,
+            legacyExtensionLogPurgePending: tunnel.requiresLegacyExtensionLogPurge ? true : nil,
             pendingXrayMigrationReport: pendingXrayMigrationReport,
         )
         let dataStore = dataStore

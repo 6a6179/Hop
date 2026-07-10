@@ -144,7 +144,7 @@ struct ProfileEditorView: View {
                 UTLSFingerprintPicker(selection: $draft.tlsFingerprint)
                 ProfileTextField("Certificate SHA-256 Pins", text: $draft.tlsPinnedCertificates, prompt: "hex, comma-separated")
                 ProfileTextField("Verify Certificate Names", text: $draft.tlsVerifyNames, prompt: "example.com")
-                ProfileTextField("ECH Config", text: $draft.tlsECHConfigList, prompt: "base64 or resolver URL", isSecure: true)
+                ProfileTextField("ECH Config", text: $draft.tlsECHConfigList, prompt: "inline base64", isSecure: true)
                 ProfileTextField("TLS Curves", text: $draft.tlsCurves, prompt: "X25519MLKEM768")
                 ProfileTextField("Minimum TLS", text: $draft.tlsMinVersion, prompt: "1.2")
                 ProfileTextField("Maximum TLS", text: $draft.tlsMaxVersion, prompt: "1.3")

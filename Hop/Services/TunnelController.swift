@@ -10,10 +10,12 @@ final class TunnelController {
     var maximumLogEntries: Int
 
     @ObservationIgnored var onLogsChanged: (() -> Void)?
+    @ObservationIgnored var onLegacyExtensionLogPurgeCompleted: (() -> Void)?
+    @ObservationIgnored var requiresLegacyExtensionLogPurge: Bool
 
     private let configBuilder = XrayConfigBuilder()
     private let sharedConfigStore = SharedTunnelConfigurationStore()
-    private let sharedLogStore = SharedTunnelLogStore()
+    private let sharedLogStore: SharedTunnelLogStore
     private let secretStore = SecretStore.shared
     @ObservationIgnored private var diagnosticsTask: Task<Void, Never>?
     private var manager: NETunnelProviderManager?
@@ -22,9 +24,16 @@ final class TunnelController {
     private var lastObservedStatus: NEVPNStatus?
     private var startInProgress = false
     private var loggedStartupStop = false
-    init(logs: [String] = [], maximumLogEntries: Int = LogRetention.fiveHundred.rawValue) {
+    init(
+        logs: [String] = [],
+        maximumLogEntries: Int = LogRetention.fiveHundred.rawValue,
+        sharedLogStore: SharedTunnelLogStore = SharedTunnelLogStore(),
+        requiresLegacyExtensionLogPurge: Bool = false,
+    ) {
         self.logs = logs
         self.maximumLogEntries = maximumLogEntries
+        self.sharedLogStore = sharedLogStore
+        self.requiresLegacyExtensionLogPurge = requiresLegacyExtensionLogPurge
     }
 
     func connect(
@@ -73,6 +82,7 @@ final class TunnelController {
 
         do {
             try sharedLogStore.clear()
+            completeLegacyExtensionLogPurgeIfNeeded()
             appendLog("Cleared extension log at \(RuntimeEnvironment.tunnelLogFileURL.path)")
         } catch {
             appendLog("Unable to clear extension log: \(error.diagnosticDescription)")
@@ -159,10 +169,7 @@ final class TunnelController {
             state = .failed
             startInProgress = false
             await syncExtensionLogs()
-            appendLog("Tunnel start failed: \(error.diagnosticDescription)")
-            if let diagnosticHint = error.networkExtensionDiagnosticHint {
-                appendLog("Diagnostic: \(diagnosticHint)")
-            }
+            appendTunnelStartFailure(error)
             await disarmOnDemandIfNeeded(context: "tunnel start failed")
         }
     }
@@ -225,6 +232,36 @@ final class TunnelController {
         appendLogs([message])
     }
 
+    /// A start error can be derived from the resolved configuration, so its
+    /// localized description is not safe to persist. Xray errors already expose
+    /// a stable code-only summary; all other errors retain only domain and code.
+    func appendTunnelStartFailure(_ error: Error) {
+        if let error = error as? XrayCoreClientError {
+            appendLog("Tunnel start failed: \(error.localizedDescription)")
+        } else {
+            let error = error as NSError
+            appendLog("Tunnel start failed [domain=\(error.domain), code=\(error.code)]")
+        }
+        if let diagnosticHint = error.networkExtensionDiagnosticHint {
+            appendLog("Diagnostic: \(diagnosticHint)")
+        }
+    }
+
+    /// `NEVPNConnection` may retain a provider error across app upgrades, so
+    /// never persist its localized description. Pre-fix provider errors could
+    /// include values echoed from the resolved configuration.
+    func appendLastDisconnectError(_ error: Error?) {
+        guard let error else {
+            appendLog("iOS reported no disconnect error for the last tunnel stop.")
+            return
+        }
+        let nsError = error as NSError
+        appendLog("Last disconnect error [domain=\(nsError.domain), code=\(nsError.code)]")
+        if let diagnosticHint = error.networkExtensionDiagnosticHint {
+            appendLog("Diagnostic: \(diagnosticHint)")
+        }
+    }
+
     /// Appends a chronological batch as one array mutation and one persist
     /// callback, instead of one per line — extension log syncs deliver bursts.
     /// One call is one visual entry: line breaks collapse to spaces so
@@ -251,14 +288,57 @@ final class TunnelController {
     func clearLogs() {
         logs.removeAll()
         importedExtensionLogLines.removeAll()
-        try? sharedLogStore.clear()
+        if (try? sharedLogStore.clear()) != nil {
+            completeLegacyExtensionLogPurgeIfNeeded()
+        }
         onLogsChanged?()
+    }
+
+    /// Clears only the shared extension log for the pre-v3 migration gate.
+    /// App-side logs remain untouched, and a failure leaves the gate pending.
+    func purgeLegacyExtensionLogIfNeeded() throws {
+        guard requiresLegacyExtensionLogPurge else {
+            return
+        }
+        try sharedLogStore.clear()
+        importedExtensionLogLines.removeAll()
+        completeLegacyExtensionLogPurgeIfNeeded()
+    }
+
+    private func completeLegacyExtensionLogPurgeIfNeeded() {
+        guard requiresLegacyExtensionLogPurge else {
+            return
+        }
+        requiresLegacyExtensionLogPurge = false
+        onLegacyExtensionLogPurgeCompleted?()
     }
 
     /// Reads the shared tunnel log file off the main actor — the read is up to
     /// 512 KB of file I/O, and it runs on hot paths (status notifications, the
     /// post-start diagnostics, the Logs tab refresh).
     func syncExtensionLogs() async {
+        if requiresLegacyExtensionLogPurge {
+            let purgeResult: Result<Void, Error> = await Task.detached(priority: .utility) { [sharedLogStore] in
+                do {
+                    try sharedLogStore.clear()
+                    return .success(())
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            switch purgeResult {
+            case .success:
+                importedExtensionLogLines.removeAll()
+                completeLegacyExtensionLogPurgeIfNeeded()
+            case let .failure(error):
+                let error = error as NSError
+                appendLog("Unable to clear legacy extension logs [domain=\(error.domain), code=\(error.code)]")
+            }
+            // A successful purge intentionally imports nothing from the old
+            // file; a failed purge remains gated and retries on the next sync.
+            return
+        }
+
         let result: Result<[String], Error> = await Task.detached(priority: .utility) { [sharedLogStore] in
             do {
                 return try .success(sharedLogStore.readLines())
@@ -454,20 +534,11 @@ final class TunnelController {
             return
         }
         connection.fetchLastDisconnectError { [weak self] error in
-            let message = error.map { "Last disconnect error: \($0.diagnosticDescription)" }
-            let hint = error?.networkExtensionDiagnosticHint
             Task { @MainActor in
                 guard let self else {
                     return
                 }
-                guard let message else {
-                    self.appendLog("iOS reported no disconnect error for the last tunnel stop.")
-                    return
-                }
-                self.appendLog(message)
-                if let hint {
-                    self.appendLog("Diagnostic: \(hint)")
-                }
+                self.appendLastDisconnectError(error)
             }
         }
     }

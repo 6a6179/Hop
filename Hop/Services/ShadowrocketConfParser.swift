@@ -7,8 +7,13 @@ extension ProxyImportService {
     func parseShadowrocketConfig(_ text: String) -> ImportResult {
         var result = ImportResult()
         var section = ""
+        var sawInventorySection = false
+        var sawRuleSection = false
+        var attemptedInventoryItem = false
+        let lines = text.components(separatedBy: .newlines)
+        let wasTruncated = lines.count > ImportPolicy.maxLines
 
-        for rawLine in text.components(separatedBy: .newlines).prefix(ImportPolicy.maxLines) {
+        for rawLine in lines.prefix(ImportPolicy.maxLines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !line.isEmpty, !line.hasPrefix("#"), !line.hasPrefix(";") else {
                 continue
@@ -16,19 +21,38 @@ extension ProxyImportService {
 
             if line.hasPrefix("["), line.hasSuffix("]") {
                 section = String(line.dropFirst().dropLast()).lowercased()
+                if section == "proxy" || section == "proxy group" {
+                    sawInventorySection = true
+                } else if section == "rule" {
+                    sawRuleSection = true
+                }
                 continue
             }
 
             switch section {
             case "proxy":
+                attemptedInventoryItem = true
                 parseShadowrocketProxyLine(line, into: &result)
             case "proxy group":
+                attemptedInventoryItem = true
                 parseShadowrocketGroupLine(line, into: &result)
             case "rule":
                 parseShadowrocketRuleLine(line, into: &result)
             default:
                 continue
             }
+        }
+
+        if sawInventorySection,
+           !sawRuleSection,
+           !attemptedInventoryItem,
+           !wasTruncated,
+           result.profiles.isEmpty,
+           result.groups.isEmpty,
+           result.rules.isEmpty,
+           result.warnings.isEmpty
+        {
+            result.validatedEmptySubscriptionSnapshot = true
         }
 
         return result

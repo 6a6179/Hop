@@ -25,7 +25,27 @@ struct XrayBridgeRequest: Codable, Sendable {
 struct XrayBridgeResponse: Codable, Sendable {
     struct Failure: Codable, Sendable {
         var code: String
-        var message: String
+
+        /// Bridge messages can contain values echoed from a fully resolved
+        /// configuration. Keep only the fixed machine code in Swift-facing
+        /// diagnostics; unknown codes are not safe display text either.
+        var safeCode: String {
+            Self.sanitizedCode(code)
+        }
+
+        static func sanitizedCode(_ code: String?) -> String {
+            guard let code else {
+                return "unknown"
+            }
+            return switch code {
+            case "bridge_panic", "invalid_request", "unsupported_version",
+                 "unknown_method", "invalid_config", "validation_cleanup_failed",
+                 "already_running", "start_failed", "stop_failed":
+                code
+            default:
+                "unknown"
+            }
+        }
     }
 
     var version: Int
