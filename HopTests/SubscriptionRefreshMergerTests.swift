@@ -1655,7 +1655,10 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
             members: [.direct],
         )
 
-        XCTAssertEqual(try XCTUnwrap(ProxyGroupEditorDraft(group: group).group).subscriptionID, sourceID)
+        XCTAssertEqual(
+            try XCTUnwrap(ProxyGroupEditorDraft(group: group).makeGroup(probeURLIsAllowed: true)).subscriptionID,
+            sourceID,
+        )
     }
 
     @MainActor

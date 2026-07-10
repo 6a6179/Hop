@@ -249,7 +249,7 @@ final class ImportSecurityTests: XCTestCase {
         XCTAssertFalse(result.warnings.contains { $0.message.contains("topsecretpass") })
     }
 
-    func testInsecureTLSShadowrocketProducesWarning() throws {
+    func testInsecureTLSProxyConfigurationProducesWarning() throws {
         let conf = """
         [Proxy]
         Insecure = trojan, evil.example.net, 443, password=p, tls=true, allowInsecure=true
@@ -279,7 +279,7 @@ final class ImportSecurityTests: XCTestCase {
         XCTAssertEqual(result.truncated(to: 100).profiles.count, 10)
     }
 
-    func testOutOfRangePortInShadowrocketProxyIsSkipped() throws {
+    func testOutOfRangePortInProxyConfigurationIsSkipped() throws {
         let conf = """
         [Proxy]
         Bad = trojan, t.example.net, 99999, password=p, tls=true

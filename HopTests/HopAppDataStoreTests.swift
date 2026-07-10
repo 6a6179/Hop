@@ -53,6 +53,58 @@ final class HopAppDataStoreTests: XCTestCase {
         XCTAssertEqual(loaded.logs, ["one", "two"])
     }
 
+    func testLoadHydratesAllStateSecretsWithOneBulkRead() throws {
+        let url = tempStateURL()
+        let profileBackend = InMemorySecretBackend()
+        let profileStore = SecretStore(backend: profileBackend)
+        let authenticationStore = SecretStore.inMemory()
+        let writer = HopAppDataStore(
+            url: url,
+            secretStore: profileStore,
+            authenticationStore: authenticationStore,
+        )
+        let profile = trojanProfile(
+            id: UUID(),
+            name: "Tokyo",
+            host: "jp.example.com",
+            password: "profile-secret",
+        )
+        let subscription = SubscriptionSource(
+            name: "Provider",
+            url: "https://example.com/sub?token=subscription-secret",
+        )
+        writer.save(HopAppData(
+            profiles: [profile],
+            groups: [],
+            subscriptions: [subscription],
+            routingMode: .global,
+            selectedTarget: .profile(profile.id),
+            settings: .defaults,
+            logs: [],
+        ))
+
+        let perKeyReadsBeforeLoad = profileBackend.valueCount
+        let bulkReadsBeforeLoad = profileBackend.allValuesCount
+        let reader = HopAppDataStore(
+            url: url,
+            secretStore: profileStore,
+            authenticationStore: authenticationStore,
+        )
+        let loaded = try XCTUnwrap(reader.load())
+
+        guard case let .trojan(options) = try XCTUnwrap(loaded.profiles.first).options else {
+            return XCTFail("Expected Trojan options")
+        }
+        XCTAssertEqual(options.password, "profile-secret")
+        XCTAssertEqual(loaded.subscriptions.first?.url, subscription.url)
+        XCTAssertEqual(profileBackend.allValuesCount - bulkReadsBeforeLoad, 1)
+        XCTAssertEqual(
+            profileBackend.valueCount - perKeyReadsBeforeLoad,
+            0,
+            "app-state hydration must not issue one Keychain read per secret field",
+        )
+    }
+
     @MainActor
     func testSchemaTwoUpgradeClearsAppAndExtensionLogsBeforeTunnelSync() async throws {
         let url = tempStateURL()

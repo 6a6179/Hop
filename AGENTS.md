@@ -120,6 +120,7 @@ xcodebuild \
   CODE_SIGN_IDENTITY="" \
   DEVELOPMENT_TEAM="" \
   PROVISIONING_PROFILE_SPECIFIER="" \
+  DEPLOYMENT_POSTPROCESSING=YES \
   build
 
 APP="build/UnsignedIPA/DerivedData/Build/Products/Release-iphoneos/Hop.app"

@@ -6,6 +6,7 @@ struct ProxyGroupEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(HopStore.self) private var store
     @State private var draft: ProxyGroupEditorDraft
+    @State private var isSaving = false
 
     let onSave: (ProxyGroup) -> Void
 
@@ -16,7 +17,6 @@ struct ProxyGroupEditorView: View {
 
     var body: some View {
         let selectableGroups = store.groups.filter { $0.id != draft.id }
-        let savedGroup = draft.group
 
         NavigationStack {
             Form {
@@ -80,18 +80,25 @@ struct ProxyGroupEditorView: View {
                     Button("Cancel") {
                         dismiss()
                     }
+                    .disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        guard let group = savedGroup else {
-                            return
+                    Button(isSaving ? "Saving..." : "Save") {
+                        let draft = draft
+                        isSaving = true
+                        Task { @MainActor in
+                            guard let group = await draft.resolvedGroup() else {
+                                isSaving = false
+                                return
+                            }
+                            onSave(group)
+                            dismiss()
                         }
-                        onSave(group)
-                        dismiss()
                     }
-                    .disabled(savedGroup == nil)
+                    .disabled(!draft.isStructurallyValid || isSaving)
                 }
             }
+            .interactiveDismissDisabled(isSaving)
         }
     }
 
@@ -142,7 +149,33 @@ struct ProxyGroupEditorDraft {
         lastLatencyMilliseconds = group.lastLatencyMilliseconds
     }
 
-    var group: ProxyGroup? {
+    var isStructurallyValid: Bool {
+        !trimmed(name).isEmpty
+            && !members.isEmpty
+            && Int(trimmed(intervalSeconds)) != nil
+            && Int(trimmed(toleranceMilliseconds)) != nil
+    }
+
+    /// DNS resolution may block for seconds, so it must never run from a
+    /// SwiftUI body. Resolve on a detached worker, then build from the same
+    /// draft snapshot and the exact validation result.
+    @MainActor
+    func resolvedGroup(
+        probeURLValidator: @escaping @Sendable (String) -> Bool = {
+            ImportPolicy.isAllowedProbeURL($0)
+        },
+    ) async -> ProxyGroup? {
+        guard isStructurallyValid else {
+            return nil
+        }
+        let candidateURL = url
+        let probeURLIsAllowed = await Task.detached(priority: .userInitiated) {
+            probeURLValidator(candidateURL)
+        }.value
+        return makeGroup(probeURLIsAllowed: probeURLIsAllowed)
+    }
+
+    func makeGroup(probeURLIsAllowed: Bool) -> ProxyGroup? {
         let trimmedName = trimmed(name)
         guard !trimmedName.isEmpty,
               !members.isEmpty,
@@ -165,7 +198,7 @@ struct ProxyGroupEditorDraft {
                 // Keep the editor in agreement with the import path and config
                 // builder: a disallowed/empty probe URL falls back to the default
                 // so the persisted state never holds an SSRF-style probe target.
-                url: ImportPolicy.isAllowedProbeURL(trimmedURL) ? trimmedURL : ProxyGroupTestOptions.defaultURL,
+                url: probeURLIsAllowed ? trimmedURL : ProxyGroupTestOptions.defaultURL,
                 intervalSeconds: ImportPolicy.clampURLTestInterval(interval),
                 toleranceMilliseconds: ImportPolicy.clampURLTestTolerance(tolerance),
             ),

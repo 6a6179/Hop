@@ -1,7 +1,7 @@
 import Foundation
 
 /// Centralized security policy for untrusted import data: subscription/link
-/// text, Shadowrocket `.conf` content, and the individual values parsed out of
+/// text, compatible `.conf` content, and the individual values parsed out of
 /// them.
 ///
 /// Every limit and validation rule that protects the importer (and, by
@@ -371,7 +371,7 @@ enum ImportPolicy {
     // MARK: - Redaction
 
     /// Produces a credential-free description of an import line for warnings and
-    /// logs. Proxy links and Shadowrocket lines embed passwords, UUIDs, keys,
+    /// logs. Proxy links and `.conf` proxy lines embed passwords, UUIDs, keys,
     /// and tokens, so the raw text must never reach persistent/exportable logs
     /// (CWE-532).
     static func redactForLog(_ value: String) -> String {
@@ -390,7 +390,7 @@ enum ImportPolicy {
             return "\(scheme):// [redacted]"
         }
 
-        // Shadowrocket "Name = type, host, port, secrets..." lines: keep the
+        // Configuration "Name = type, host, port, secrets..." lines: keep the
         // user-facing name only.
         if let name = trimmed.split(separator: "=", maxSplits: 1).first {
             let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)

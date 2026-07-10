@@ -211,6 +211,61 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(encoded.profiles.map(\.name), ["One", "Two"])
     }
 
+    func testPlainImportScannerHandlesMixedWhitespace() throws {
+        let payload = """
+
+        \t trojan://secret@one.example.net:443?security=tls#One   hysteria2://secret@two.example.net:443?security=tls#Two
+
+        """
+
+        let result = try importService.importText(payload)
+
+        XCTAssertEqual(result.profiles.map(\.name), ["One", "Two"])
+    }
+
+    func testOffMainImportPreservesParserResult() async throws {
+        let payload = "trojan://secret@one.example.net:443?security=tls#One"
+
+        let result = try await importService.importTextOffMain(payload)
+
+        XCTAssertEqual(result.profiles.map(\.name), ["One"])
+        XCTAssertTrue(result.groups.isEmpty)
+        XCTAssertTrue(result.rules.isEmpty)
+    }
+
+    func testPlainImportScannerStopsBeforeExpandingAdversarialWhitespace() throws {
+        let link = "trojan://secret@one.example.net:443?security=tls#One"
+        // Far more whitespace-separated tokens than the parser admits, while
+        // staying well under the byte cap. The scanner must stop at the token
+        // budget instead of eagerly allocating every split component.
+        let payload = link + " " + String(repeating: "noise ", count: ImportPolicy.maxLines * 12)
+        XCTAssertLessThan(payload.utf8.count, ImportPolicy.maxPayloadBytes)
+
+        let result = try importService.importText(payload)
+
+        XCTAssertEqual(result.profiles.map(\.name), ["One"])
+        XCTAssertTrue(result.warnings.isEmpty)
+    }
+
+    func testPlainImportScannerPreservesLineBudgetBoundary() throws {
+        let first = "trojan://secret@one.example.net:443?security=tls#One"
+        let second = "trojan://secret@two.example.net:443?security=tls#Two"
+        let lastAcceptedLine = first + String(repeating: "\n", count: ImportPolicy.maxLines - 1) + second
+        XCTAssertEqual(try importService.importText(lastAcceptedLine).profiles.map(\.name), ["One", "Two"])
+
+        let firstRejectedLine = first + String(repeating: "\n", count: ImportPolicy.maxLines) + second
+        XCTAssertEqual(try importService.importText(firstRejectedLine).profiles.map(\.name), ["One"])
+
+        let acceptedCRLF = first
+            + String(repeating: "\r\n", count: (ImportPolicy.maxLines / 2) - 1)
+            + "\r"
+            + second
+        XCTAssertEqual(try importService.importText(acceptedCRLF).profiles.map(\.name), ["One", "Two"])
+
+        let rejectedCRLF = first + String(repeating: "\r\n", count: ImportPolicy.maxLines / 2) + second
+        XCTAssertEqual(try importService.importText(rejectedCRLF).profiles.map(\.name), ["One"])
+    }
+
     // MARK: - Default TLS for Hysteria2
 
     func testHysteria2WithoutSecurityParamDefaultsToTLS() throws {
@@ -241,7 +296,7 @@ final class ProxyLinkParserTests: XCTestCase {
 
     func testLinkPortsOutsideValidRangeAreRejected() {
         // URLComponents happily parses ports like 99999; the endpoint builder
-        // must range-check them like the VMess JSON and Shadowrocket paths do.
+        // must range-check them like the VMess JSON and configuration paths do.
         for badLink in [
             "vless://11111111-1111-4111-8111-111111111111@edge.example.net:0?security=tls#Zero",
             "trojan://secret@de.example.net:65536?security=tls#TooBig",
@@ -251,7 +306,7 @@ final class ProxyLinkParserTests: XCTestCase {
         }
     }
 
-    func testParsesShadowrocketConfWithGroupsRulesAndWarnings() throws {
+    func testParsesProxyConfigurationWithGroupsRulesAndWarnings() throws {
         let conf = """
         [Proxy]
         Tokyo = vless, edge.example.net, 443, 11111111-1111-4111-8111-111111111111, tls=true, security=reality, sni=www.microsoft.com, fp=chrome, pbk=PUBLICKEY, sid=abcd, spx=/shadow, pqv=MLDSA65VERIFY, alpn="h2,http/1.1", flow=xtls-rprx-vision, encryption=\(x25519Encryption)
@@ -300,7 +355,27 @@ final class ProxyLinkParserTests: XCTestCase {
         XCTAssertEqual(result.profiles.first?.security.reality?.mldsa65Verify, "MLDSA65VERIFY")
     }
 
-    func testShadowrocketGroupBuiltinsDoNotResolveAsNames() throws {
+    func testProxyConfigurationScannerStopsBeforeExpandingAdversarialNewlines() {
+        let config = "[Proxy]" + String(repeating: "\n", count: ImportPolicy.maxLines * 12)
+        XCTAssertLessThan(config.utf8.count, ImportPolicy.maxPayloadBytes)
+
+        let result = importService.parseProxyConfiguration(config)
+
+        XCTAssertTrue(result.isEmpty)
+        XCTAssertNil(result.validatedEmptySubscriptionSnapshot, "a truncated inventory must never authorize snapshot deletion")
+    }
+
+    func testProxyConfigurationScannerPreservesExactTruncationBoundary() {
+        let exactLimit = "[Proxy]" + String(repeating: "\n", count: ImportPolicy.maxLines - 1)
+        let exactResult = importService.parseProxyConfiguration(exactLimit)
+        XCTAssertEqual(exactResult.validatedEmptySubscriptionSnapshot, true)
+
+        let firstTruncated = "[Proxy]" + String(repeating: "\n", count: ImportPolicy.maxLines)
+        let truncatedResult = importService.parseProxyConfiguration(firstTruncated)
+        XCTAssertNil(truncatedResult.validatedEmptySubscriptionSnapshot)
+    }
+
+    func testProxyConfigurationGroupBuiltinsDoNotResolveAsNames() throws {
         let conf = """
         [Proxy]
         PROXY = trojan, proxy.example.net, 443, secret, tls=true

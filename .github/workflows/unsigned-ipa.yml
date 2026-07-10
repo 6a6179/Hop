@@ -139,6 +139,7 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
+            DEPLOYMENT_POSTPROCESSING=YES \
             build
 
       - name: Package unsigned IPA

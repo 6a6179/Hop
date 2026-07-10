@@ -14,6 +14,8 @@ struct ProfileEditorView: View {
     }
 
     var body: some View {
+        let validation = draft.validation
+
         NavigationStack {
             Form {
                 Section("Basics") {
@@ -43,7 +45,7 @@ struct ProfileEditorView: View {
                     Text("Optional client-only overrides for the pinned v26.6.27 schema. Typed fields, listeners, APIs, file paths, and un-tokenized secrets are rejected.")
                 }
 
-                if let validationMessage = draft.validationMessage {
+                if let validationMessage = validation.message {
                     Section {
                         Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -61,13 +63,15 @@ struct ProfileEditorView: View {
 
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        guard let profile = draft.profile else {
+                        // Revalidate on the explicit save action so a stale
+                        // rendered button can never admit a changed draft.
+                        guard let profile = draft.validation.profile else {
                             return
                         }
                         onSave(profile)
                         dismiss()
                     }
-                    .disabled(draft.profile == nil)
+                    .disabled(validation.profile == nil)
                 }
             }
         }
@@ -354,6 +358,19 @@ private enum ProfileEditorChoices {
     }
 }
 
+private struct ProfileEditorValidation {
+    let profile: ProxyProfile?
+    let message: String?
+
+    static func valid(_ profile: ProxyProfile) -> Self {
+        Self(profile: profile, message: nil)
+    }
+
+    static func invalid(_ message: String) -> Self {
+        Self(profile: nil, message: message)
+    }
+}
+
 private struct ProfileEditorDraft {
     let id: UUID
     let subscriptionID: UUID?
@@ -527,101 +544,98 @@ private struct ProfileEditorDraft {
         xrayAdvancedJSON = profile.xrayAdvanced?.jsonString ?? "{}"
     }
 
-    var validationMessage: String? {
+    var validation: ProfileEditorValidation {
         guard !trimmed(name).isEmpty else {
-            return "Name is required."
+            return .invalid("Name is required.")
         }
         guard !trimmed(host).isEmpty else {
-            return "Host is required."
+            return .invalid("Host is required.")
         }
         guard let portNumber = Int(trimmed(port)), (1 ... 65535).contains(portNumber) else {
-            return "Port must be between 1 and 65535."
+            return .invalid("Port must be between 1 and 65535.")
         }
 
         switch proto {
         case .vless:
-            guard !trimmed(vlessUUID).isEmpty else { return "VLESS UUID is required." }
+            guard !trimmed(vlessUUID).isEmpty else { return .invalid("VLESS UUID is required.") }
             if let encryptionError = Self.vlessEncryptionValidationError(optional(vlessEncryption)) {
-                return encryptionError
+                return .invalid(encryptionError)
             }
         case .trojan:
-            guard !trimmed(trojanPassword).isEmpty else { return "Trojan password is required." }
+            guard !trimmed(trojanPassword).isEmpty else { return .invalid("Trojan password is required.") }
         case .hysteria2:
-            guard !trimmed(hysteriaPassword).isEmpty else { return "Hysteria2 password is required." }
+            guard !trimmed(hysteriaPassword).isEmpty else { return .invalid("Hysteria2 password is required.") }
         case .tuic:
-            return "TUIC is not supported by Xray-core v26.6.27."
+            return .invalid("TUIC is not supported by Xray-core v26.6.27.")
         case .shadowsocks:
-            guard !trimmed(shadowsocksMethod).isEmpty else { return "Shadowsocks method is required." }
-            guard !trimmed(shadowsocksPassword).isEmpty else { return "Shadowsocks password is required." }
+            guard !trimmed(shadowsocksMethod).isEmpty else { return .invalid("Shadowsocks method is required.") }
+            guard !trimmed(shadowsocksPassword).isEmpty else { return .invalid("Shadowsocks password is required.") }
             guard Self.shadowsocksMethods.contains(trimmed(shadowsocksMethod).lowercased()) else {
-                return "This Shadowsocks cipher is not supported by the pinned Xray engine."
+                return .invalid("This Shadowsocks cipher is not supported by the pinned Xray engine.")
             }
         case .vmess:
-            guard !trimmed(vmessUUID).isEmpty else { return "VMess UUID is required." }
-            guard Int(trimmed(vmessAlterID)) == 0 else { return "Xray requires VMess Alter ID 0 (AEAD)." }
+            guard !trimmed(vmessUUID).isEmpty else { return .invalid("VMess UUID is required.") }
+            guard Int(trimmed(vmessAlterID)) == 0 else { return .invalid("Xray requires VMess Alter ID 0 (AEAD).") }
             guard Self.vmessSecurityValues.contains(trimmed(vmessSecurity).lowercased()) else {
-                return "VMess security must be auto, aes-128-gcm, or chacha20-poly1305."
+                return .invalid("VMess security must be auto, aes-128-gcm, or chacha20-poly1305.")
             }
         case .http, .socks:
             break
         case .wireGuard:
-            guard !trimmed(wireGuardPrivateKey).isEmpty else { return "WireGuard private key is required." }
-            guard !trimmed(wireGuardPeerPublicKey).isEmpty else { return "WireGuard peer public key is required." }
-            guard !list(from: wireGuardLocalAddresses).isEmpty else { return "WireGuard local address is required." }
+            guard !trimmed(wireGuardPrivateKey).isEmpty else { return .invalid("WireGuard private key is required.") }
+            guard !trimmed(wireGuardPeerPublicKey).isEmpty else { return .invalid("WireGuard peer public key is required.") }
+            guard !list(from: wireGuardLocalAddresses).isEmpty else { return .invalid("WireGuard local address is required.") }
         case .anyTLS:
-            return "AnyTLS is not supported by Xray-core v26.6.27."
+            return .invalid("AnyTLS is not supported by Xray-core v26.6.27.")
         }
 
         if tlsAllowInsecure {
-            return "Xray rejects allowInsecure. Use verified TLS or add a certificate pin."
+            return .invalid("Xray rejects allowInsecure. Use verified TLS or add a certificate pin.")
         }
 
         if securityLayer == .reality, trimmed(realityPublicKey).isEmpty {
-            return "REALITY public key is required."
+            return .invalid("REALITY public key is required.")
         }
         if securityLayer == .reality, trimmed(realityServerName).isEmpty {
-            return "REALITY requires an SNI — the camouflage domain the handshake presents."
+            return .invalid("REALITY requires an SNI — the camouflage domain the handshake presents.")
         }
         if proto == .hysteria2, securityLayer != .tls {
-            return "Hysteria2 requires TLS security."
+            return .invalid("Hysteria2 requires TLS security.")
         }
         if transportType == .quic {
-            return "Legacy QUIC transport was removed from Xray; use XHTTP stream-one instead."
+            return .invalid("Legacy QUIC transport was removed from Xray; use XHTTP stream-one instead.")
         }
         if securityLayer == .reality, ![.tcp, .xhttp, .grpc].contains(transportType) {
-            return "REALITY is supported only with RAW, XHTTP, or gRPC."
+            return .invalid("REALITY is supported only with RAW, XHTTP, or gRPC.")
         }
         if proto == .hysteria2, !trimmed(hysteriaObfs).isEmpty, trimmed(hysteriaObfsPassword).isEmpty {
-            return "Hysteria2 obfuscation requires an obfs password."
+            return .invalid("Hysteria2 obfuscation requires an obfs password.")
         }
         if !trimmed(xhttpMode).isEmpty,
            !["auto", "packet-up", "stream-up", "stream-one"].contains(trimmed(xhttpMode).lowercased())
         {
-            return "XHTTP mode must be auto, packet-up, stream-up, or stream-one."
+            return .invalid("XHTTP mode must be auto, packet-up, stream-up, or stream-one.")
         }
         if let error = validateOptionalInteger(hysteriaHopInterval, label: "Hop interval", range: 5 ... 3600) {
-            return error
+            return .invalid(error)
         }
         if let error = validateOptionalInteger(hysteriaUDPIdleTimeout, label: "UDP idle timeout", range: 1 ... 3600) {
-            return error
+            return .invalid(error)
         }
         if let error = validateOptionalInteger(wireGuardKeepAlive, label: "WireGuard keepalive", range: 0 ... 65535) {
-            return error
+            return .invalid(error)
         }
         if let error = validateOptionalInteger(wireGuardMTU, label: "WireGuard MTU", range: 576 ... 9000) {
-            return error
+            return .invalid(error)
         }
         let reserved = integerList(from: wireGuardReserved)
         if !trimmed(wireGuardReserved).isEmpty,
            reserved.count != 3 || reserved.contains(where: { !(0 ... 255).contains($0) })
         {
-            return "WireGuard reserved bytes must be three values from 0 to 255."
+            return .invalid("WireGuard reserved bytes must be three values from 0 to 255.")
         }
         do {
             let advanced = try XrayAdvancedDocument(jsonString: xrayAdvancedJSON)
-            if advanced.encodedByteCount > IOSRuntimeLimits.default.maxProfileAdvancedBytes {
-                return "Advanced Xray JSON exceeds the 64 KiB iOS limit."
-            }
             let candidate = makeProfile(advanced: advanced.isEmpty ? nil : advanced)
             if let issue = XrayConfigBuilder().validationIssues(
                 profiles: [candidate],
@@ -630,20 +644,12 @@ private struct ProfileEditorDraft {
                 routingMode: .global,
                 rules: [],
             ).first {
-                return "\(issue.path): \(issue.message)"
+                return .invalid("\(issue.path): \(issue.message)")
             }
+            return .valid(candidate)
         } catch {
-            return error.localizedDescription
+            return .invalid(error.localizedDescription)
         }
-
-        return nil
-    }
-
-    var profile: ProxyProfile? {
-        guard validationMessage == nil else {
-            return nil
-        }
-        return makeProfile(advanced: parsedAdvancedDocument)
     }
 
     private func makeProfile(advanced: XrayAdvancedDocument?) -> ProxyProfile {
@@ -770,11 +776,6 @@ private struct ProfileEditorDraft {
 
     private var selectedALPN: [String] {
         ProfileEditorChoices.alpn.filter { tlsALPN.contains($0) }
-    }
-
-    private var parsedAdvancedDocument: XrayAdvancedDocument? {
-        guard let document = try? XrayAdvancedDocument(jsonString: xrayAdvancedJSON) else { return nil }
-        return document.isEmpty ? nil : document
     }
 
     private func optional(_ value: String) -> String? {

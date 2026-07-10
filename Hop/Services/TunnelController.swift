@@ -13,7 +13,6 @@ final class TunnelController {
     @ObservationIgnored var onLegacyExtensionLogPurgeCompleted: (() -> Void)?
     @ObservationIgnored var requiresLegacyExtensionLogPurge: Bool
 
-    private let configBuilder = XrayConfigBuilder()
     private let sharedConfigStore = SharedTunnelConfigurationStore()
     private let sharedLogStore: SharedTunnelLogStore
     private let secretStore = SecretStore.shared
@@ -90,17 +89,7 @@ final class TunnelController {
 
         do {
             appendLog("Preparing tunnel with \(profiles.count) nodes, \(groups.count) groups, \(rules.count) rules")
-            // Ensure secrets are in the shared Keychain for the normal tokenized
-            // config path. If signing does not expose a verifiable shared App
-            // Group, startup falls back to an inline one-shot resolved config so
-            // the extension does not need to read shared storage.
-            for item in profiles.flatMap(\.keychainSecretItems) {
-                secretStore.setValue(item.value, forKey: item.key)
-            }
-
-            // Build once with hydrated values for exact pinned-core validation.
-            // The app never starts an instance; `validate` parses and closes it.
-            let resolvedConfig = try configBuilder.build(
+            let buildSnapshot = XrayConfigBuildSnapshot(
                 profiles: profiles,
                 groups: groups,
                 selectedTarget: target,
@@ -108,6 +97,16 @@ final class TunnelController {
                 rules: rules,
                 settings: settings,
             )
+
+            // Build once with hydrated values for exact pinned-core validation.
+            // The app never starts an instance; `validate` parses and closes it.
+            let resolvedConfig = try await Task.detached(priority: .userInitiated) {
+                try buildSnapshot.build()
+            }.value
+            guard startInProgress else {
+                appendLog("Tunnel start cancelled during config validation")
+                return
+            }
             appendLog("Validating settings with Xray-core \(XrayConfigBuilder.coreVersion)")
             try await XrayCoreClient.validate(configJSON: resolvedConfig)
             guard startInProgress else {
@@ -116,16 +115,40 @@ final class TunnelController {
             }
 
             let secretNonce = UUID().uuidString
-            let configContent = try configBuilder.build(
-                profiles: profiles.map { $0.tokenizingSecrets(nonce: secretNonce) },
-                groups: groups,
-                selectedTarget: target,
-                routingMode: routingMode,
-                rules: rules,
-                settings: settings,
-            )
-            let inlineConfigContent = useInlineResolvedConfig ? resolvedConfig : nil
-            try sharedConfigStore.writeConfig(configContent)
+            let inlineConfigContent: String?
+            if useInlineResolvedConfig {
+                // This fallback is intentionally one-shot: the extension cannot
+                // read the app-only config container on a later OS restart, so
+                // avoid generating and persisting an unusable tokenized copy.
+                inlineConfigContent = resolvedConfig
+            } else {
+                let configContent = try await Task.detached(priority: .userInitiated) {
+                    try buildSnapshot.build(tokenizingSecretsWith: secretNonce)
+                }.value
+                guard startInProgress else {
+                    appendLog("Tunnel start cancelled during tokenized config preparation")
+                    return
+                }
+
+                let preparation = SharedTunnelConfigPreparation(
+                    config: configContent,
+                    nonce: secretNonce,
+                    profiles: profiles,
+                    secretStore: secretStore,
+                    configStore: sharedConfigStore,
+                )
+                try await Task.detached(priority: .userInitiated) {
+                    try preparation.write()
+                }.value
+                guard startInProgress else {
+                    // No manager or tunnel is launched for this nonce. The file
+                    // contains references rather than plaintext credentials,
+                    // and a later connect atomically replaces it.
+                    appendLog("Tunnel start cancelled during shared config preparation")
+                    return
+                }
+                inlineConfigContent = nil
+            }
 
             let manager = try await configuredManager(secretNonce: secretNonce, onDemand: settings.connectOnDemand, killSwitch: settings.killSwitch)
             // The manager round-trip suspends; a disconnect() issued meanwhile
@@ -542,6 +565,62 @@ final class TunnelController {
             }
         }
     }
+}
+
+/// A tightly scoped immutable value snapshot for config work that must not run
+/// on `TunnelController`'s main actor. Every stored model is value-semantic;
+/// the detached task only reads it and creates its own builder instance.
+private struct XrayConfigBuildSnapshot: @unchecked Sendable {
+    let profiles: [ProxyProfile]
+    let groups: [ProxyGroup]
+    let selectedTarget: OutboundTarget
+    let routingMode: RoutingMode
+    let rules: [RoutingRule]
+    let settings: AppSettings
+
+    func build(tokenizingSecretsWith nonce: String? = nil) throws -> String {
+        try XrayConfigBuilder().build(
+            profiles: nonce.map { nonce in profiles.map { $0.tokenizingSecrets(nonce: nonce) } } ?? profiles,
+            groups: groups,
+            selectedTarget: selectedTarget,
+            routingMode: routingMode,
+            rules: rules,
+            settings: settings,
+        )
+    }
+}
+
+/// Performs secure-store and authenticated-file I/O without blocking the main
+/// actor. Inputs are immutable value snapshots; `SecretStore` wraps a Sendable
+/// backend and `SharedTunnelConfigurationStore` is stateless.
+private struct SharedTunnelConfigPreparation: @unchecked Sendable {
+    let config: String
+    let nonce: String
+    let profiles: [ProxyProfile]
+    let secretStore: SecretStore
+    let configStore: SharedTunnelConfigurationStore
+
+    func write() throws {
+        var missingKeys = SecretResolver.referencedKeys(in: config, nonce: nonce)
+        for profile in profiles where !missingKeys.isEmpty {
+            for item in profile.keychainSecretItems where missingKeys.remove(item.key) != nil {
+                // Do not skip equal values: writing also repairs legacy items
+                // whose Keychain accessibility class is weaker than required.
+                guard secretStore.setValue(item.value, forKey: item.key) else {
+                    throw TunnelSecretPreparationError.writeFailed
+                }
+            }
+        }
+        guard missingKeys.isEmpty else {
+            throw TunnelSecretPreparationError.missingReference
+        }
+        try configStore.writeConfig(config)
+    }
+}
+
+private enum TunnelSecretPreparationError: Error {
+    case missingReference
+    case writeFailed
 }
 
 private extension NEVPNStatus {

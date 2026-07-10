@@ -60,6 +60,26 @@ final class SubscriptionFetcherTests: XCTestCase {
         await assertImportFails(url: url, with: .payloadTooLarge)
     }
 
+    func testFetcherAcceptsChunkedBodyExactlyAtCap() async throws {
+        let url = try XCTUnwrap(URL(string: "https://stub.invalid/exact-cap"))
+        let twoMiB = Data(repeating: UInt8(ascii: "a"), count: 2 * 1024 * 1024)
+        let oneMiB = Data(repeating: UInt8(ascii: "b"), count: 1024 * 1024)
+        SubscriptionStubProtocol.register(
+            url: url,
+            status: 200,
+            headers: ["Content-Length": "\(ImportPolicy.maxPayloadBytes)"],
+            chunks: [twoMiB, twoMiB, oneMiB],
+        )
+
+        let data = try await SubscriptionFetcher.fetch(
+            URLRequest(url: url),
+            configuration: importService.subscriptionSessionConfiguration,
+        )
+
+        XCTAssertEqual(data.count, ImportPolicy.maxPayloadBytes)
+        XCTAssertEqual(data.last, UInt8(ascii: "b"))
+    }
+
     func testRedirectToDisallowedHostIsRefusedAndNeverRequested() async throws {
         let url = try XCTUnwrap(URL(string: "https://stub.invalid/bounce"))
         SubscriptionStubProtocol.register(

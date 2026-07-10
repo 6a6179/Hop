@@ -16,10 +16,25 @@ final class InMemorySecretBackend: SecretBackend, @unchecked Sendable {
     /// persists in tests.
     private(set) var allKeysCount = 0
 
+    /// Number of per-key reads, used to ensure app-state hydration stays on
+    /// the bulk path rather than regressing to one lookup per secret field.
+    private(set) var valueCount = 0
+
+    /// Number of bulk snapshots requested by app-state hydration.
+    private(set) var allValuesCount = 0
+
     func value(forKey key: String) -> String? {
         lock.lock()
         defer { lock.unlock() }
+        valueCount += 1
         return storage[key]
+    }
+
+    func allValues() -> [String: String] {
+        lock.lock()
+        defer { lock.unlock() }
+        allValuesCount += 1
+        return storage
     }
 
     @discardableResult

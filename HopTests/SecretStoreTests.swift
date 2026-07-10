@@ -199,6 +199,10 @@ final class SecretStoreTests: XCTestCase {
         let json = try XrayConfigBuilder().build(profile: profile.tokenizingSecrets(nonce: nonce), routingMode: .global, rules: [])
         XCTAssertFalse(json.contains("replace-me"), "tokenized config must not contain the secret")
         XCTAssertTrue(json.contains("##HOP_SECRET:"), "tokenized config must reference the secret")
+        XCTAssertEqual(
+            SecretResolver.referencedKeys(in: json, nonce: nonce),
+            Set(profile.keychainSecretItems.map(\.key)),
+        )
 
         let (resolved, unresolved) = SecretResolver.resolve(json, nonce: nonce, using: store)
         XCTAssertEqual(unresolved, 0)
@@ -239,6 +243,26 @@ final class SecretStoreTests: XCTestCase {
         XCTAssertFalse(resolved.contains("VICTIM-SECRET"), "foreign-nonce token must not be resolved")
         XCTAssertTrue(resolved.contains(injected), "inert token should be left untouched")
         XCTAssertEqual(unresolved, 0, "foreign tokens are inert and must not count as unresolved")
+        XCTAssertTrue(SecretResolver.referencedKeys(in: config, nonce: realNonce).isEmpty)
+    }
+
+    func testTokenizedConfigReferencesOnlyReachableProfileSecrets() throws {
+        let selected = SampleData.trojanTLS
+        let unreachable = SampleData.hysteria2
+        let nonce = "reachable-nonce"
+        let config = try XrayConfigBuilder().build(
+            profiles: [selected, unreachable].map { $0.tokenizingSecrets(nonce: nonce) },
+            groups: [],
+            selectedTarget: .profile(selected.id),
+            routingMode: .global,
+            rules: [],
+        )
+
+        let referencedKeys = SecretResolver.referencedKeys(in: config, nonce: nonce)
+        XCTAssertEqual(referencedKeys, Set(selected.keychainSecretItems.map(\.key)))
+        XCTAssertTrue(referencedKeys.isDisjoint(with: Set(unreachable.keychainSecretItems.map(\.key))))
+        XCTAssertFalse(config.contains("replace-me"))
+        XCTAssertFalse(config.contains("obfs-secret"))
     }
 
     // MARK: - HopAppDataStore at-rest behavior

@@ -10,12 +10,21 @@ settings:
     MARKETING_VERSION: "0.1.2"
     CURRENT_PROJECT_VERSION: "3"
     DEVELOPMENT_TEAM: ""
+  configs:
+    Release:
+      # Coverage counters and the profiling runtime add work to packet and UI
+      # hot paths. Tests can still opt into coverage in Debug builds.
+      ENABLE_CODE_COVERAGE: NO
 targets:
   Hop:
     type: application
     platform: iOS
     sources:
-      - Hop
+      - path: Hop
+        excludes:
+          # Kept in source control for bridge/schema review tooling; the app
+          # never reads this build-time manifest at runtime.
+          - Resources/xray-client-schema-v26.6.27.json
       - Shared
       - path: Geodata/geoip.dat
         buildPhase: resources

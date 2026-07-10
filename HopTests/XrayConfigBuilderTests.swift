@@ -4,6 +4,27 @@ import XCTest
 final class XrayConfigBuilderTests: XCTestCase {
     private let builder = XrayConfigBuilder()
 
+    func testRenderedConfigIsCompactAndDeterministic() throws {
+        let profile = basicVLESS()
+        let first = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let second = try builder.build(profile: profile, routingMode: .global, rules: [])
+
+        XCTAssertEqual(first, second)
+        XCTAssertFalse(first.contains("\n"))
+        _ = try parse(first)
+    }
+
+    func testAdvancedEncodedByteCountMatchesEditableJSON() {
+        let document = XrayAdvancedDocument([
+            "nested": .object([
+                "unicode": .string("東京"),
+                "path": .string("/a/b\nnext"),
+            ]),
+        ])
+
+        XCTAssertEqual(document.encodedByteCount, document.jsonString.utf8.count)
+    }
+
     func testBuildsVLESSRealityPostQuantumConfigAndExactCoreAcceptsIt() async throws {
         let profile = try ProxyProfile(
             id: XCTUnwrap(UUID(uuidString: "00000000-0000-4000-8000-000000000001")),

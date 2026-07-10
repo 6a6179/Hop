@@ -80,13 +80,24 @@ extension SubscriptionFetcher: URLSessionDataDelegate {
             completionHandler(.cancel)
             return
         }
+        if response.expectedContentLength > 0 {
+            // The declared length has already passed the hard cap above, so
+            // reserving it avoids repeated growth/copies without trusting the
+            // server with an unbounded allocation.
+            lock.lock()
+            received.reserveCapacity(Int(response.expectedContentLength))
+            lock.unlock()
+        }
         completionHandler(.allow)
     }
 
     func urlSession(_: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         lock.lock()
-        received.append(data)
-        let exceeded = received.count > ImportPolicy.maxPayloadBytes
+        let remaining = max(0, ImportPolicy.maxPayloadBytes - received.count)
+        let exceeded = data.count > remaining
+        if !exceeded {
+            received.append(data)
+        }
         lock.unlock()
 
         if exceeded {

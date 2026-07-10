@@ -45,23 +45,30 @@ enum HopSecret {
 /// Replaces secret tokens in a generated config with the real values resolved
 /// from a `SecretStore`. Runs in the packet-tunnel extension at start time.
 enum SecretResolver {
+    /// Keys referenced by whole JSON-string tokens bearing `nonce`.
+    /// Foreign or embedded token-looking text stays inert, matching `resolve`.
+    static func referencedKeys(in config: String, nonce: String) -> Set<String> {
+        guard let (text, matches) = tokenMatches(in: config, nonce: nonce) else {
+            return []
+        }
+        return Set(matches.lazy.map { text.substring(with: $0.range(at: 1)) })
+    }
+
     /// Returns the config with every secret token bearing `nonce` replaced by
     /// its resolved value (JSON-escaped), plus the number of *nonce-matching*
     /// tokens that could not be resolved (for diagnostics / fail-closed checks).
     /// Tokens with a missing or foreign nonce are not matched and are left in
     /// place untouched — they are treated as inert literal text, never resolved.
     static func resolve(_ config: String, nonce: String, using store: SecretStore = .shared) -> (config: String, unresolved: Int) {
-        guard !nonce.isEmpty, let regex = try? NSRegularExpression(pattern: HopSecret.tokenPattern(nonce: nonce)) else {
+        guard let (text, matches) = tokenMatches(in: config, nonce: nonce) else {
             return (config, 0)
         }
-
-        let text = config as NSString
-        let matches = regex.matches(in: config, range: NSRange(location: 0, length: text.length))
         guard !matches.isEmpty else {
             return (config, 0)
         }
 
         var result = ""
+        result.reserveCapacity(config.utf8.count)
         var cursor = 0
         var unresolved = 0
 
@@ -81,6 +88,16 @@ enum SecretResolver {
         result += text.substring(from: cursor)
 
         return (result, unresolved)
+    }
+
+    private static func tokenMatches(in config: String, nonce: String) -> (NSString, [NSTextCheckingResult])? {
+        guard !nonce.isEmpty,
+              let regex = try? NSRegularExpression(pattern: HopSecret.tokenPattern(nonce: nonce))
+        else {
+            return nil
+        }
+        let text = config as NSString
+        return (text, regex.matches(in: config, range: NSRange(location: 0, length: text.length)))
     }
 
     /// Encodes a string as a JSON string literal (including surrounding quotes),

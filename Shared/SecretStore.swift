@@ -6,6 +6,10 @@ import Security
 /// unsigned simulator unit tests).
 protocol SecretBackend: Sendable {
     func value(forKey key: String) -> String?
+    /// All stored values keyed by account. Backends with a bulk-read API
+    /// should override this so app startup does not pay one secure-store
+    /// round-trip for every profile field.
+    func allValues() -> [String: String]
     /// Returns whether the write landed in the backing store, so callers that
     /// cache "already written" state (`HopAppDataStore`) can retry after a
     /// silent Keychain failure instead of skipping forever.
@@ -17,6 +21,18 @@ protocol SecretBackend: Sendable {
     /// All stored keys; lets `replaceAll` prune stale items without a blanket
     /// delete-everything-first pass.
     func allKeys() -> [String]
+}
+
+extension SecretBackend {
+    /// Compatibility implementation for simple/test backends. The Keychain
+    /// backend overrides this with one `SecItemCopyMatching` query.
+    func allValues() -> [String: String] {
+        var values: [String: String] = [:]
+        for key in allKeys() {
+            values[key] = value(forKey: key)
+        }
+        return values
+    }
 }
 
 /// Store for proxy secrets (passwords, UUIDs, private keys), shared between the
@@ -53,6 +69,12 @@ struct SecretStore {
 
     func value(forKey key: String) -> String? {
         backend.value(forKey: key)
+    }
+
+    /// Takes one snapshot of the profile-secret service for app-state
+    /// hydration. Per-key reads remain available for tunnel token resolution.
+    func allValues() -> [String: String] {
+        backend.allValues()
     }
 
     @discardableResult
@@ -189,6 +211,10 @@ struct KeychainSecretBackend: SecretBackend {
         keys(includeGroup: accessGroup != nil)
     }
 
+    func allValues() -> [String: String] {
+        values(includeGroup: accessGroup != nil)
+    }
+
     private func keys(includeGroup: Bool) -> [String] {
         var query = baseQuery(account: nil, includeGroup: includeGroup)
         query[kSecReturnAttributes as String] = true
@@ -204,6 +230,49 @@ struct KeychainSecretBackend: SecretBackend {
             return []
         }
         return items.compactMap { $0[kSecAttrAccount as String] as? String }
+    }
+
+    /// Reads every account and value for this service in one Keychain query.
+    /// `HopAppDataStore.load` already materializes all profile credentials in
+    /// memory, so this changes the number of Keychain round-trips rather than
+    /// the set of secrets the app hydrates.
+    private func values(includeGroup: Bool) -> [String: String] {
+        var query = baseQuery(account: nil, includeGroup: includeGroup)
+        query[kSecReturnAttributes as String] = true
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecMissingEntitlement, includeGroup {
+            _ = Self.didLogEntitlementFallback
+            return values(includeGroup: false)
+        }
+        guard status == errSecSuccess else {
+            return [:]
+        }
+
+        let items: [[String: Any]]
+        if let matches = result as? [[String: Any]] {
+            items = matches
+        } else if let match = result as? [String: Any] {
+            items = [match]
+        } else {
+            return [:]
+        }
+
+        var values: [String: String] = [:]
+        values.reserveCapacity(items.count)
+        for item in items {
+            guard let key = item[kSecAttrAccount as String] as? String,
+                  let data = item[kSecValueData as String] as? Data,
+                  let value = String(data: data, encoding: .utf8)
+            else {
+                continue
+            }
+            values[key] = value
+        }
+        return values
     }
 
     private func read(account: String, includeGroup: Bool) -> String? {

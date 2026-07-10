@@ -49,15 +49,18 @@ struct XrayAdvancedDocument: Hashable, Codable, Sendable {
     }
 
     var jsonString: String {
-        let data = try? JSONSerialization.data(
-            withJSONObject: JSONValue.object(values).foundationValue,
-            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes],
-        )
-        return data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        encodedData.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
     }
 
     var encodedByteCount: Int {
-        jsonString.lengthOfBytes(using: .utf8)
+        encodedData?.count ?? 2
+    }
+
+    private var encodedData: Data? {
+        try? JSONSerialization.data(
+            withJSONObject: JSONValue.object(values).foundationValue,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes],
+        )
     }
 
     var isEmpty: Bool {

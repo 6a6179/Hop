@@ -107,7 +107,7 @@ struct SettingsView: View {
             Section("About") {
                 LabeledContent("Mode", value: "Packet tunnel")
                 LabeledContent("Engine", value: "Xray-core v26.6.27")
-                Text("Hop is original software and does not copy Shadowrocket assets, branding, or App Store metadata.")
+                Text("Hop is independently developed software.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -131,6 +131,8 @@ private struct XrayAdvancedSettingsView: View {
     @State private var didLoad = false
 
     var body: some View {
+        let validation = advancedValidation
+
         Form {
             Section {
                 TextEditor(text: $json)
@@ -142,7 +144,7 @@ private struct XrayAdvancedSettingsView: View {
                 Text("Accepts client-side DNS, FakeDNS, routing, policy, balancing, observatory, and verified local-geodata overrides. Hop owns the TUN inbound, logging, and all listeners.")
             }
 
-            if let errorMessage {
+            if let errorMessage = validation.errorMessage {
                 Section {
                     Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -154,13 +156,15 @@ private struct XrayAdvancedSettingsView: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
-                    guard let document else { return }
+                    // Revalidate on the explicit save action so a stale
+                    // rendered button can never admit changed JSON.
+                    guard let document = advancedValidation.document else { return }
                     var settings = store.settings
                     settings.xrayAdvanced = document.isEmpty ? nil : document
                     store.settings = settings
                     dismiss()
                 }
-                .disabled(document == nil)
+                .disabled(validation.document == nil)
             }
         }
         .onAppear {
@@ -170,17 +174,9 @@ private struct XrayAdvancedSettingsView: View {
         }
     }
 
-    private var document: XrayAdvancedDocument? {
-        guard errorMessage == nil else { return nil }
-        return try? XrayAdvancedDocument(jsonString: json)
-    }
-
-    private var errorMessage: String? {
+    private var advancedValidation: (document: XrayAdvancedDocument?, errorMessage: String?) {
         do {
             let document = try XrayAdvancedDocument(jsonString: json)
-            guard document.encodedByteCount <= IOSRuntimeLimits.default.maxGlobalAdvancedBytes else {
-                return "Advanced global JSON exceeds the 256 KiB iOS limit."
-            }
             var candidateSettings = store.settings
             candidateSettings.xrayAdvanced = document.isEmpty ? nil : document
             if let issue = XrayConfigBuilder().validationIssues(
@@ -191,11 +187,11 @@ private struct XrayAdvancedSettingsView: View {
                 rules: [],
                 settings: candidateSettings,
             ).first {
-                return "\(issue.path): \(issue.message)"
+                return (nil, "\(issue.path): \(issue.message)")
             }
-            return nil
+            return (document, nil)
         } catch {
-            return error.localizedDescription
+            return (nil, error.localizedDescription)
         }
     }
 }

@@ -52,10 +52,11 @@ struct ImportTextSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Paste node links, subscription text, or Shadowrocket .conf", text: $importText, axis: .vertical)
+                    TextField("Paste node links, subscription text, or a compatible .conf file", text: $importText, axis: .vertical)
                         .lineLimit(6 ... 14)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+                        .disabled(isLoading)
 
                     Button {
                         previewImport()
@@ -200,10 +201,20 @@ struct ImportTextSheet: View {
                 }
             }
         case let .importText(text):
-            do {
-                importResult = try importService.importText(text)
-            } catch {
-                importError = error.localizedDescription
+            isLoading = true
+            Task {
+                do {
+                    let result = try await importService.importTextOffMain(text)
+                    await MainActor.run {
+                        importResult = result
+                        isLoading = false
+                    }
+                } catch {
+                    await MainActor.run {
+                        importError = error.localizedDescription
+                        isLoading = false
+                    }
+                }
             }
         }
     }

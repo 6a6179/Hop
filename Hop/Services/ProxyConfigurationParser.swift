@@ -1,22 +1,21 @@
 import Foundation
 
-/// Shadowrocket `.conf` parsing: `[Proxy]`, `[Proxy Group]`, and `[Rule]`
+/// Compatible `.conf` parsing for `[Proxy]`, `[Proxy Group]`, and `[Rule]`
 /// sections. Split from the share-link parsing in `ProxyLinkParser.swift`;
 /// `importText` routes here when the payload looks like a config file.
 extension ProxyImportService {
-    func parseShadowrocketConfig(_ text: String) -> ImportResult {
+    func parseProxyConfiguration(_ text: String) -> ImportResult {
         var result = ImportResult()
         var section = ""
         var sawInventorySection = false
         var sawRuleSection = false
         var attemptedInventoryItem = false
-        let lines = text.components(separatedBy: .newlines)
-        let wasTruncated = lines.count > ImportPolicy.maxLines
+        var wasTruncated = false
 
-        for rawLine in lines.prefix(ImportPolicy.maxLines) {
+        func parseLine(_ rawLine: Substring) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !line.isEmpty, !line.hasPrefix("#"), !line.hasPrefix(";") else {
-                continue
+                return
             }
 
             if line.hasPrefix("["), line.hasSuffix("]") {
@@ -26,21 +25,50 @@ extension ProxyImportService {
                 } else if section == "rule" {
                     sawRuleSection = true
                 }
-                continue
+                return
             }
 
             switch section {
             case "proxy":
                 attemptedInventoryItem = true
-                parseShadowrocketProxyLine(line, into: &result)
+                parseProxyLine(line, into: &result)
             case "proxy group":
                 attemptedInventoryItem = true
-                parseShadowrocketGroupLine(line, into: &result)
+                parseProxyGroupLine(line, into: &result)
             case "rule":
-                parseShadowrocketRuleLine(line, into: &result)
+                parseProxyRuleLine(line, into: &result)
             default:
-                continue
+                return
             }
+        }
+
+        // `components(separatedBy:).prefix(...)` allocates every line before
+        // applying the cap. Walk Unicode scalars so CharacterSet newline
+        // semantics (including CRLF as two separators) stay identical, but
+        // stop as soon as the first line beyond the budget is proven to exist.
+        let scalars = text.unicodeScalars
+        var lineStart = scalars.startIndex
+        var scalarIndex = scalars.startIndex
+        var parsedLineCount = 0
+        while scalarIndex < scalars.endIndex {
+            let scalar = scalars[scalarIndex]
+            let nextIndex = scalars.index(after: scalarIndex)
+            if CharacterSet.newlines.contains(scalar) {
+                parseLine(text[lineStart ..< scalarIndex])
+                parsedLineCount += 1
+                if parsedLineCount >= ImportPolicy.maxLines {
+                    // A separator after the max-th component guarantees the
+                    // same `lines.count > maxLines` result as the eager split,
+                    // even when the following component is empty.
+                    wasTruncated = true
+                    break
+                }
+                lineStart = nextIndex
+            }
+            scalarIndex = nextIndex
+        }
+        if !wasTruncated, parsedLineCount < ImportPolicy.maxLines {
+            parseLine(text[lineStart ..< scalars.endIndex])
         }
 
         if sawInventorySection,
@@ -58,7 +86,7 @@ extension ProxyImportService {
         return result
     }
 
-    private func parseShadowrocketProxyLine(_ line: String, into result: inout ImportResult) {
+    private func parseProxyLine(_ line: String, into result: inout ImportResult) {
         let parts = csvParts(line)
         guard let nameAndType = parts.first?.split(separator: "=", maxSplits: 1).map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }),
               nameAndType.count == 2
@@ -81,7 +109,7 @@ extension ProxyImportService {
         }
 
         let host = values[0].trimmingCharacters(in: .whitespacesAndNewlines)
-        let security = shadowrocketSecurity(keyed: keyed, host: host, type: type)
+        let security = configurationSecurity(keyed: keyed, host: host, type: type)
 
         let profile: ProxyProfile?
         switch type {
@@ -98,19 +126,19 @@ extension ProxyImportService {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): VMess requires password UUID."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vmess(VMessOptions(uuid: password, security: keyed["method"] ?? values[safe: 2] ?? "auto", alterID: Int(keyed["alterid"] ?? keyed["alter-id"] ?? "0") ?? 0)), security: security, transport: shadowrocketTransport(keyed: keyed))
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vmess(VMessOptions(uuid: password, security: keyed["method"] ?? values[safe: 2] ?? "auto", alterID: Int(keyed["alterid"] ?? keyed["alter-id"] ?? "0") ?? 0)), security: security, transport: configurationTransport(keyed: keyed))
         case "vless":
             guard let password = keyed["password"] ?? keyed["uuid"] ?? values[safe: 2] else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): VLESS requires password UUID."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vless(VLESSOptions(uuid: password, flow: keyed["flow"], encryption: keyed["encryption"])), security: security, transport: shadowrocketTransport(keyed: keyed))
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vless(VLESSOptions(uuid: password, flow: keyed["flow"], encryption: keyed["encryption"])), security: security, transport: configurationTransport(keyed: keyed))
         case "trojan":
             guard let password = keyed["password"] ?? values[safe: 2] else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Trojan requires password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .trojan(TrojanOptions(password: password)), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security, transport: shadowrocketTransport(keyed: keyed))
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .trojan(TrojanOptions(password: password)), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security, transport: configurationTransport(keyed: keyed))
         case "hysteria", "hysteria2":
             guard let auth = keyed["auth"] ?? keyed["password"] ?? values[safe: 2] else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Hysteria2 requires auth/password."))
@@ -153,7 +181,7 @@ extension ProxyImportService {
         }
     }
 
-    private func parseShadowrocketGroupLine(_ line: String, into result: inout ImportResult) {
+    private func parseProxyGroupLine(_ line: String, into result: inout ImportResult) {
         let parts = csvParts(line)
         guard let first = parts.first?.split(separator: "=", maxSplits: 1).map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }),
               first.count == 2
@@ -167,7 +195,7 @@ extension ProxyImportService {
         let values = Array(parts.dropFirst())
         let keyed = keyedOptions(values)
         let memberNames = values.filter { !$0.contains("=") }
-        let members = memberNames.map { shadowrocketTarget($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        let members = memberNames.map { configurationTarget($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
 
         switch importedType {
         case "select":
@@ -176,7 +204,7 @@ extension ProxyImportService {
                     name: name,
                     type: .select,
                     members: members,
-                    defaultTarget: keyed["policy-select-name"].map(shadowrocketTarget) ?? members.first,
+                    defaultTarget: keyed["policy-select-name"].map(configurationTarget) ?? members.first,
                     importedType: importedType,
                 ),
             )
@@ -234,14 +262,14 @@ extension ProxyImportService {
                     members: members,
                     isEnabled: false,
                     importedType: importedType,
-                    warning: "Unsupported Shadowrocket group type: \(importedType)",
+                    warning: "Unsupported proxy group type: \(importedType)",
                 ),
             )
             result.warnings.append(ImportWarning(message: "Group \(name) uses unsupported type \(importedType)."))
         }
     }
 
-    private func parseShadowrocketRuleLine(_ line: String, into result: inout ImportResult) {
+    private func parseProxyRuleLine(_ line: String, into result: inout ImportResult) {
         let parts = csvParts(line)
         guard parts.count >= 2 else {
             result.warnings.append(ImportWarning(message: "Skipped malformed rule: \(ImportPolicy.redactForLog(line))"))
@@ -264,7 +292,7 @@ extension ProxyImportService {
             targetName = parts[2].trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        guard let kind = shadowrocketRuleKind(kindName) else {
+        guard let kind = configurationRuleKind(kindName) else {
             result.warnings.append(ImportWarning(message: "Skipped unsupported rule type \(kindName)."))
             return
         }
@@ -274,10 +302,10 @@ extension ProxyImportService {
             return
         }
 
-        result.rules.append(RoutingRule(kind: kind, value: value, target: shadowrocketTarget(targetName)))
+        result.rules.append(RoutingRule(kind: kind, value: value, target: configurationTarget(targetName)))
     }
 
-    private func shadowrocketSecurity(keyed: [String: String], host: String, type: String) -> ProxySecurity {
+    private func configurationSecurity(keyed: [String: String], host: String, type: String) -> ProxySecurity {
         let security = (keyedValue(keyed, "security", "tls") ?? "").lowercased()
         let serverName = keyedValue(keyed, "peer", "sni", "servername", "server_name", "server-name") ?? host
         let alpn = alpnValues(from: keyedValue(keyed, "alpn"))
@@ -328,7 +356,7 @@ extension ProxyImportService {
         )
     }
 
-    private func shadowrocketTransport(keyed: [String: String]) -> TransportOptions {
+    private func configurationTransport(keyed: [String: String]) -> TransportOptions {
         switch (keyed["obfs"] ?? keyed["type"] ?? "").lowercased() {
         case "websocket", "ws":
             TransportOptions(type: .websocket, path: keyed["path"] ?? keyed["obfs-uri"], host: keyed["host"] ?? keyed["obfs-host"], serviceName: nil)
@@ -347,7 +375,7 @@ extension ProxyImportService {
         }
     }
 
-    private func shadowrocketRuleKind(_ value: String) -> RoutingRuleKind? {
+    private func configurationRuleKind(_ value: String) -> RoutingRuleKind? {
         switch value {
         case "DOMAIN":
             .domain
@@ -372,7 +400,7 @@ extension ProxyImportService {
         }
     }
 
-    private func shadowrocketTarget(_ value: String) -> OutboundTarget {
+    private func configurationTarget(_ value: String) -> OutboundTarget {
         switch value.lowercased() {
         case "direct":
             .direct
@@ -385,7 +413,7 @@ extension ProxyImportService {
         }
     }
 
-    /// Splits a Shadowrocket line on commas, honoring double-quoted segments.
+    /// Splits a proxy configuration line on commas, honoring double-quoted segments.
     private func csvParts(_ line: String) -> [String] {
         var result: [String] = []
         var current = ""

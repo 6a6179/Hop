@@ -109,6 +109,7 @@ final class HopStore {
 
     private let dataStore: HopAppDataStore
     private let latencyTester = LatencyTester()
+    @ObservationIgnored private let latencyProbeHostResolver: @Sendable (String) -> String?
     private let importService = ProxyImportService()
     @ObservationIgnored private var logPersistTask: Task<Void, Never>?
     /// Suppresses the per-`didSet` persist while a multi-property mutation runs;
@@ -138,11 +139,15 @@ final class HopStore {
         settings: AppSettings? = nil,
         tunnel: TunnelController? = nil,
         dataStore: HopAppDataStore = HopAppDataStore(),
+        latencyProbeHostResolver: @escaping @Sendable (String) -> String? = {
+            ImportPolicy.resolvedPublicAddressForProbe($0)
+        },
         maxRetainedSubscriptionItems: Int = ImportPolicy.maxImportedItems,
         maxRetainedSubscriptionSecretItems: Int = ImportPolicy.maxRetainedSubscriptionSecretItems,
         maxRetainedSubscriptionBytes: Int = ImportPolicy.maxRetainedSubscriptionBytes,
     ) {
         self.dataStore = dataStore
+        self.latencyProbeHostResolver = latencyProbeHostResolver
         self.maxRetainedSubscriptionItems = maxRetainedSubscriptionItems
         self.maxRetainedSubscriptionSecretItems = maxRetainedSubscriptionSecretItems
         self.maxRetainedSubscriptionBytes = maxRetainedSubscriptionBytes
@@ -897,12 +902,15 @@ final class HopStore {
         // otherwise turn the "test latency" action into a LAN scanner. This
         // mirrors the SSRF policy applied to subscription fetches.
         let host = profile.endpoint.host
-        guard let probeHost = ImportPolicy.resolvedPublicAddressForProbe(host)
-        else {
+        let resolver = latencyProbeHostResolver
+        nodeLatencies[profile.id] = .testing
+        let probeHost = await Task.detached(priority: .userInitiated) {
+            resolver(host)
+        }.value
+        guard let probeHost else {
             nodeLatencies[profile.id] = .failure("Endpoint host is not permitted for latency testing")
             return
         }
-        nodeLatencies[profile.id] = .testing
         let result = await latencyTester.measure(
             host: probeHost,
             port: profile.endpoint.port,

@@ -50,19 +50,28 @@ struct ProxyImportService {
         return try importText(rawValue, depth: 0)
     }
 
+    /// Parses bounded local/subscription payloads away from UI actors. The
+    /// parser is value-only; the sendable box never escapes this await.
+    func importTextOffMain(_ rawValue: String) async throws -> ImportResult {
+        let snapshot = try await Task.detached(priority: .userInitiated) {
+            try SendableImportResult(ProxyImportService().importText(rawValue))
+        }.value
+        return snapshot.value
+    }
+
     private func importText(_ rawValue: String, depth: Int) throws -> ImportResult {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw ProxyLinkParseError.invalidURL
         }
 
-        if looksLikeShadowrocketConfig(trimmed) {
-            return parseShadowrocketConfig(trimmed).sanitizingNames().truncated(to: ImportPolicy.maxImportedItems)
+        if looksLikeProxyConfiguration(trimmed) {
+            return parseProxyConfiguration(trimmed).sanitizingNames().truncated(to: ImportPolicy.maxImportedItems)
         }
 
         let decoded = decodeBase64String(trimmed)
-        if let decoded, looksLikeShadowrocketConfig(decoded) {
-            return parseShadowrocketConfig(decoded).sanitizingNames().truncated(to: ImportPolicy.maxImportedItems)
+        if let decoded, looksLikeProxyConfiguration(decoded) {
+            return parseProxyConfiguration(decoded).sanitizingNames().truncated(to: ImportPolicy.maxImportedItems)
         }
 
         let lines = importLines(from: decoded ?? trimmed)
@@ -111,7 +120,7 @@ struct ProxyImportService {
         guard let text = String(data: data, encoding: .utf8) else {
             throw ProxyLinkParseError.invalidURL
         }
-        return try importText(text)
+        return try await importTextOffMain(text)
     }
 
     private func parseProfileLink(_ rawValue: String) throws -> ProxyProfile {
@@ -659,19 +668,58 @@ struct ProxyImportService {
     }
 
     private func importLines(from text: String) -> [String] {
-        text.components(separatedBy: .newlines)
-            .prefix(ImportPolicy.maxLines)
-            .flatMap { $0.components(separatedBy: CharacterSet(charactersIn: " \t")) }
-            // Re-cap after whitespace tokenization: a single newline-free line
-            // packed with spaces yields one "line" that explodes into millions
-            // of tokens, each then fed to URLComponents (CPU/memory DoS).
-            .prefix(ImportPolicy.maxLines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .filter { URLComponents(string: $0)?.scheme != nil }
+        // `components(...).prefix(...)` is still eager: a 5 MiB payload made
+        // only of newlines or spaces can allocate millions of tiny Strings
+        // before `prefix` applies. Scan once and stop as soon as either budget
+        // is exhausted, materializing only tokens that may be imported.
+        var imported: [String] = []
+        imported.reserveCapacity(min(ImportPolicy.maxLines, 256))
+
+        let scalars = text.unicodeScalars
+        var componentStart = scalars.startIndex
+        var lineCount = 1
+        var componentCount = 0
+        var reachedLimit = false
+
+        func finishComponent(at end: String.Index) {
+            componentCount += 1
+            let token = text[componentStart ..< end]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !token.isEmpty, URLComponents(string: token)?.scheme != nil {
+                imported.append(token)
+            }
+            reachedLimit = componentCount >= ImportPolicy.maxLines
+        }
+
+        var index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            let nextIndex = scalars.index(after: index)
+            let isNewline = CharacterSet.newlines.contains(scalar)
+            if isNewline || scalar.value == 0x20 || scalar.value == 0x09 {
+                finishComponent(at: index)
+                if reachedLimit {
+                    break
+                }
+                componentStart = nextIndex
+                if isNewline {
+                    if lineCount >= ImportPolicy.maxLines {
+                        reachedLimit = true
+                        break
+                    }
+                    lineCount += 1
+                }
+            }
+            index = nextIndex
+        }
+
+        if !reachedLimit {
+            finishComponent(at: scalars.endIndex)
+        }
+        return imported
     }
 
-    private func looksLikeShadowrocketConfig(_ text: String) -> Bool {
+    private func looksLikeProxyConfiguration(_ text: String) -> Bool {
         text.contains("[Proxy]") || text.contains("[Proxy Group]") || text.contains("[Rule]")
     }
 
@@ -763,6 +811,16 @@ struct ProxyImportService {
 
     private func intValueOrZero(_ value: Any?) -> Int {
         (try? intValue(value, error: .missingCredentials)) ?? 0
+    }
+}
+
+/// `ImportResult` and every nested import model are value-semantic snapshots.
+/// Keep the unchecked boundary private and scoped to one detached parse.
+private struct SendableImportResult: @unchecked Sendable {
+    let value: ImportResult
+
+    init(_ value: ImportResult) {
+        self.value = value
     }
 }
 

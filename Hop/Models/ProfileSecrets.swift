@@ -30,8 +30,18 @@ extension SubscriptionSource {
     }
 
     func hydratingSecrets(from store: SecretStore) -> SubscriptionSource {
+        hydratingSecrets { store.value(forKey: $0) }
+    }
+
+    /// Bulk-hydration path used by app-state loading after taking one
+    /// Keychain snapshot for every profile and subscription.
+    func hydratingSecrets(from values: [String: String]) -> SubscriptionSource {
+        hydratingSecrets { values[$0] }
+    }
+
+    private func hydratingSecrets(valueForKey: (String) -> String?) -> SubscriptionSource {
         var copy = self
-        copy.url = store.value(forKey: HopSecret.subscriptionURLKey(subscriptionID: id)) ?? url
+        copy.url = valueForKey(HopSecret.subscriptionURLKey(subscriptionID: id)) ?? url
         return copy
     }
 
@@ -146,12 +156,22 @@ extension ProxyProfile {
     /// A copy with secret fields filled from the Keychain (used on load). Fields
     /// absent from the store keep their decoded value.
     func hydratingSecrets(from store: SecretStore) -> ProxyProfile {
+        hydratingSecrets { store.value(forKey: $0) }
+    }
+
+    /// Bulk-hydration path used by app-state loading after taking one
+    /// Keychain snapshot for every profile and subscription.
+    func hydratingSecrets(from values: [String: String]) -> ProxyProfile {
+        hydratingSecrets { values[$0] }
+    }
+
+    private func hydratingSecrets(valueForKey: (String) -> String?) -> ProxyProfile {
         let id = id
         return rewritingSecrets { fieldRaw, value in
-            store.value(forKey: HopSecret.key(profileID: id, fieldRaw: fieldRaw)) ?? value
+            valueForKey(HopSecret.key(profileID: id, fieldRaw: fieldRaw)) ?? value
         }.rewritingAdvancedSecrets { pointer, value in
             let key = HopSecret.key(profileID: id, fieldRaw: XrayAdvancedSecret.fieldRaw(for: pointer))
-            if let stored = store.value(forKey: key) {
+            if let stored = valueForKey(key) {
                 return stored
             }
             return XrayAdvancedSecret.isPersistentReference(value) ? "" : value

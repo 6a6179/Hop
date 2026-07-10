@@ -27,6 +27,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
     private lazy var platformInterface = HopPlatformInterface(provider: self)
     private let serviceStateLock = NSLock()
+    /// Serializes the full start/stop lifecycle around LibXray's single core.
+    private let serviceQueue = DispatchQueue(label: "cat.string.hop.tunnel-service", qos: .userInitiated)
     private let memoryQueue = DispatchQueue(label: "cat.string.hop.tunnel-memory", qos: .utility)
     private let tunnelLogLock = NSLock()
 
@@ -52,7 +54,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
         // Applying NE settings and starting Go are synchronous from Swift's
         // perspective. Never block NetworkExtension's callback thread.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        serviceQueue.async { [weak self] in
             self?.startTunnelOnWorker(request: request, completionHandler: completionHandler)
         }
     }
@@ -84,10 +86,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         }
     }
 
-    override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
-        writeTunnelLog("PacketTunnelProvider.stopTunnel reason=\(reason.rawValue)")
-        stopService(logErrors: true)
-        completionHandler()
+    override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping @Sendable () -> Void) {
+        serviceQueue.async { [weak self] in
+            self?.writeTunnelLog("PacketTunnelProvider.stopTunnel reason=\(reason.rawValue)")
+            self?.stopService(logErrors: true)
+            completionHandler()
+        }
     }
 
     #if canImport(LibXray)
@@ -275,7 +279,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             "error": "none",
             "loglevel": requestedLevel,
         ]
-        let encoded = try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+        let encoded = try JSONSerialization.data(
+            withJSONObject: root,
+            options: [.sortedKeys, .withoutEscapingSlashes],
+        )
         guard encoded.count <= Self.maxConfigBytes,
               let result = String(data: encoded, encoding: .utf8)
         else {
@@ -373,10 +380,11 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
     func writeTunnelLog(_ message: String) {
         guard let logURL else { return }
-        let sanitized = message
+        // Detach a bounded prefix before splitting so a remote-controlled
+        // multi-megabyte error cannot create an unbounded substring array.
+        let sanitized = String(message.prefix(Self.maxLogMessageCharacters))
             .components(separatedBy: .newlines)
             .joined(separator: " ")
-            .prefix(Self.maxLogMessageCharacters)
 
         tunnelLogLock.lock()
         defer { tunnelLogLock.unlock() }

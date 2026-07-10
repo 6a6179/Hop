@@ -152,8 +152,15 @@ struct HopAppDataStore {
         // it in place.
         let hadInlineProfileSecrets = decoded.profiles.contains { !$0.keychainSecretItems.isEmpty }
         let hadInlineSubscriptionURLs = decoded.subscriptions.contains { !$0.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        decoded.profiles = decoded.profiles.map { $0.hydratingSecrets(from: secretStore) }
-        decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: secretStore) }
+        if !decoded.profiles.isEmpty || !decoded.subscriptions.isEmpty {
+            // One Keychain snapshot replaces a separate SecItem lookup for
+            // every protocol, REALITY, WireGuard-peer, advanced-JSON, and
+            // subscription-URL field. App-state loading already hydrates all
+            // of these values into memory; only the round-trip count changes.
+            let storedSecrets = secretStore.allValues()
+            decoded.profiles = decoded.profiles.map { $0.hydratingSecrets(from: storedSecrets) }
+            decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: storedSecrets) }
+        }
         if !hadAuthenticationSecret || hadInlineProfileSecrets || hadInlineSubscriptionURLs || didMigrateToXray || didMigrateSubscriptionProvenance || didMigrateAdvancedTLS || didMigrateLegacyLogState {
             save(decoded) // move secrets to the Keychain and rewrite the JSON without them
         }

@@ -78,6 +78,37 @@ final class LatencyTesterTests: XCTestCase {
         XCTAssertEqual(store.nodeLatencies[profile.id], .failure("Endpoint host is not permitted for latency testing"))
     }
 
+    @MainActor
+    func testStoreResolvesLatencyProbeHostOffMainActor() async {
+        let profile = ProxyProfile(
+            name: "Resolver Test",
+            endpoint: Endpoint(host: "resolver.example", port: 443),
+            options: .trojan(TrojanOptions(password: "secret")),
+            security: .tls(TLSOptions(serverName: "resolver.example")),
+        )
+        let store = HopStore(
+            profiles: [profile],
+            groups: [],
+            subscriptions: [],
+            ruleConfigurations: [],
+            activeRuleConfigurationID: nil,
+            routingMode: .global,
+            selectedTarget: .profile(profile.id),
+            settings: .defaults,
+            tunnel: TunnelController(logs: []),
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
+            latencyProbeHostResolver: { host in
+                XCTAssertEqual(host, "resolver.example")
+                XCTAssertFalse(Thread.isMainThread)
+                return nil
+            },
+        )
+
+        await store.testLatency(for: profile)
+
+        XCTAssertEqual(store.nodeLatencies[profile.id], .failure("Endpoint host is not permitted for latency testing"))
+    }
+
     // MARK: - ICMP packet construction
 
     func testICMPv4EchoRequestHasValidChecksum() {

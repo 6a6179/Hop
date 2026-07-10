@@ -126,7 +126,10 @@ struct XrayConfigBuilder {
         try validateRenderedLimits(root)
         let data = try JSONSerialization.data(
             withJSONObject: JSONValue.object(root).foundationValue,
-            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes],
+            // This file is read by machines, not edited by users. Compact JSON
+            // cuts the bytes copied, authenticated, scanned for secret tokens,
+            // and parsed on every tunnel start; sorted keys keep it deterministic.
+            options: [.sortedKeys, .withoutEscapingSlashes],
         )
         try require(
             data.count <= limits.maxRenderedConfigBytes,
@@ -608,12 +611,21 @@ private extension XrayConfigBuilder {
         )
         try require(["native", "xorpub", "random"].contains(parts[1].lowercased()), path: path, "Unsupported VLESS Encryption/Auth mode.")
         try require(["0rtt", "1rtt"].contains(parts[2].lowercased()), path: path, "Unsupported VLESS Encryption/Auth handshake mode.")
-        let payload = parts.dropFirst(3)
-        let authenticationKeys = payload.filter { rawBase64URLByteCount($0) == 32 || rawBase64URLByteCount($0) == 1184 }.count
-        let paddingValues = payload.filter { $0.count < 20 }
-        let padding = paddingValues.count
+        var authenticationKeys = 0
+        var padding = 0
+        var paddingIsValid = true
+        for value in parts.dropFirst(3) {
+            let byteCount = rawBase64URLByteCount(value)
+            if byteCount == 32 || byteCount == 1184 {
+                authenticationKeys += 1
+            }
+            if value.count < 20 {
+                padding += 1
+                paddingIsValid = paddingIsValid && validVLESSPaddingDirective(value)
+            }
+        }
         try require(authenticationKeys > 0, path: path, "VLESS Encryption/Auth requires an X25519 or ML-KEM authentication key.")
-        try require(paddingValues.allSatisfy(validVLESSPaddingDirective), path: path, "VLESS Encryption/Auth contains an invalid padding directive.")
+        try require(paddingIsValid, path: path, "VLESS Encryption/Auth contains an invalid padding directive.")
         try require(authenticationKeys <= limits.maxVLESSAuthenticationKeys, path: path, "VLESS Encryption/Auth exceeds the \(limits.maxVLESSAuthenticationKeys)-key iOS limit.")
         try require(padding <= limits.maxVLESSPaddingDirectives, path: path, "VLESS Encryption/Auth exceeds the \(limits.maxVLESSPaddingDirectives)-directive iOS padding limit.")
     }
@@ -676,8 +688,9 @@ private extension XrayConfigBuilder {
         try validateForbiddenFields(.object(advanced.values), path: "\(path)/xrayAdvanced")
 
         if let settings = advanced.values["settings"] {
+            let typedSettingKeys = typedProtocolSettingKeys(for: profile.proto)
             if let object = settings.objectValue,
-               let collision = object.keys.sorted().first(where: { typedProtocolSettingKeys(for: profile.proto).contains($0) })
+               let collision = object.keys.sorted().first(where: typedSettingKeys.contains)
             {
                 try require(false, path: "\(path)/xrayAdvanced/settings/\(collision)", "Advanced JSON collides with a typed or iOS-enforced field.")
             }
@@ -1676,9 +1689,12 @@ private extension XrayConfigBuilder {
     }
 
     func uniqueCaseInsensitiveValue(_ name: String, in object: JSONObject, path: String) throws -> JSONValue? {
-        let matches = object.keys.filter { jsonKeyEquals($0, name) }
-        try require(matches.count <= 1, path: "\(path)/\(name)", "JSON object contains duplicate keys that differ only by case.")
-        return matches.first.flatMap { object[$0] }
+        var matchingKey: String?
+        for key in object.keys where jsonKeyEquals(key, name) {
+            try require(matchingKey == nil, path: "\(path)/\(name)", "JSON object contains duplicate keys that differ only by case.")
+            matchingKey = key
+        }
+        return matchingKey.flatMap { object[$0] }
     }
 
     func validateFinalMaskGeneratedPayload(_ value: JSONValue, path: String) throws {

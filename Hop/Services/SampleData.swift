@@ -82,7 +82,7 @@
             "[9:18:28 PM] Tunnel extension bundle ID resolved.",
             "[9:18:27 PM] Loaded 3 sample nodes and 2 proxy groups.",
             "[9:18:26 PM] Routing mode set to Rule with 4 sample rules.",
-            "[9:18:25 PM] Import parser ready for links, subscriptions, and Shadowrocket .conf files.",
+            "[9:18:25 PM] Import parser ready for links, subscriptions, and compatible .conf files.",
             "[9:18:24 PM] Xray-core configuration builder ready.",
         ]
     }
