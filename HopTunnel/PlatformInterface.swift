@@ -81,7 +81,7 @@ final class HopPlatformInterface {
     }
 
     static func clampedMTU(_ value: Int) -> Int {
-        min(max(value, 1280), 9000)
+        min(max(value, 1280), XrayTunnelNetworkDefaults.mtu)
     }
 
     private static func applyNetworkSettings(
@@ -106,16 +106,16 @@ final class HopPlatformInterface {
     /// modern iOS. Xray v26.6.27's own iOS integration guide specifies this
     /// bounded getsockopt lookup after `setTunnelNetworkSettings` completes.
     private static func networkExtensionTunnelDescriptor() -> TunnelDescriptor? {
+        var nameBuffer = [CChar](repeating: 0, count: Int(IFNAMSIZ))
         for fd in Int32(3) ... Int32(1024) {
-            if let name = utunName(for: fd) {
+            if let name = utunName(for: fd, buffer: &nameBuffer) {
                 return TunnelDescriptor(fileDescriptor: fd, interfaceName: name)
             }
         }
         return nil
     }
 
-    private static func utunName(for fd: Int32) -> String? {
-        var buffer = [CChar](repeating: 0, count: Int(IFNAMSIZ))
+    private static func utunName(for fd: Int32, buffer: inout [CChar]) -> String? {
         var length = socklen_t(buffer.count)
         // SYSPROTO_CONTROL = 2 and UTUN_OPT_IFNAME = 2. These constants are
         // used by Xray's own Darwin fd discovery example but are not public
@@ -124,8 +124,12 @@ final class HopPlatformInterface {
             getsockopt(fd, 2, 2, bytes.baseAddress, &length)
         }
         guard result == 0 else { return nil }
-        let end = buffer.firstIndex(of: 0) ?? buffer.endIndex
-        let name = String(decoding: buffer[..<end].map(UInt8.init(bitPattern:)), as: UTF8.self)
+        let byteCount = min(Int(length), buffer.count)
+        let name = buffer.withUnsafeBufferPointer { pointer in
+            let bytes = UnsafeRawBufferPointer(pointer).prefix(byteCount)
+            let end = bytes.firstIndex(of: 0) ?? bytes.endIndex
+            return String(decoding: bytes[..<end], as: UTF8.self)
+        }
         return name.hasPrefix("utun") ? name : nil
     }
 }

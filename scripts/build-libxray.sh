@@ -11,6 +11,13 @@ GOMOBILE_COMMIT="6129f5bee9d516e31842c9815bf24f60fa682b6e"
 IOS_VERSION="26.0"
 XRAY_IOS_PATCH="XrayBridge/patches/0001-bound-ios-tun-memory.patch"
 
+# A FIPS-enabled Go build defaults the runtime to FIPS mode. Its entropy path
+# can fault in a roughly 32 MiB scratch region, which cannot fit beside Xray in
+# an iOS packet-tunnel process. Hop does not require FIPS mode, so make the
+# memory-safe build setting explicit instead of inheriting a developer or CI
+# environment value.
+export GOFIPS140=off
+
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 bridge_dir="$repo_root/XrayBridge"
@@ -27,6 +34,8 @@ command -v shasum >/dev/null 2>&1 || err "shasum is required."
 command -v xcodebuild >/dev/null 2>&1 || err "Xcode is required."
 [[ "$(go env GOVERSION 2>/dev/null)" == "$GO_VERSION" ]] \
   || err "Go $GO_VERSION is required; found $(go env GOVERSION 2>/dev/null || printf unknown)."
+[[ "$(go env GOFIPS140 2>/dev/null)" == "off" ]] \
+  || err "GOFIPS140 must be off for the memory-constrained iOS tunnel build."
 [[ -f "$bridge_dir/go.mod" ]] || err "XrayBridge/go.mod is missing."
 [[ -f "$repo_root/$XRAY_IOS_PATCH" ]] || err "$XRAY_IOS_PATCH is missing."
 

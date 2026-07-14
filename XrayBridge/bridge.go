@@ -151,6 +151,10 @@ func Invoke(requestJSON string) (responseJSON string) {
 }
 
 func validate(req request) response {
+	// Exact parsing constructs a short-lived core instance and can transiently
+	// retain geodata. Return those pages before handing control back to Swift.
+	defer debug.FreeOSMemory()
+
 	configJSON := req.configJSON()
 	if configJSON == "" {
 		return failure("invalid_config", "configJSON is required")
@@ -174,6 +178,10 @@ func validate(req request) response {
 }
 
 func start(req request) response {
+	// Xray config parsing and construction can leave sizable temporary heaps,
+	// including on rejected configs. Return those pages after every attempt.
+	defer debug.FreeOSMemory()
+
 	configJSON := req.configJSON()
 	if configJSON == "" {
 		return failure("invalid_config", "configJSON is required")
@@ -189,32 +197,52 @@ func start(req request) response {
 
 	configureMemoryRuntime()
 	environment := applyEnvironment(req)
+	var instance *core.Instance
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		// Restore process-wide bridge settings even if cleanup of a partially
+		// constructed core panics. Invoke's outer recovery will translate the
+		// panic, but a leaked TUN_FD or asset path would poison the next start.
+		defer restoreEnvironment(environment)
+		if instance != nil {
+			_ = instance.Close()
+		}
+	}()
+
 	config, err := core.LoadConfig("json", strings.NewReader(configJSON))
 	if err != nil {
-		restoreEnvironment(environment)
 		return failure("start_failed", err.Error())
 	}
-	instance, err := core.New(config)
+	instance, err = core.New(config)
 	if err != nil {
-		restoreEnvironment(environment)
 		return failure("start_failed", err.Error())
 	}
 	if err := instance.Start(); err != nil {
-		_ = instance.Close()
-		restoreEnvironment(environment)
 		return failure("start_failed", err.Error())
 	}
 
-	state.instance = instance
-	state.configDigest = digestString
-	state.environment = environment
-	state.collectorStop, state.collectorDone = startMemoryCollector()
-	debug.FreeOSMemory()
+	collectorStop, collectorDone := startMemoryCollector()
+	state = bridgeState{
+		instance:      instance,
+		configDigest:  digestString,
+		collectorStop: collectorStop,
+		collectorDone: collectorDone,
+		environment:   environment,
+	}
+	committed = true
 	return success(map[string]any{"alreadyRunning": false, "running": true})
 }
 
 func stop() response {
+	// This also runs for an idempotent stop, so Swift can request an explicit
+	// heap release even after the core has already torn itself down.
+	defer debug.FreeOSMemory()
+
 	if state.instance == nil {
+		stopMemoryCollector()
 		return success(map[string]any{"alreadyStopped": true, "running": false})
 	}
 
@@ -227,7 +255,6 @@ func stop() response {
 		defer restoreEnvironment(environment)
 		closeErr = instance.Close()
 	}()
-	debug.FreeOSMemory()
 	if closeErr != nil {
 		return failure("stop_failed", closeErr.Error())
 	}
@@ -259,11 +286,17 @@ func startMemoryCollector() (chan struct{}, chan struct{}) {
 }
 
 func stopMemoryCollector() {
-	if state.collectorStop == nil {
+	stop := state.collectorStop
+	done := state.collectorDone
+	state.collectorStop = nil
+	state.collectorDone = nil
+	if stop == nil {
 		return
 	}
-	close(state.collectorStop)
-	<-state.collectorDone
+	close(stop)
+	if done != nil {
+		<-done
+	}
 }
 
 func applyEnvironment(req request) environmentSnapshot {

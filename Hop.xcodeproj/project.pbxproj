@@ -68,10 +68,12 @@
 		AC74C8D9D2A6AD187A7C182D /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 63AAF67F67AFF0C9362B98CF /* libresolv.tbd */; };
 		AD240E6D07071E6DC56FB0E6 /* TunnelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */; };
 		AD5430672945FB6F2C5DF2F3 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BB6FA5218140CC9E14D3B74 /* LogsView.swift */; };
+		AF6D63988CE5F4978E1F415F /* TunnelMemoryPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEE6EA94F5BDBE9D5C6EAC1A /* TunnelMemoryPolicyTests.swift */; };
 		B188A6AE4841ABA22706074A /* ProxyGroupEditorPerformanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 766EBEE243F73C53D90C5E36 /* ProxyGroupEditorPerformanceTests.swift */; };
 		B49CDA4D0637BE4168E9C21F /* TunnelConfigAuthenticator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E06330102DC382967E53A68 /* TunnelConfigAuthenticator.swift */; };
 		B837BC5A2270E67C648844C7 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 750644D1A75CC1430D986F8A /* JSONValue.swift */; };
 		B8C0406BE4A09785C86940CB /* geoip.dat in Resources */ = {isa = PBXBuildFile; fileRef = 8AB87990CDF0C94C28F627F7 /* geoip.dat */; };
+		B90C09E0805B62C84EB0BD99 /* TunnelMemoryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1FF1FC613572C3BE314AFBE /* TunnelMemoryPolicy.swift */; };
 		B992175866E7587411D8B96F /* SubscriptionRefreshMerger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86A346D2391DE82BBC35BDEB /* SubscriptionRefreshMerger.swift */; };
 		BC129EDCE92BCE3DD864260E /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF668543CBA3F5DEE434ADEF /* SettingsView.swift */; };
 		BC23B6D0A4235D9BEF6B9CF5 /* ProxyLinkParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = F168B262ED2CE3C6812A5D8D /* ProxyLinkParser.swift */; };
@@ -79,6 +81,7 @@
 		C2187D3BA3B828C5A9D80C2D /* geosite.dat in Resources */ = {isa = PBXBuildFile; fileRef = 6C92EC899C3314B22FF75DCF /* geosite.dat */; };
 		C3FE6096230E6A4D16C785BE /* Endpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84979FFBEFD45B93D94D5B99 /* Endpoint.swift */; };
 		C401585B7F6AC399B4DB9679 /* SecretStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E1B76DFDAC1976712EA1386 /* SecretStore.swift */; };
+		C9FCC67E9411254073B4AB70 /* TunnelMemoryPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1FF1FC613572C3BE314AFBE /* TunnelMemoryPolicy.swift */; };
 		CAF23D5634DE31B98C987097 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EE46FE8CB982BD00C5C7457 /* AppSettings.swift */; };
 		D1937A34EEDAE0647791D550 /* geosite.dat in Resources */ = {isa = PBXBuildFile; fileRef = 6C92EC899C3314B22FF75DCF /* geosite.dat */; };
 		D54A4EFC5719B2B7366BFE3A /* LibXray.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71509A5A8CCBC761C8519888 /* LibXray.xcframework */; };
@@ -185,6 +188,7 @@
 		AB7AC0BA8603FEDB0F77C2DE /* TunnelModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelModels.swift; sourceTree = "<group>"; };
 		AF50E194D1028E221D66587F /* SubscriptionFetcherTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionFetcherTests.swift; sourceTree = "<group>"; };
 		AF6246D677ACDB5F6AAD25A4 /* XrayTunnelNetworkDefaults.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XrayTunnelNetworkDefaults.swift; sourceTree = "<group>"; };
+		B1FF1FC613572C3BE314AFBE /* TunnelMemoryPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelMemoryPolicy.swift; sourceTree = "<group>"; };
 		B42744CD10EDFE8C38981CD8 /* ProfilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfilesView.swift; sourceTree = "<group>"; };
 		B5FCAFB69C6699C719D4BBF9 /* ActiveBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActiveBadge.swift; sourceTree = "<group>"; };
 		B76EB08FBBECCCF421DC0A7F /* Hop.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Hop.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -201,6 +205,7 @@
 		E7B745A188A0B6D79ADBBCB9 /* RuntimeEnvironmentTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeEnvironmentTests.swift; sourceTree = "<group>"; };
 		E7E14B112D833A1545DDD4E1 /* ProfileSecrets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileSecrets.swift; sourceTree = "<group>"; };
 		ED8696CCF094E303BC77A9D7 /* HopApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopApp.swift; sourceTree = "<group>"; };
+		EEE6EA94F5BDBE9D5C6EAC1A /* TunnelMemoryPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelMemoryPolicyTests.swift; sourceTree = "<group>"; };
 		F168B262ED2CE3C6812A5D8D /* ProxyLinkParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyLinkParser.swift; sourceTree = "<group>"; };
 		F292E846B530A70604A3BCD3 /* ProtocolOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProtocolOptions.swift; sourceTree = "<group>"; };
 		F32FB4AA500BEEA4F0C413E1 /* SecretStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretStoreTests.swift; sourceTree = "<group>"; };
@@ -316,6 +321,7 @@
 				AF50E194D1028E221D66587F /* SubscriptionFetcherTests.swift */,
 				5F076B1CE9978B7369D54C8D /* SubscriptionRefreshMergerTests.swift */,
 				863907EA3659FAE3F2986AF7 /* TunnelControllerLogTests.swift */,
+				EEE6EA94F5BDBE9D5C6EAC1A /* TunnelMemoryPolicyTests.swift */,
 				683646F0E6C617714B5FDA66 /* VerifiedXrayGeodataTests.swift */,
 				159127E33EC4092153DCB9C5 /* XrayConfigBuilderTests.swift */,
 			);
@@ -369,6 +375,7 @@
 				4DB58A1962B36732A51D8BF8 /* SecretReference.swift */,
 				1E1B76DFDAC1976712EA1386 /* SecretStore.swift */,
 				2E06330102DC382967E53A68 /* TunnelConfigAuthenticator.swift */,
+				B1FF1FC613572C3BE314AFBE /* TunnelMemoryPolicy.swift */,
 				9A612D58471BC9E68C62C79A /* VerifiedXrayGeodata.swift */,
 				00258DBBB03776DAD1D7BAE6 /* XrayBridgeModels.swift */,
 				AF6246D677ACDB5F6AAD25A4 /* XrayTunnelNetworkDefaults.swift */,
@@ -602,6 +609,7 @@
 				0A1B76CFD761695587A2FC53 /* SubscriptionFetcherTests.swift in Sources */,
 				3FA31228BE6AE2BD7B9DB0A0 /* SubscriptionRefreshMergerTests.swift in Sources */,
 				9C3496FCF7FD89ECBC3FDBC0 /* TunnelControllerLogTests.swift in Sources */,
+				AF6D63988CE5F4978E1F415F /* TunnelMemoryPolicyTests.swift in Sources */,
 				98B36EAE8E4FB7F2A257928D /* VerifiedXrayGeodataTests.swift in Sources */,
 				E9D5A04DADC2110B7930A568 /* XrayConfigBuilderTests.swift in Sources */,
 			);
@@ -652,6 +660,7 @@
 				9EEEB24C881C3C68E0352A2C /* TransportOptions.swift in Sources */,
 				B49CDA4D0637BE4168E9C21F /* TunnelConfigAuthenticator.swift in Sources */,
 				AD240E6D07071E6DC56FB0E6 /* TunnelController.swift in Sources */,
+				C9FCC67E9411254073B4AB70 /* TunnelMemoryPolicy.swift in Sources */,
 				02332333A52B2D2D774707B7 /* TunnelModels.swift in Sources */,
 				553AAE11DAE135EED4ECC727 /* VerifiedXrayGeodata.swift in Sources */,
 				FBA28E7F5219D93E699282A2 /* XrayBridgeModels.swift in Sources */,
@@ -672,6 +681,7 @@
 				6AF29EED002D33D2B3A140F4 /* SecretReference.swift in Sources */,
 				C401585B7F6AC399B4DB9679 /* SecretStore.swift in Sources */,
 				9F968F2746226E0C71AA4AEA /* TunnelConfigAuthenticator.swift in Sources */,
+				B90C09E0805B62C84EB0BD99 /* TunnelMemoryPolicy.swift in Sources */,
 				38D369B7FB70959507ACE139 /* VerifiedXrayGeodata.swift in Sources */,
 				A133692F15DCE33B6364F352 /* XrayBridgeModels.swift in Sources */,
 				012AEB9A3ACA8F5059283724 /* XrayTunnelNetworkDefaults.swift in Sources */,

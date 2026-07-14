@@ -15,21 +15,24 @@ private enum TunnelRuntimeFiles {
 /// utun descriptor. All engine calls happen outside `serviceStateLock`: the Go
 /// bridge owns callbacks and shutdown work that must never re-enter a held lock.
 final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
-    private static let maxConfigBytes = 1024 * 1024
+    private static let maxConfigBytes = TunnelMemoryPolicy.maximumConfigurationBytes
     private static let maxTunnelLogBytes = 1_048_576
     private static let tunnelLogTrimBytes = 262_144
     private static let maxLogMessageCharacters = 4096
 
-    /// Leave margin below the approximately 50 MiB iOS packet-tunnel ceiling.
-    private static let softMemoryLimitBytes: UInt64 = 42 * 1024 * 1024
-    private static let hardMemoryLimitBytes: UInt64 = 46 * 1024 * 1024
-    private static let softMemoryResetBytes: UInt64 = 40 * 1024 * 1024
-
     private lazy var platformInterface = HopPlatformInterface(provider: self)
     private let serviceStateLock = NSLock()
     /// Serializes the full start/stop lifecycle around LibXray's single core.
-    private let serviceQueue = DispatchQueue(label: "cat.string.hop.tunnel-service", qos: .userInitiated)
-    private let memoryQueue = DispatchQueue(label: "cat.string.hop.tunnel-memory", qos: .utility)
+    private let serviceQueue = DispatchQueue(
+        label: "cat.string.hop.tunnel-service",
+        qos: .userInitiated,
+        autoreleaseFrequency: .workItem,
+    )
+    private let memoryQueue = DispatchQueue(
+        label: "cat.string.hop.tunnel-memory",
+        qos: .utility,
+        autoreleaseFrequency: .workItem,
+    )
     private let tunnelLogLock = NSLock()
 
     private var xrayStarted = false
@@ -68,13 +71,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             writeTunnelLog("PacketTunnelProvider.startTunnel invoked")
             writeTunnelLog("Start option keys: \(request.visibleOptionKeys.joined(separator: ", "))")
 
-            let rawConfig = try loadConfig(request: request)
             guard !request.secretNonce.isEmpty else {
                 throw TunnelProviderError.missingSecretNonce
             }
 
             #if canImport(LibXray)
-                try startService(rawConfig: rawConfig, request: request)
+                try startService(request: request)
                 writeTunnelLog("Xray service started")
                 completionHandler(nil)
             #else
@@ -88,23 +90,38 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping @Sendable () -> Void) {
         serviceQueue.async { [weak self] in
-            self?.writeTunnelLog("PacketTunnelProvider.stopTunnel reason=\(reason.rawValue)")
             self?.stopService(logErrors: true)
+            self?.writeTunnelLog("PacketTunnelProvider.stopTunnel reason=\(reason.rawValue)")
             completionHandler()
         }
     }
 
     #if canImport(LibXray)
-        private func startService(rawConfig: String, request: TunnelStartRequest) throws {
-            let resolved = try resolveConfig(
-                rawConfig: rawConfig,
-                nonce: request.secretNonce,
-                secretsAreResolved: request.configSecretsAreResolved,
-            )
-            let config = try configWithBoundedEngineLogging(resolved)
+        private func startService(request: TunnelStartRequest) throws {
+            try autoreleasepool {
+                let rawConfig = try loadConfig(request: request)
+                let resolved = try resolveConfig(
+                    rawConfig: rawConfig,
+                    nonce: request.secretNonce,
+                    secretsAreResolved: request.configSecretsAreResolved,
+                )
+                let config = try configWithBoundedEngineLogging(resolved)
+                try startXray(config: config, request: request)
+            }
+
+            // The bridge has copied the JSON and autoreleasepool released the
+            // temporary Data/JSON object graph. Return idle malloc pages before
+            // measuring the steady-state footprint.
+            Self.relieveNativeMemoryPressure()
+            try completeServiceStartup()
+        }
+
+        private func startXray(config: String, request: TunnelStartRequest) throws {
             writeTunnelLog("Loaded Xray settings (\(config.utf8.count) bytes)")
 
-            if let footprint = Self.physicalFootprintBytes(), footprint >= Self.hardMemoryLimitBytes {
+            if let footprint = Self.physicalFootprintBytes(),
+               footprint >= TunnelMemoryPolicy.hardLimitBytes
+            {
                 throw TunnelProviderError.memoryBudgetExceeded(footprint)
             }
 
@@ -131,25 +148,39 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                 )
             } catch {
                 try? XrayBridge.stop()
+                Self.relieveNativeMemoryPressure()
+                platformInterface.reset()
                 throw error
             }
+        }
 
+        private func completeServiceStartup() throws {
             let footprint = Self.physicalFootprintBytes() ?? 0
-            guard footprint < Self.hardMemoryLimitBytes else {
+            let decision = TunnelMemoryPolicy.decision(
+                footprintBytes: footprint,
+                softWarningActive: false,
+            )
+            guard decision.action != .stop else {
                 try? XrayBridge.stop()
+                Self.relieveNativeMemoryPressure()
+                platformInterface.reset()
                 throw TunnelProviderError.memoryBudgetExceeded(footprint)
             }
 
             serviceStateLock.lock()
             xrayStarted = true
-            softMemoryWarningActive = footprint >= Self.softMemoryLimitBytes
+            softMemoryWarningActive = decision.softWarningActive
             serviceStateLock.unlock()
 
-            if footprint >= Self.softMemoryLimitBytes {
+            if decision.action == .collectAndWarn {
                 try? XrayBridge.collectMemory()
+                Self.relieveNativeMemoryPressure()
                 let relievedFootprint = Self.physicalFootprintBytes() ?? footprint
                 serviceStateLock.lock()
-                softMemoryWarningActive = relievedFootprint >= Self.softMemoryLimitBytes
+                softMemoryWarningActive = TunnelMemoryPolicy.decision(
+                    footprintBytes: relievedFootprint,
+                    softWarningActive: softMemoryWarningActive,
+                ).softWarningActive
                 serviceStateLock.unlock()
                 writeTunnelLog("Memory watchdog warning at startup: \(Self.formatBytes(relievedFootprint))")
             }
@@ -168,15 +199,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 
         watchdog?.cancel()
         #if canImport(LibXray)
+            var stopError: Error?
             if shouldStop {
                 do {
                     try XrayBridge.stop()
-                } catch where logErrors {
-                    writeTunnelLog("Xray stop error: \(error.diagnosticDescription)")
-                } catch {}
+                } catch {
+                    stopError = error
+                }
+                Self.relieveNativeMemoryPressure()
             }
         #endif
         platformInterface.reset()
+        #if canImport(LibXray)
+            if logErrors, let stopError {
+                writeTunnelLog("Xray stop error: \(stopError.diagnosticDescription)")
+            }
+        #endif
     }
 
     private func startMemoryWatchdog() {
@@ -185,8 +223,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         // one-second timer fires. Sample cheaply at 4 Hz so the hard stop still
         // has room to run before iOS jetsams the extension.
         timer.schedule(
-            deadline: .now() + .milliseconds(250),
-            repeating: .milliseconds(250),
+            deadline: .now() + .milliseconds(TunnelMemoryPolicy.watchdogSampleMilliseconds),
+            repeating: .milliseconds(TunnelMemoryPolicy.watchdogSampleMilliseconds),
             leeway: .milliseconds(50),
         )
         timer.setEventHandler { [weak self] in
@@ -214,39 +252,48 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
             serviceStateLock.unlock()
             return
         }
-        if footprint >= Self.hardMemoryLimitBytes {
+        let decision = TunnelMemoryPolicy.decision(
+            footprintBytes: footprint,
+            softWarningActive: softMemoryWarningActive,
+        )
+        softMemoryWarningActive = decision.softWarningActive
+        if decision.action == .stop {
             xrayStarted = false
+            softMemoryWarningActive = false
             let watchdog = memoryWatchdog
             memoryWatchdog = nil
             serviceStateLock.unlock()
 
             watchdog?.cancel()
-            writeTunnelLog(
-                "Memory watchdog hard limit reached: \(Self.formatBytes(footprint)); stopping Xray before jetsam",
-            )
             #if canImport(LibXray)
                 try? XrayBridge.stop()
             #endif
+            Self.relieveNativeMemoryPressure()
             platformInterface.reset()
+            writeTunnelLog(
+                "Memory watchdog hard limit reached: \(Self.formatBytes(footprint)); stopped Xray before jetsam",
+            )
             cancelTunnelWithError(TunnelProviderError.memoryBudgetExceeded(footprint))
             return
         }
-
-        let shouldLogSoftWarning = footprint >= Self.softMemoryLimitBytes && !softMemoryWarningActive
-        if footprint >= Self.softMemoryLimitBytes {
-            softMemoryWarningActive = true
-        } else if footprint < Self.softMemoryResetBytes {
-            softMemoryWarningActive = false
-        }
         serviceStateLock.unlock()
 
-        if shouldLogSoftWarning {
+        if decision.action == .collectAndWarn {
             #if canImport(LibXray)
                 // Ask Go to return idle pages before the process moves any
                 // closer to the hard stop.
                 try? XrayBridge.collectMemory()
             #endif
+            Self.relieveNativeMemoryPressure()
             let relievedFootprint = Self.physicalFootprintBytes() ?? footprint
+            serviceStateLock.lock()
+            if xrayStarted {
+                softMemoryWarningActive = TunnelMemoryPolicy.decision(
+                    footprintBytes: relievedFootprint,
+                    softWarningActive: softMemoryWarningActive,
+                ).softWarningActive
+            }
+            serviceStateLock.unlock()
             writeTunnelLog("Memory watchdog soft limit reached: \(Self.formatBytes(relievedFootprint))")
         }
     }
@@ -446,6 +493,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         return info.phys_footprint
     }
 
+    private static func relieveNativeMemoryPressure() {
+        _ = malloc_zone_pressure_relief(nil, 0)
+    }
+
     private static func clampedInt64(_ value: UInt64) -> Int64 {
         Int64(min(value, UInt64(Int64.max)))
     }
@@ -456,6 +507,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
 }
 
 private struct TunnelStartRequest {
+    private static let maxDNSOptionBytes = 512
+    private static let maxDNSServerCount = 8
+    private static let maxDNSServerBytes = 45
+
     let optionConfigContent: String?
     let optionConfigPath: String?
     let providerConfigContent: String?
@@ -487,10 +542,20 @@ private struct TunnelStartRequest {
     }
 
     private static func csv(_ value: String) -> [String] {
-        value
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        let boundedValue = String(decoding: value.utf8.prefix(maxDNSOptionBytes), as: UTF8.self)
+        let candidates = boundedValue.split(
+            separator: ",",
+            maxSplits: maxDNSServerCount - 1,
+            omittingEmptySubsequences: true,
+        )
+        var servers: [String] = []
+        servers.reserveCapacity(maxDNSServerCount)
+        for candidate in candidates {
+            let server = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !server.isEmpty, server.utf8.count <= maxDNSServerBytes else { continue }
+            servers.append(server)
+        }
+        return servers
     }
 }
 
@@ -514,7 +579,7 @@ private enum TunnelProviderError: LocalizedError {
         case .missingSecretNonce:
             "The Hop tunnel extension received no secret nonce, so credentials cannot be resolved safely. Reconnect from the app."
         case .configTooLarge:
-            "The tunnel configuration exceeds the 1 MiB extension limit."
+            "The tunnel configuration exceeds the 512 KiB extension limit."
         case .invalidConfig:
             "The tunnel configuration is not a valid Xray JSON object."
         case .configPathOutsideContainer:
@@ -540,36 +605,24 @@ private enum TunnelProviderError: LocalizedError {
     /// API is deliberately a single JSON request/response entry point.
     private enum XrayBridge {
         static func start(configJSON: String, tunFileDescriptor: Int32, assetPath: String) throws {
-            try invoke(
+            try invoke(XrayBridgeRequest(
                 method: "start",
-                fields: [
-                    "assetDirectory": assetPath,
-                    "configJSON": configJSON,
-                    "tunFD": tunFileDescriptor,
-                ],
-            )
+                configJSON: configJSON,
+                assetDirectory: assetPath,
+                tunFD: tunFileDescriptor,
+            ))
         }
 
         static func stop() throws {
-            try invoke(method: "stop")
+            try invoke(XrayBridgeRequest(method: "stop"))
         }
 
         static func collectMemory() throws {
-            try invoke(method: "collectMemory")
+            try invoke(XrayBridgeRequest(method: "collectMemory"))
         }
 
-        private static func invoke(
-            method: String,
-            fields: [String: Any] = [:],
-        ) throws {
-            var request: [String: Any] = [
-                "version": 1,
-                "method": method,
-            ]
-            for (key, value) in fields {
-                request[key] = value
-            }
-            let data = try JSONSerialization.data(withJSONObject: request, options: [])
+        private static func invoke(_ request: XrayBridgeRequest) throws {
+            let data = try JSONEncoder().encode(request)
             guard let json = String(data: data, encoding: .utf8) else {
                 throw TunnelProviderError.xrayUnavailable
             }

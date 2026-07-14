@@ -102,6 +102,17 @@ struct XrayConfigBuilder {
             "dns": .object(dnsDictionary(settings: settings)),
             "inbounds": .array([.object(tunInboundDictionary(settings: settings))]),
             "outbounds": .array(outbounds.map(JSONValue.object)),
+            "policy": .object([
+                "levels": .object([
+                    "0": .object([
+                        "bufferSize": .number(0),
+                        "handshake": .number(Double(limits.maxPolicyHandshakeSeconds)),
+                        "connIdle": .number(Double(limits.maxPolicyConnectionIdleSeconds)),
+                        "uplinkOnly": .number(Double(limits.maxPolicyHalfCloseSeconds)),
+                        "downlinkOnly": .number(Double(limits.maxPolicyHalfCloseSeconds)),
+                    ]),
+                ]),
+            ]),
             "routing": .object(routingDictionary(
                 mode: routingMode,
                 rules: rules,
@@ -242,7 +253,6 @@ private extension XrayConfigBuilder {
         "routing",
         "policy",
         "observatory",
-        "burstObservatory",
         "version",
         "geodata",
     ]
@@ -311,11 +321,20 @@ private extension XrayConfigBuilder {
     static let memorySensitiveKeys: Set<String> = [
         "concurrency", "xudpConcurrency", "maxConcurrency", "maxConnections",
         "scMaxBufferedPosts", "scMaxEachPostBytes", "uplinkChunkSize", "xPaddingBytes",
-        "bufferSize", "initial_windows_size",
+        "sessionIDLength", "bufferSize", "handshake", "connIdle", "uplinkOnly", "downlinkOnly", "initial_windows_size",
         "initStreamReceiveWindow", "maxStreamReceiveWindow",
         "initConnectionReceiveWindow", "maxConnectionReceiveWindow", "maxIncomingStreams",
         "rand", "length", "lengths", "maxSplit", "packetSize",
         "paddingMin", "paddingMax", "padding_min", "padding_max",
+    ]
+    static let positiveMemorySensitiveKeys: Set<String> = [
+        "maxConnections", "scMaxBufferedPosts", "scMaxEachPostBytes",
+        "handshake", "connIdle",
+        "initStreamReceiveWindow", "maxStreamReceiveWindow",
+        "initConnectionReceiveWindow", "maxConnectionReceiveWindow",
+    ]
+    static let policyLevelAdvancedKeys: Set<String> = [
+        "bufferSize", "handshake", "connIdle", "uplinkOnly", "downlinkOnly",
     ]
     static let finalMaskGeneratedSizeKeys: Set<String> = [
         "rand", "length", "lengths", "maxSplit", "packetSize",
@@ -385,6 +404,7 @@ private extension XrayConfigBuilder {
         return [
             "servers": .array([.string(server)]),
             "queryStrategy": .string(strategy),
+            "disableCache": .bool(true),
         ]
     }
 
@@ -654,6 +674,8 @@ private extension XrayConfigBuilder {
             let mtu = kcp.mtu ?? 1350
             let window = kcp.maxSendingWindow ?? limits.maxKCPWriteBufferBytes
             try require(window >= mtu && window <= limits.maxKCPWriteBufferBytes, path: "\(profilePath)/transport/kcp/maxSendingWindow", "mKCP send window must be at least its MTU and no larger than the 1 MiB iOS buffer limit.")
+            let cwndMultiplier = kcp.cwndMultiplier ?? 1
+            try require((1 ... limits.maxKCPCongestionWindowMultiplier).contains(cwndMultiplier), path: "\(profilePath)/transport/kcp/cwndMultiplier", "mKCP congestion-window multiplier must be between 1 and \(limits.maxKCPCongestionWindowMultiplier) on iOS.")
             let tti = kcp.tti ?? 50
             let intervalsPerSecond = max(1, 1000 / tti)
             let bytesPerMiB = 1024 * 1024
@@ -796,15 +818,15 @@ private extension XrayConfigBuilder {
     func protocolAdvancedKeys(for proto: ProxyProtocol) -> Set<String> {
         switch proto {
         case .vless:
-            ["level", "email", "seed", "testpre", "testseed"]
+            ["email", "seed", "testpre", "testseed"]
         case .trojan, .shadowsocks:
-            ["level", "email"]
+            ["email"]
         case .vmess:
-            ["level", "email", "experiments"]
+            ["email", "experiments"]
         case .http:
-            ["level", "email", "headers"]
+            ["email", "headers"]
         case .socks:
-            ["level", "email"]
+            ["email"]
         case .hysteria2, .wireGuard, .tuic, .anyTLS:
             []
         }
@@ -865,12 +887,30 @@ private extension XrayConfigBuilder {
             ("routing", ["domainStrategy", "rules", "balancers"]),
             ("policy", ["levels", "system"]),
             ("observatory", ["subjectSelector", "probeURL", "probeInterval", "enableConcurrency"]),
-            ("burstObservatory", ["subjectSelector", "pingConfig"]),
             ("version", ["min", "max"]),
         ]
         for (key, allowed) in sections {
             if let value = values[key] {
                 try validateObject(value, allowed: allowed, path: "/settings/xrayAdvanced/\(key)")
+            }
+        }
+        if let policy = values["policy"]?.objectValue,
+           let levelsValue = policy["levels"]
+        {
+            guard let levels = levelsValue.objectValue else {
+                try require(false, path: "/settings/xrayAdvanced/policy/levels", "Policy levels must be a JSON object.")
+                return
+            }
+            for rawLevel in levels.keys.sorted() {
+                let path = "/settings/xrayAdvanced/policy/levels/\(rawLevel)"
+                guard let level = UInt32(rawLevel), rawLevel == String(level) else {
+                    try require(false, path: path, "Policy level keys must be canonical decimal UInt32 values.")
+                    continue
+                }
+                try require(level != 0, path: path, "Advanced policy cannot replace the iOS-enforced level-0 policy.")
+                if let value = levels[rawLevel] {
+                    try validateObject(value, allowed: Self.policyLevelAdvancedKeys, path: path)
+                }
             }
         }
         if let fakeDNS = values["fakeDns"] {
@@ -1208,15 +1248,17 @@ private extension XrayConfigBuilder {
     }
 
     func applyProfileAdvanced(_ advanced: XrayAdvancedDocument?, profile: ProxyProfile, to outbound: inout JSONObject) throws {
-        guard let advanced, !advanced.isEmpty else { return }
-        var copy = advanced.values
-        if var stream = copy["streamSettings"]?.objectValue,
-           let socketOptions = stream.removeValue(forKey: "socketOptions")
-        {
-            stream["sockopt"] = socketOptions
-            copy["streamSettings"] = .object(stream)
+        if let advanced, !advanced.isEmpty {
+            var copy = advanced.values
+            if var stream = copy["streamSettings"]?.objectValue,
+               let socketOptions = stream.removeValue(forKey: "socketOptions")
+            {
+                stream["sockopt"] = socketOptions
+                copy["streamSettings"] = .object(stream)
+            }
+            try mergeAdvanced(copy, into: &outbound, path: "/profiles/\(profile.id.uuidString.lowercased())")
         }
-        try mergeAdvanced(copy, into: &outbound, path: "/profiles/\(profile.id.uuidString.lowercased())")
+        try finalizeMergedStreamSettings(in: &outbound, profile: profile)
     }
 
     func mergeAdvanced(_ advanced: JSONObject, into base: inout JSONObject, path: String) throws {
@@ -1235,6 +1277,61 @@ private extension XrayConfigBuilder {
                 try require(false, path: "\(path)/\(key)", "Advanced JSON collides with a typed or iOS-enforced field.")
             }
         }
+    }
+
+    func finalizeMergedStreamSettings(in outbound: inout JSONObject, profile: ProxyProfile) throws {
+        guard var stream = outbound["streamSettings"]?.objectValue else { return }
+        let path = "/profiles/\(profile.id.uuidString.lowercased())/streamSettings"
+        let finalMaskKeys = stream.keys.filter { jsonKeyEquals($0, "finalmask") }
+        try require(finalMaskKeys.count <= 1, path: "\(path)/finalmask", "JSON object contains duplicate protected keys that differ only by case.")
+        if let key = finalMaskKeys.first,
+           let finalMask = stream.removeValue(forKey: key)
+        {
+            stream["finalmask"] = try finalMaskWithSafeDefaults(finalMask)
+        }
+        let kcpKeys = stream.keys.filter { jsonKeyEquals($0, "kcpSettings") }
+        try require(kcpKeys.count <= 1, path: "\(path)/kcpSettings", "JSON object contains duplicate protected keys that differ only by case.")
+        if let key = kcpKeys.first,
+           let kcp = stream.removeValue(forKey: key)
+        {
+            guard let settings = kcp.objectValue else {
+                try require(false, path: "\(path)/kcpSettings", "mKCP settings must be a JSON object.")
+                return
+            }
+            try validateMergedKCPSettings(settings, path: "\(path)/kcpSettings")
+            stream["kcpSettings"] = kcp
+        }
+        outbound["streamSettings"] = .object(stream)
+    }
+
+    func validateMergedKCPSettings(_ settings: JSONObject, path: String) throws {
+        let mtu = try integerValue("mtu", in: settings, default: 1350, path: path)
+        let tti = try integerValue("tti", in: settings, default: 50, path: path)
+        let uplinkCapacity = try integerValue("uplinkCapacity", in: settings, default: 5, path: path)
+        let downlinkCapacity = try integerValue("downlinkCapacity", in: settings, default: 20, path: path)
+        let cwndMultiplier = try integerValue("cwndMultiplier", in: settings, default: 1, path: path)
+        let maxSendingWindow = try integerValue("maxSendingWindow", in: settings, default: limits.maxKCPWriteBufferBytes, path: path)
+
+        try require((21 ... 1500).contains(mtu), path: "\(path)/mtu", "mKCP MTU must be between 21 and 1500.")
+        try require((10 ... 1000).contains(tti), path: "\(path)/tti", "mKCP TTI must be between 10 and 1000 ms.")
+        try require(maxSendingWindow >= mtu && maxSendingWindow <= limits.maxKCPWriteBufferBytes, path: "\(path)/maxSendingWindow", "mKCP send window must be at least its MTU and no larger than the 1 MiB iOS buffer limit.")
+        try require((1 ... limits.maxKCPCongestionWindowMultiplier).contains(cwndMultiplier), path: "\(path)/cwndMultiplier", "mKCP congestion-window multiplier must be between 1 and \(limits.maxKCPCongestionWindowMultiplier) on iOS.")
+
+        let intervalsPerSecond = max(1, 1000 / tti)
+        let bytesPerMiB = 1024 * 1024
+        let maxUplinkCapacity = limits.maxKCPWriteBufferBytes * intervalsPerSecond / bytesPerMiB
+        let maxDownlinkCapacity = limits.maxKCPReadBufferBytes * intervalsPerSecond / bytesPerMiB
+        try require((0 ... maxUplinkCapacity).contains(uplinkCapacity), path: "\(path)/uplinkCapacity", "mKCP uplink in-flight data exceeds the 1 MiB iOS write-buffer limit.")
+        try require((0 ... maxDownlinkCapacity).contains(downlinkCapacity), path: "\(path)/downlinkCapacity", "mKCP downlink in-flight data exceeds the 1 MiB iOS read-buffer limit.")
+    }
+
+    func integerValue(_ key: String, in object: JSONObject, default defaultValue: Int, path: String) throws -> Int {
+        guard let raw = object[key] else { return defaultValue }
+        guard let value = raw.integerValue else {
+            try require(false, path: "\(path)/\(key)", "mKCP setting must be an in-range integer.")
+            return defaultValue
+        }
+        return value
     }
 
     func routingDictionary(
@@ -1460,11 +1557,17 @@ private extension XrayConfigBuilder {
                         "JSON object contains duplicate protected keys that differ only by case.",
                     )
                 }
-                if let canonicalKey,
-                   let explicit = numericUpperBound(child)
-                {
+                if let canonicalKey {
+                    guard let bounds = numericBounds(child) else {
+                        try require(false, path: childPath, "Memory-sensitive values must be numeric.")
+                        continue
+                    }
                     let maximum = memoryLimit(for: canonicalKey)
-                    try require(explicit <= maximum, path: childPath, "Value \(explicit) exceeds the iOS memory limit of \(maximum).")
+                    try require(bounds.lowerBound >= 0, path: childPath, "Memory-sensitive values cannot be negative.")
+                    if Self.positiveMemorySensitiveKeys.contains(canonicalKey) {
+                        try require(bounds.lowerBound > 0, path: childPath, "Zero would select an unsafe upstream memory default.")
+                    }
+                    try require(bounds.upperBound <= maximum, path: childPath, "Value \(bounds.upperBound) exceeds the iOS memory limit of \(maximum).")
                 }
                 if isFinalMask {
                     try validateFinalMask(child, path: childPath)
@@ -1486,8 +1589,13 @@ private extension XrayConfigBuilder {
         case "xudpConcurrency": limits.maxXUDPConcurrency
         case "maxConcurrency", "maxConnections": limits.maxXHTTPConnections
         case "scMaxBufferedPosts": limits.maxXHTTPBufferedPosts
-        case "scMaxEachPostBytes", "uplinkChunkSize", "xPaddingBytes": limits.maxXHTTPPostBytes
+        case "scMaxEachPostBytes", "uplinkChunkSize": limits.maxXHTTPPostBytes
+        case "xPaddingBytes": limits.maxXHTTPPaddingBytes
+        case "sessionIDLength": limits.maxXHTTPSessionIDLength
         case "bufferSize": limits.maxPolicyBufferSizeKiB
+        case "handshake": limits.maxPolicyHandshakeSeconds
+        case "connIdle": limits.maxPolicyConnectionIdleSeconds
+        case "uplinkOnly", "downlinkOnly": limits.maxPolicyHalfCloseSeconds
         case "initial_windows_size": limits.maxGRPCInitialWindowBytes
         case "initStreamReceiveWindow", "maxStreamReceiveWindow": limits.maxQUICStreamWindowBytes
         case "initConnectionReceiveWindow", "maxConnectionReceiveWindow": limits.maxQUICConnectionWindowBytes
@@ -1729,8 +1837,15 @@ private extension XrayConfigBuilder {
             try require(false, path: "/transport/finalMask", "FinalMask must be a JSON object.")
             return value
         }
-        if object["quicParams"] != nil {
-            var quic = object["quicParams"]?.objectValue ?? [:]
+        let quicKeys = object.keys.filter { jsonKeyEquals($0, "quicParams") }
+        try require(quicKeys.count <= 1, path: "/transport/finalMask/quicParams", "JSON object contains duplicate protected keys that differ only by case.")
+        if let key = quicKeys.first,
+           let value = object.removeValue(forKey: key)
+        {
+            guard var quic = value.objectValue else {
+                try require(false, path: "/transport/finalMask/quicParams", "QUIC parameters must be a JSON object.")
+                return .object(object)
+            }
             fillSafeQUICDefaults(into: &quic)
             object["quicParams"] = .object(quic)
         }
@@ -1810,22 +1925,48 @@ private extension XrayConfigBuilder {
     }
 
     func numericUpperBound(_ value: JSONValue) -> Int? {
+        numericBounds(value)?.upperBound
+    }
+
+    func numericBounds(_ value: JSONValue) -> ClosedRange<Int>? {
         switch value {
-        case .number:
-            return value.integerValue ?? Int.max
+        case let .number(number):
+            guard let integer = value.integerValue else {
+                return number < 0 ? Int.min ... 0 : 0 ... Int.max
+            }
+            return integer ... integer
         case let .string(string):
-            let components = string.split(whereSeparator: { $0 == "-" || $0 == ":" })
+            let components = string.split(
+                maxSplits: Int.max,
+                omittingEmptySubsequences: false,
+                whereSeparator: { $0 == "-" || $0 == ":" },
+            )
             guard !components.isEmpty else { return nil }
             let values = components.map { Int($0.trimmingCharacters(in: .whitespaces)) }
-            guard values.allSatisfy({ $0 != nil }) else { return Int.max }
-            return values.compactMap(\.self).max()
+            guard values.allSatisfy({ $0 != nil }) else { return Int.min ... Int.max }
+            let integers = values.compactMap(\.self)
+            guard let minimum = integers.min(), let maximum = integers.max() else { return nil }
+            return minimum ... maximum
         case let .array(values):
-            return values.compactMap(numericUpperBound).max()
+            guard !values.isEmpty else { return nil }
+            let bounds = values.map(numericBounds)
+            guard bounds.allSatisfy({ $0 != nil }) else { return nil }
+            return combinedNumericBounds(bounds.compactMap(\.self))
         case let .object(object):
-            return object.values.compactMap(numericUpperBound).max()
+            guard !object.isEmpty else { return nil }
+            let bounds = object.values.map(numericBounds)
+            guard bounds.allSatisfy({ $0 != nil }) else { return nil }
+            return combinedNumericBounds(bounds.compactMap(\.self))
         case .bool, .null:
             return nil
         }
+    }
+
+    func combinedNumericBounds(_ bounds: [ClosedRange<Int>]) -> ClosedRange<Int>? {
+        guard let minimum = bounds.map(\.lowerBound).min(),
+              let maximum = bounds.map(\.upperBound).max()
+        else { return nil }
+        return minimum ... maximum
     }
 
     func nonempty(_ value: String?) -> String? {

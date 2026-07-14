@@ -1,24 +1,26 @@
 diff --git a/proxy/tun/stack_gvisor.go b/proxy/tun/stack_gvisor.go
-index 8584616..ab506ca 100644
+index 8584616..a0dc207 100644
 --- a/proxy/tun/stack_gvisor.go
 +++ b/proxy/tun/stack_gvisor.go
 @@ -27,2 +27,2 @@ const (
 -	tcpRXBufDefSize = tcp.DefaultSendBufferSize
 -	tcpRXBufMaxSize = 8 << 20 // 8MiB
-+	tcpRXBufDefSize = 256 << 10 // 256KiB
-+	tcpRXBufMaxSize = 256 << 10 // 256KiB
-@@ -31,2 +31,2 @@ const (
++	tcpRXBufDefSize = 128 << 10 // 128KiB
++	tcpRXBufMaxSize = 128 << 10 // 128KiB
+@@ -31,2 +31,4 @@ const (
 -	tcpTXBufDefSize = tcp.DefaultReceiveBufferSize
 -	tcpTXBufMaxSize = 6 << 20 // 6MiB
-+	tcpTXBufDefSize = 256 << 10 // 256KiB
-+	tcpTXBufMaxSize = 256 << 10 // 256KiB
-@@ -69 +69 @@ func (t *stackGVisor) Start() error {
++	tcpTXBufDefSize = 128 << 10 // 128KiB
++	tcpTXBufMaxSize = 128 << 10 // 128KiB
++
++	tcpMaxInFlight = 128
+@@ -69 +71 @@ func (t *stackGVisor) Start() error {
 -	tcpForwarder := tcp.NewForwarder(ipStack, 0, 65535, func(r *tcp.ForwarderRequest) {
-+	tcpForwarder := tcp.NewForwarder(ipStack, tcpRXBufDefSize, 65535, func(r *tcp.ForwarderRequest) {
-@@ -104 +104 @@ func (t *stackGVisor) Start() error {
++	tcpForwarder := tcp.NewForwarder(ipStack, tcpRXBufDefSize, tcpMaxInFlight, func(r *tcp.ForwarderRequest) {
+@@ -104 +106 @@ func (t *stackGVisor) Start() error {
 -		data := pkt.Clone().Data().AsRange().ToSlice()
 +		data := pkt.Data().AsRange().ToSlice()
-@@ -239 +239,3 @@ func createStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
+@@ -239 +241,3 @@ func createStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
 -	mOpt := tcpip.TCPModerateReceiveBufferOption(true)
 +	// iOS packet-tunnel extensions have a hard physical-footprint ceiling.
 +	// Keep receive auto-tuning disabled in addition to the fixed range below.
@@ -36,9 +38,148 @@ index fdaafd3..375701b 100644
 -			b.Release()
 -		},
 diff --git a/proxy/tun/udp_fullcone.go b/proxy/tun/udp_fullcone.go
-index 1a1cb08..fb55d8c 100644
+index 1a1cb08..efe8eed 100644
 --- a/proxy/tun/udp_fullcone.go
 +++ b/proxy/tun/udp_fullcone.go
+@@ -16 +16 @@ type packet struct {
+-	dest *net.Destination
++	dest net.Destination
+@@ -46 +46 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+-		case conn.egress <- &packet{
++		case conn.egress <- packet{
+@@ -48 +48 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+-			dest: &dst,
++			dest: dst,
 @@ -63 +63 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
 -		egress := make(chan *packet, 1024)
-+		egress := make(chan *packet, 64)
++		egress := make(chan packet, 32)
+@@ -72 +72 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+-	case conn.egress <- &packet{
++	case conn.egress <- packet{
+@@ -74 +74 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+-		dest: &dst,
++		dest: dst,
+@@ -95 +95 @@ type udpConn struct {
+-	egress chan *packet
++	egress chan packet
+@@ -113 +113,2 @@ func (c *udpConn) ReadMultiBuffer() (buf.MultiBuffer, error) {
+-		b.UDP = e.dest
++		dest := e.dest
++		b.UDP = &dest
+diff --git a/proxy/wireguard/netstack.go b/proxy/wireguard/netstack.go
+index 22c42e3..1879e14 100644
+--- a/proxy/wireguard/netstack.go
++++ b/proxy/wireguard/netstack.go
+@@ -38,0 +39,7 @@ import (
++const (
++	netstackEndpointQueueSize = 64
++	netstackTCPBufferSize     = 128 << 10 // 128KiB
++	netstackTCPMaxInFlight    = 128
++	netstackUDPQueueSize      = 32
++)
++
+@@ -57 +64 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int, handleLocal
+-		ep:             channel.New(1024, uint32(mtu), ""),
++		ep:             channel.New(netstackEndpointQueueSize, uint32(mtu), ""),
+@@ -68,0 +76,23 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int, handleLocal
++	moderateReceiveBufferOpt := tcpip.TCPModerateReceiveBufferOption(false)
++	tcpipErr = dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &moderateReceiveBufferOpt)
++	if tcpipErr != nil {
++		return nil, nil, nil, fmt.Errorf("could not disable TCP receive auto-tuning: %v", tcpipErr)
++	}
++	receiveBufferOpt := tcpip.TCPReceiveBufferSizeRangeOption{
++		Min:     tcp.MinBufferSize,
++		Default: netstackTCPBufferSize,
++		Max:     netstackTCPBufferSize,
++	}
++	tcpipErr = dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &receiveBufferOpt)
++	if tcpipErr != nil {
++		return nil, nil, nil, fmt.Errorf("could not bound TCP receive buffers: %v", tcpipErr)
++	}
++	sendBufferOpt := tcpip.TCPSendBufferSizeRangeOption{
++		Min:     tcp.MinBufferSize,
++		Default: netstackTCPBufferSize,
++		Max:     netstackTCPBufferSize,
++	}
++	tcpipErr = dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sendBufferOpt)
++	if tcpipErr != nil {
++		return nil, nil, nil, fmt.Errorf("could not bound TCP send buffers: %v", tcpipErr)
++	}
+@@ -130,0 +161 @@ func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
++	defer view.Release()
+@@ -153,0 +185 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
++			pkb.DecRef()
+@@ -155,0 +188 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
++		pkb.DecRef()
+diff --git a/proxy/wireguard/tun.go b/proxy/wireguard/tun.go
+index 68bad3a..542fe67 100644
+--- a/proxy/wireguard/tun.go
++++ b/proxy/wireguard/tun.go
+@@ -56 +56 @@ func createForwarder(gstack *stack.Stack, handler func(conn net.Conn, dest net.D
+-	tcpForwarder := tcp.NewForwarder(gstack, 0, 65535, func(r *tcp.ForwarderRequest) {
++	tcpForwarder := tcp.NewForwarder(gstack, netstackTCPBufferSize, netstackTCPMaxInFlight, func(r *tcp.ForwarderRequest) {
+@@ -88 +88 @@ func createForwarder(gstack *stack.Stack, handler func(conn net.Conn, dest net.D
+-		data := pkt.Clone().Data().AsRange().ToSlice()
++		data := pkt.Data().AsRange().ToSlice()
+@@ -116 +116 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
+-		case uc.queue <- &packet{
++		case uc.queue <- packet{
+@@ -118 +118 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
+-			dest: &dst,
++			dest: dst,
+@@ -134 +134 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
+-			queue: make(chan *packet, 1024),
++			queue: make(chan packet, netstackUDPQueueSize),
+@@ -149 +149 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
+-	case uc.queue <- &packet{
++	case uc.queue <- packet{
+@@ -151 +151 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
+-		dest: &dst,
++		dest: dst,
+@@ -231 +231 @@ type packet struct {
+-	dest *net.Destination
++	dest net.Destination
+@@ -235 +235 @@ type udpConn struct {
+-	queue     chan *packet
++	queue     chan packet
+@@ -257 +257,2 @@ func (c *udpConn) ReadMultiBuffer() (buf.MultiBuffer, error) {
+-		b.UDP = q.dest
++		dest := q.dest
++		b.UDP = &dest
+diff --git a/transport/internet/finalmask/xdns/client.go b/transport/internet/finalmask/xdns/client.go
+index 557347f..78acd73 100644
+--- a/transport/internet/finalmask/xdns/client.go
++++ b/transport/internet/finalmask/xdns/client.go
+@@ -107,2 +107,2 @@ func NewConnClient(c *Config, raw net.PacketConn) (net.PacketConn, error) {
+-		readQueue:  make(chan *packet, 256),
+-		writeQueue: make(chan *packet, 256),
++		readQueue:  make(chan *packet, 64),
++		writeQueue: make(chan *packet, 64),
+diff --git a/transport/internet/hysteria/config.go b/transport/internet/hysteria/config.go
+index bf87d60..942c3ae 100644
+--- a/transport/internet/hysteria/config.go
++++ b/transport/internet/hysteria/config.go
+@@ -25 +25 @@ const (
+-	udpMessageChanSize        = 1024
++	udpMessageChanSize        = 64
+diff --git a/transport/internet/hysteria/udphop/conn.go b/transport/internet/hysteria/udphop/conn.go
+index 8ab8339..f1de2e4 100644
+--- a/transport/internet/hysteria/udphop/conn.go
++++ b/transport/internet/hysteria/udphop/conn.go
+@@ -14 +14 @@ const (
+-	packetQueueSize = 1024
++	packetQueueSize = 64
+@@ -100 +100,5 @@ func (u *UdpHopPacketConn) recvLoop(conn net.PacketConn) {
+-				u.recvQueue <- &udpPacket{nil, 0, nil, netErr}
++				select {
++				case u.recvQueue <- &udpPacket{nil, 0, nil, netErr}:
++				case <-u.closeChan:
++					return
++				}
+diff --git a/transport/internet/kcp/dialer.go b/transport/internet/kcp/dialer.go
+index 175998e..b93285a 100644
+--- a/transport/internet/kcp/dialer.go
++++ b/transport/internet/kcp/dialer.go
+@@ -23 +23 @@ func fetchInput(_ context.Context, input io.Reader, reader PacketReader, conn *C
+-	cache := make(chan *buf.Buffer, 1024)
++	cache := make(chan *buf.Buffer, 64)
