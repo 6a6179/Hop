@@ -2,6 +2,8 @@ module cat.string/hop/xraybridge
 
 go 1.26.5
 
+godebug fips140=off
+
 require github.com/xtls/xray-core v1.260327.1-0.20260627131803-45cf2898ab12
 
 require (

@@ -14,6 +14,37 @@ final class XrayConfigBuilderTests: XCTestCase {
         _ = try parse(first)
     }
 
+    func testRenderedConfigIsCappedAt512KiB() {
+        XCTAssertEqual(IOSRuntimeLimits.default.maxRenderedConfigBytes, 512 * 1024)
+
+        let profiles = (0 ..< 10).map { index in
+            var profile = basicVLESS()
+            profile.id = UUID()
+            profile.name = "Large \(index)"
+            profile.xrayAdvanced = XrayAdvancedDocument([
+                "settings": .object([
+                    "email": .string(String(repeating: "a", count: 58 * 1024)),
+                ]),
+            ])
+            return profile
+        }
+        let group = ProxyGroup(
+            name: "All",
+            type: .urlTest,
+            members: profiles.map { .profile($0.id) },
+        )
+
+        XCTAssertThrowsError(try builder.build(
+            profiles: profiles,
+            groups: [group],
+            selectedTarget: .group(group.id),
+            routingMode: .global,
+            rules: [],
+        )) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Rendered config"), "Unexpected error: \(error)")
+        }
+    }
+
     func testAdvancedEncodedByteCountMatchesEditableJSON() {
         let document = XrayAdvancedDocument([
             "nested": .object([
@@ -83,6 +114,35 @@ final class XrayConfigBuilderTests: XCTestCase {
         }
     }
 
+    func testEmitsMemoryBoundPolicyDNSAndGRPCDefaultsAcceptedByExactCore() async throws {
+        var profile = basicVLESS()
+        profile.transport = TransportOptions(
+            type: .grpc,
+            host: "example.com",
+            serviceName: "hop",
+        )
+
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let root = try parse(json)
+        let dns = try XCTUnwrap(root["dns"] as? [String: Any])
+        let policy = try XCTUnwrap(root["policy"] as? [String: Any])
+        let levels = try XCTUnwrap(policy["levels"] as? [String: Any])
+        let levelZero = try XCTUnwrap(levels["0"] as? [String: Any])
+        let outbound = try profileOutbound(root)
+        let stream = try XCTUnwrap(outbound["streamSettings"] as? [String: Any])
+        let grpc = try XCTUnwrap(stream["grpcSettings"] as? [String: Any])
+
+        XCTAssertEqual(dns["disableCache"] as? Bool, true)
+        XCTAssertEqual((levelZero["bufferSize"] as? NSNumber)?.intValue, 0)
+        XCTAssertEqual((levelZero["handshake"] as? NSNumber)?.intValue, 15)
+        XCTAssertEqual((levelZero["connIdle"] as? NSNumber)?.intValue, 120)
+        XCTAssertEqual((levelZero["uplinkOnly"] as? NSNumber)?.intValue, 1)
+        XCTAssertEqual((levelZero["downlinkOnly"] as? NSNumber)?.intValue, 1)
+        XCTAssertEqual((grpc["initial_windows_size"] as? NSNumber)?.intValue, 0)
+
+        try await XrayCoreClient.validate(configJSON: json)
+    }
+
     func testBuildsTLSXHTTPAndEnforcesSafeDefaults() async throws {
         let profile = ProxyProfile(
             name: "XHTTP TLS",
@@ -121,12 +181,71 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual(tls["curvePreferences"] as? [String], ["X25519MLKEM768", "X25519"])
         XCTAssertEqual(tls["enableSessionResumption"] as? Bool, true)
         XCTAssertEqual(xhttp["mode"] as? String, "stream-up")
-        XCTAssertEqual((extra["scMaxBufferedPosts"] as? NSNumber)?.intValue, 2)
-        XCTAssertEqual((extra["scMaxEachPostBytes"] as? NSNumber)?.intValue, 256 * 1024)
-        XCTAssertEqual((xmux["maxConnections"] as? NSNumber)?.intValue, 2)
+        XCTAssertEqual((extra["scMaxBufferedPosts"] as? NSNumber)?.intValue, 1)
+        XCTAssertEqual((extra["scMaxEachPostBytes"] as? NSNumber)?.intValue, 128 * 1024)
+        XCTAssertEqual((xmux["maxConnections"] as? NSNumber)?.intValue, 1)
         XCTAssertEqual(extra["noSSEHeader"] as? Bool, true)
 
         try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testXHTTPRejectsUnsafeZeroesAndBoundsPaddingAndSessionIDs() async throws {
+        for unsafeExtra: JSONValue in [
+            .object(["scMaxBufferedPosts": .number(0)]),
+            .object(["scMaxEachPostBytes": .number(0)]),
+            .object(["xmux": .object(["maxConnections": .number(0)])]),
+        ] {
+            var profile = basicVLESS()
+            profile.transport = TransportOptions(type: .xhttp, xhttpExtra: unsafeExtra)
+            assertRejected(profile, contains: "unsafe upstream memory default")
+        }
+
+        var profile = basicVLESS()
+        profile.transport = TransportOptions(
+            type: .xhttp,
+            xhttpExtra: .object(["xPaddingBytes": .number(16 * 1024 + 1)]),
+        )
+        assertRejected(profile, contains: "iOS memory limit")
+
+        profile.transport.xhttpExtra = .object(["sessionIDLength": .number(129)])
+        assertRejected(profile, contains: "iOS memory limit")
+
+        profile.transport.xhttpExtra = .object([
+            "xPaddingBytes": .number(16 * 1024),
+            "sessionIDLength": .number(128),
+        ])
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testMemorySensitiveFieldsRejectNullBooleanAndMalformedValues() {
+        for unsafeExtra: JSONValue in [
+            .object(["scMaxBufferedPosts": .null]),
+            .object(["scMaxEachPostBytes": .bool(true)]),
+            .object(["xmux": .object(["maxConnections": .null])]),
+            .object(["xPaddingBytes": .object(["from": .number(1), "to": .null])]),
+        ] {
+            var profile = basicVLESS()
+            profile.transport = TransportOptions(type: .xhttp, xhttpExtra: unsafeExtra)
+            assertRejected(profile, contains: "must be numeric")
+        }
+
+        for key in [
+            "initStreamReceiveWindow",
+            "maxStreamReceiveWindow",
+            "initConnectionReceiveWindow",
+            "maxConnectionReceiveWindow",
+            "maxIncomingStreams",
+        ] {
+            var profile = basicVLESS()
+            profile.transport = TransportOptions(
+                type: .tcp,
+                finalMask: .object([
+                    "quicParams": .object([key: .null]),
+                ]),
+            )
+            assertRejected(profile, contains: "must be numeric")
+        }
     }
 
     func testRejectsOpaqueXHTTPDownloadSettingsAcrossTypedAndAdvancedPaths() {
@@ -252,11 +371,67 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual(stream["network"] as? String, "hysteria")
         XCTAssertEqual(hysteria["auth"] as? String, "auth")
         XCTAssertEqual(quic["congestion"] as? String, "brutal")
-        XCTAssertEqual((quic["maxConnectionReceiveWindow"] as? NSNumber)?.intValue, 4 * 1024 * 1024)
-        XCTAssertEqual((quic["maxIncomingStreams"] as? NSNumber)?.intValue, 16)
+        XCTAssertEqual((quic["initStreamReceiveWindow"] as? NSNumber)?.intValue, 512 * 1024)
+        XCTAssertEqual((quic["maxStreamReceiveWindow"] as? NSNumber)?.intValue, 512 * 1024)
+        XCTAssertEqual((quic["initConnectionReceiveWindow"] as? NSNumber)?.intValue, 2 * 1024 * 1024)
+        XCTAssertEqual((quic["maxConnectionReceiveWindow"] as? NSNumber)?.intValue, 2 * 1024 * 1024)
+        XCTAssertEqual((quic["maxIncomingStreams"] as? NSNumber)?.intValue, 0)
         XCTAssertEqual(udp.first?["type"] as? String, "salamander")
 
         try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testAdvancedOnlyFinalMaskReceivesSafeQUICDefaults() async throws {
+        var profile = basicVLESS()
+        profile.transport = TransportOptions(type: .xhttp, path: "/", xhttpMode: "stream-one")
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "streamSettings": .object([
+                "finalmask": .object([
+                    "quicParams": .object(["congestion": .string("reno")]),
+                ]),
+            ]),
+        ])
+
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let outbound = try profileOutbound(parse(json))
+        let stream = try XCTUnwrap(outbound["streamSettings"] as? [String: Any])
+        let finalMask = try XCTUnwrap(stream["finalmask"] as? [String: Any])
+        let quic = try XCTUnwrap(finalMask["quicParams"] as? [String: Any])
+
+        XCTAssertEqual((quic["initStreamReceiveWindow"] as? NSNumber)?.intValue, 512 * 1024)
+        XCTAssertEqual((quic["maxStreamReceiveWindow"] as? NSNumber)?.intValue, 512 * 1024)
+        XCTAssertEqual((quic["initConnectionReceiveWindow"] as? NSNumber)?.intValue, 2 * 1024 * 1024)
+        XCTAssertEqual((quic["maxConnectionReceiveWindow"] as? NSNumber)?.intValue, 2 * 1024 * 1024)
+        XCTAssertEqual((quic["maxIncomingStreams"] as? NSNumber)?.intValue, 0)
+
+        try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testQUICRejectsZeroWindowsAndIncomingStreams() {
+        for (key, value) in [
+            ("initStreamReceiveWindow", 0),
+            ("maxStreamReceiveWindow", 0),
+            ("initConnectionReceiveWindow", 0),
+            ("maxConnectionReceiveWindow", 0),
+        ] {
+            var profile = basicVLESS()
+            profile.transport = TransportOptions(
+                type: .tcp,
+                finalMask: .object([
+                    "quicParams": .object([key: .number(Double(value))]),
+                ]),
+            )
+            assertRejected(profile, contains: "unsafe upstream memory default")
+        }
+
+        var profile = basicVLESS()
+        profile.transport = TransportOptions(
+            type: .tcp,
+            finalMask: .object([
+                "quicParams": .object(["maxIncomingStreams": .number(8)]),
+            ]),
+        )
+        assertRejected(profile, contains: "iOS memory limit")
     }
 
     func testFinalMaskAcceptsOnlyPublicLiteralXDNSResolvers() throws {
@@ -752,7 +927,7 @@ final class XrayConfigBuilderTests: XCTestCase {
         profile.transport = TransportOptions(
             type: .xhttp,
             xhttpExtra: .object([
-                "xPaddingBytes": .object(["from": .number(1), "to": .number(256 * 1024 + 1)]),
+                "xPaddingBytes": .object(["from": .number(1), "to": .number(16 * 1024 + 1)]),
             ]),
         )
         assertRejected(profile, contains: "iOS memory limit")
@@ -761,13 +936,140 @@ final class XrayConfigBuilderTests: XCTestCase {
         settings.xrayAdvanced = XrayAdvancedDocument([
             "policy": .object([
                 "levels": .object([
-                    "0": .object(["bufferSize": .number(257)]),
+                    "1": .object(["bufferSize": .number(17)]),
                 ]),
             ]),
         ])
         XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings)) { error in
             XCTAssertTrue(error.localizedDescription.contains("iOS memory limit"))
         }
+    }
+
+    func testAdvancedPolicyBufferCeilingRejectsNegativeAndCollisions() async throws {
+        var settings = AppSettings.defaults
+        settings.xrayAdvanced = XrayAdvancedDocument([
+            "policy": .object([
+                "levels": .object([
+                    "1": .object([
+                        "bufferSize": .number(16),
+                        "handshake": .number(15),
+                        "connIdle": .number(120),
+                        "uplinkOnly": .number(1),
+                        "downlinkOnly": .number(1),
+                    ]),
+                ]),
+            ]),
+        ])
+        let json = try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings)
+        try await XrayCoreClient.validate(configJSON: json)
+
+        for unsafe in [-1, 17] {
+            settings.xrayAdvanced = XrayAdvancedDocument([
+                "policy": .object([
+                    "levels": .object([
+                        "1": .object(["bufferSize": .number(Double(unsafe))]),
+                    ]),
+                ]),
+            ])
+            XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings))
+        }
+
+        for (key, value) in [("handshake", 16), ("connIdle", 121), ("uplinkOnly", 2), ("downlinkOnly", 2)] {
+            settings.xrayAdvanced = XrayAdvancedDocument([
+                "policy": .object([
+                    "levels": .object([
+                        "1": .object([key: .number(Double(value))]),
+                    ]),
+                ]),
+            ])
+            XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings))
+        }
+
+        settings.xrayAdvanced = XrayAdvancedDocument([
+            "policy": .object([
+                "levels": .object([
+                    "0": .object(["bufferSize": .number(0)]),
+                ]),
+            ]),
+        ])
+        XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("level-0 policy"))
+        }
+    }
+
+    func testAdvancedPolicyLevelsMustBeCanonicalAndCannotAliasLevelZero() {
+        var settings = AppSettings.defaults
+        for level in ["0", "00", "01", "+1", "-1", "4294967296", " 1"] {
+            settings.xrayAdvanced = XrayAdvancedDocument([
+                "policy": .object([
+                    "levels": .object([
+                        level: .object(["bufferSize": .number(0)]),
+                    ]),
+                ]),
+            ])
+            XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings))
+        }
+    }
+
+    func testProfileAdvancedCannotSelectPolicyLevel() {
+        var profile = basicVLESS()
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "settings": .object([
+                "level": .number(1),
+            ]),
+        ])
+
+        assertRejected(profile, contains: "Unknown or server-only")
+    }
+
+    func testBurstObservatoryIsUnavailableOnIOS() {
+        var settings = AppSettings.defaults
+        settings.xrayAdvanced = XrayAdvancedDocument([
+            "burstObservatory": .object([
+                "subjectSelector": .array([.string("proxy-")]),
+                "pingConfig": .object([
+                    "sampling": .number(40 * 1024 * 1024),
+                ]),
+            ]),
+        ])
+
+        XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Unknown or server-only"), "Unexpected error: \(error)")
+        }
+    }
+
+    func testAdvancedKCPMemoryFieldsUseMergedContext() async throws {
+        for (settings, expected) in [
+            (["uplinkCapacity": JSONValue.number(21)], "write-buffer limit"),
+            (["downlinkCapacity": JSONValue.number(21)], "read-buffer limit"),
+            (["cwndMultiplier": JSONValue.number(17)], "congestion-window multiplier"),
+            (["maxSendingWindow": JSONValue.number(2 * 1024 * 1024)], "collides"),
+        ] {
+            var profile = basicVLESS()
+            profile.security = .none
+            profile.transport = TransportOptions(type: .mKCP)
+            profile.xrayAdvanced = XrayAdvancedDocument([
+                "streamSettings": .object([
+                    "kcpSettings": .object(settings),
+                ]),
+            ])
+            assertRejected(profile, contains: expected)
+        }
+
+        var profile = basicVLESS()
+        profile.security = .none
+        profile.transport = TransportOptions(type: .mKCP)
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "streamSettings": .object([
+                "kcpSettings": .object([
+                    "uplinkCapacity": .number(20),
+                    "downlinkCapacity": .number(20),
+                    "cwndMultiplier": .number(16),
+                ]),
+            ]),
+        ])
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        try await XrayCoreClient.validate(configJSON: json)
     }
 
     func testURLTestGroupUsesBoundedObservatoryAndBalancer() async throws {

@@ -148,7 +148,7 @@ struct IOSRuntimeLimits: Hashable, Sendable {
 
     let goHeapBytes = 30 * 1024 * 1024
     let goGCPercent = 10
-    let maxRenderedConfigBytes = 1 * 1024 * 1024
+    let maxRenderedConfigBytes = TunnelMemoryPolicy.maximumConfigurationBytes
     let maxProfileAdvancedBytes = 64 * 1024
     let maxGlobalAdvancedBytes = 256 * 1024
     let maxReachableOutbounds = 32
@@ -164,14 +164,20 @@ struct IOSRuntimeLimits: Hashable, Sendable {
     let maxXUDPConcurrency = 16
     let maxKCPReadBufferBytes = 1 * 1024 * 1024
     let maxKCPWriteBufferBytes = 1 * 1024 * 1024
-    let maxGRPCInitialWindowBytes = 1 * 1024 * 1024
-    let maxXHTTPConnections = 2
-    let maxXHTTPBufferedPosts = 2
-    let maxXHTTPPostBytes = 256 * 1024
-    let maxPolicyBufferSizeKiB = 256
-    let maxQUICStreamWindowBytes = 1 * 1024 * 1024
-    let maxQUICConnectionWindowBytes = 4 * 1024 * 1024
-    let maxQUICIncomingStreams = 16
+    let maxKCPCongestionWindowMultiplier = 16
+    let maxGRPCInitialWindowBytes = 0
+    let maxXHTTPConnections = 1
+    let maxXHTTPBufferedPosts = 1
+    let maxXHTTPPostBytes = 128 * 1024
+    let maxXHTTPPaddingBytes = 16 * 1024
+    let maxXHTTPSessionIDLength = 128
+    let maxPolicyBufferSizeKiB = 16
+    let maxPolicyHandshakeSeconds = 15
+    let maxPolicyConnectionIdleSeconds = 120
+    let maxPolicyHalfCloseSeconds = 1
+    let maxQUICStreamWindowBytes = 512 * 1024
+    let maxQUICConnectionWindowBytes = 2 * 1024 * 1024
+    let maxQUICIncomingStreams = 0
     let maxHysteriaBandwidthMbps = 1000
     let maxHysteriaPortHops = 64
     let maxFinalMaskLayers = 4
@@ -180,6 +186,6 @@ struct IOSRuntimeLimits: Hashable, Sendable {
     let maxRealmSTUNServers = 4
     let maxWireGuardPeers = 4
     let maxConcurrentHeavyOutbounds = 1
-    let memoryCollectionThresholdBytes = 42 * 1024 * 1024
-    let memoryStopThresholdBytes = 46 * 1024 * 1024
+    let memoryCollectionThresholdBytes = Int(TunnelMemoryPolicy.softLimitBytes)
+    let memoryStopThresholdBytes = Int(TunnelMemoryPolicy.hardLimitBytes)
 }
