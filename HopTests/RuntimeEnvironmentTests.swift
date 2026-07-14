@@ -2,6 +2,24 @@
 import XCTest
 
 final class RuntimeEnvironmentTests: XCTestCase {
+    func testBundleIdentityDiagnosticIncludesBundleAndBuildVersions() throws {
+        let identity = try XCTUnwrap(RuntimeEnvironment.bundleIdentity(from: [
+            "CFBundleIdentifier": "cat.string.hop.tunnel",
+            "CFBundleShortVersionString": "0.1.2",
+            "CFBundleVersion": "32.1",
+        ]))
+
+        XCTAssertEqual(identity.bundleIdentifier, "cat.string.hop.tunnel")
+        XCTAssertEqual(identity.diagnosticDescription, "0.1.2 (32.1) [cat.string.hop.tunnel]")
+    }
+
+    func testBundleIdentityRejectsMissingBundleIdentifier() {
+        XCTAssertNil(RuntimeEnvironment.bundleIdentity(from: [
+            "CFBundleShortVersionString": "0.1.2",
+            "CFBundleVersion": "32.1",
+        ]))
+    }
+
     func testSelectAppGroupPrefersCommonOpenGroup() {
         let selected = RuntimeEnvironment.selectAppGroup(
             appGroups: ["group.app.only", RuntimeEnvironment.fallbackAppGroup],

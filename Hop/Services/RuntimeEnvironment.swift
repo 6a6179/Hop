@@ -71,40 +71,65 @@ enum RuntimeEnvironment {
         sharedContainerURL.appendingPathComponent(tunnelLogFileName)
     }
 
-    /// Whether any .appex is embedded under Hop.app/PlugIns. Some sideload
-    /// signers strip app extensions entirely; without the .appex the VPN can
-    /// never start, and `tunnelProviderBundleIdentifier` silently falls back
-    /// to the derived identifier, hiding the problem.
-    static let tunnelExtensionIsEmbedded: Bool = {
+    /// Records the exact host/extension identity that iOS is being asked to
+    /// launch. This distinguishes stale installs and rewritten bundle IDs from
+    /// provider failures without relying on a cached disconnect error.
+    static let installedBundleDiagnostic: String = {
+        let appIdentity = bundleIdentity(from: Bundle.main.infoDictionary)
+        let app = appIdentity?.diagnosticDescription ?? "unknown"
+        let tunnel = tunnelExtensionIdentity?.diagnosticDescription ?? "not embedded"
+        return "Installed bundles: Hop \(app); HopTunnel \(tunnel)"
+    }()
+
+    /// Hop currently embeds one app extension, so resolve its URL once and use
+    /// the same bundle for identity and provisioning diagnostics.
+    private static let tunnelExtensionURL: URL? = {
         guard let plugInsURL = Bundle.main.builtInPlugInsURL,
-              let enumerator = FileManager.default.enumerator(at: plugInsURL, includingPropertiesForKeys: nil)
+              let contents = try? FileManager.default.contentsOfDirectory(
+                  at: plugInsURL,
+                  includingPropertiesForKeys: nil,
+                  options: [.skipsHiddenFiles],
+              )
         else {
-            return false
+            return nil
         }
-        for case let url as URL in enumerator where url.pathExtension == "appex" {
-            return true
-        }
-        return false
+        return contents.first { $0.pathExtension == "appex" }
     }()
 
-    static let tunnelProviderBundleIdentifier: String = {
-        if let plugInsURL = Bundle.main.builtInPlugInsURL,
-           let enumerator = FileManager.default.enumerator(at: plugInsURL, includingPropertiesForKeys: nil)
-        {
-            for case let url as URL in enumerator where url.pathExtension == "appex" {
-                let infoURL = url.appendingPathComponent("Info.plist")
-                guard let data = try? Data(contentsOf: infoURL),
-                      let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
-                      let bundleID = plist["CFBundleIdentifier"] as? String
-                else {
-                    continue
-                }
-                return bundleID
-            }
-        }
+    /// Some sideload signers strip app extensions entirely. Without the .appex
+    /// the VPN can never start, and a derived provider ID would hide the cause.
+    static let tunnelExtensionIsEmbedded = tunnelExtensionURL != nil
 
-        return [Bundle.main.bundleIdentifier, "tunnel"].compactMap(\.self).joined(separator: ".")
+    private static let tunnelExtensionIdentity: RuntimeBundleIdentity? = {
+        guard let infoURL = tunnelExtensionURL?.appendingPathComponent("Info.plist"),
+              let data = try? Data(contentsOf: infoURL),
+              let plist = try? PropertyListSerialization.propertyList(
+                  from: data,
+                  options: [],
+                  format: nil,
+              ) as? [String: Any]
+        else {
+            return nil
+        }
+        return bundleIdentity(from: plist)
     }()
+
+    static let tunnelProviderBundleIdentifier = tunnelExtensionIdentity?.bundleIdentifier
+        ?? [Bundle.main.bundleIdentifier, "tunnel"].compactMap(\.self).joined(separator: ".")
+
+    static func bundleIdentity(from infoDictionary: [String: Any]?) -> RuntimeBundleIdentity? {
+        guard let infoDictionary,
+              let bundleIdentifier = infoDictionary["CFBundleIdentifier"] as? String,
+              !bundleIdentifier.isEmpty
+        else {
+            return nil
+        }
+        return RuntimeBundleIdentity(
+            bundleIdentifier: bundleIdentifier,
+            shortVersion: infoDictionary["CFBundleShortVersionString"] as? String ?? "unknown",
+            buildVersion: infoDictionary["CFBundleVersion"] as? String ?? "unknown",
+        )
+    }
 
     static func selectAppGroup(
         appGroups: [String],
@@ -184,15 +209,8 @@ enum RuntimeEnvironment {
     }
 
     private static func tunnelProvisioningProfileGroups() -> [String] {
-        guard let plugInsURL = Bundle.main.builtInPlugInsURL,
-              let enumerator = FileManager.default.enumerator(at: plugInsURL, includingPropertiesForKeys: nil)
-        else { return [] }
-
-        var groups: [String] = []
-        for case let url as URL in enumerator where url.pathExtension == "appex" {
-            groups.append(contentsOf: provisioningProfileGroups(at: url.appendingPathComponent("embedded.mobileprovision")))
-        }
-        return Array(Set(groups)).sorted()
+        guard let tunnelExtensionURL else { return [] }
+        return provisioningProfileGroups(at: tunnelExtensionURL.appendingPathComponent("embedded.mobileprovision"))
     }
 
     private static func provisioningProfileGroups(at url: URL) -> [String] {
@@ -220,6 +238,16 @@ enum RuntimeEnvironment {
             return sortedGroups
         }
         return [fallbackAppGroup] + sortedGroups.filter { $0 != fallbackAppGroup }
+    }
+}
+
+struct RuntimeBundleIdentity: Equatable, Sendable {
+    let bundleIdentifier: String
+    let shortVersion: String
+    let buildVersion: String
+
+    var diagnosticDescription: String {
+        "\(shortVersion) (\(buildVersion)) [\(bundleIdentifier)]"
     }
 }
 
