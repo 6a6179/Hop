@@ -54,6 +54,7 @@ final class TunnelController {
         startInProgress = true
         state = .connecting
         appendLog("Connect requested for \(target.id)")
+        appendLog(RuntimeEnvironment.installedBundleDiagnostic)
         appendLog("Resolved App Group: \(RuntimeEnvironment.appGroupIdentifier)")
         appendLog(RuntimeEnvironment.appGroupResolutionDiagnostic)
         appendLog("Shared container: \(RuntimeEnvironment.sharedContainerURL.path)")
@@ -275,11 +276,11 @@ final class TunnelController {
     /// include values echoed from the resolved configuration.
     func appendLastDisconnectError(_ error: Error?) {
         guard let error else {
-            appendLog("iOS reported no disconnect error for the last tunnel stop.")
+            appendLog("iOS reported no recent disconnect error.")
             return
         }
         let nsError = error as NSError
-        appendLog("Last disconnect error [domain=\(nsError.domain), code=\(nsError.code)]")
+        appendLog("Most recent disconnect error (may predate this start) [domain=\(nsError.domain), code=\(nsError.code)]")
         if let diagnosticHint = error.networkExtensionDiagnosticHint {
             appendLog("Diagnostic: \(diagnosticHint)")
         }
@@ -527,7 +528,7 @@ final class TunnelController {
                 if !loggedStartupStop {
                     loggedStartupStop = true
                     appendLog("Tunnel stopped before connecting. If this happened immediately, the packet tunnel extension failed during startup.")
-                    appendLog("If no Extension lines appear here, iOS rejected or killed HopTunnel.appex before PacketTunnelProvider could write logs. Check the App Group diagnostic above and that the embedded .appex was re-signed with Hop.app.")
+                    appendLog("If no Extension lines appear here, HopTunnel.appex may not have reached shared-log setup. Check the installed-bundle and App Group diagnostics above, then remove the saved Hop VPN and reinstall the latest build. If it persists, inspect the final re-signed .appex and its own provisioning profile.")
                     logLastDisconnectError()
                     // A startup failure repeats identically on every on-demand
                     // relaunch; disarm so iOS doesn't loop a broken config.
@@ -660,7 +661,7 @@ private extension Error {
             case .pluginFailed:
                 "iOS launched HopTunnel.appex but it exited during startup — usually a thrown provider error or a crash. Any Extension lines above carry the provider's own reason."
             case .pluginDisabled:
-                "iOS refused to launch HopTunnel.appex. The re-signed .appex is missing the Packet Tunnel entitlement or a provisioning profile that allows it; re-sign with app extensions enabled."
+                "iOS reports HopTunnel.appex is unavailable or needs an update. Remove the saved Hop VPN, uninstall the old app, then install this newer build and reconnect. If it persists, verify that the final re-signed .appex bundle ID matches the logged provider ID and that its own provisioning profile authorizes Packet Tunnel, the shared App Group, and keychain group."
             case .configurationFailed, .configurationNotFound:
                 "The saved VPN configuration is invalid or gone. Toggle the Hop VPN profile in Settings > VPN, or reconnect to rebuild it."
             default:

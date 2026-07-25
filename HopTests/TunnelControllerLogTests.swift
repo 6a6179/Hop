@@ -87,10 +87,24 @@ final class TunnelControllerLogTests: XCTestCase {
         let entries = controller.logs.joined(separator: "\n")
         XCTAssertFalse(entries.contains(secret))
         XCTAssertFalse(entries.contains("Pre-fix provider detail"))
-        XCTAssertTrue(entries.contains("Last disconnect error"))
+        XCTAssertTrue(entries.contains("Most recent disconnect error"))
+        XCTAssertTrue(entries.contains("may predate this start"))
         XCTAssertTrue(entries.contains("domain=NEVPNErrorDomain"))
         XCTAssertTrue(entries.contains("code=5"))
         XCTAssertTrue(entries.contains("NetworkExtension IPC failed"))
+    }
+
+    func testPluginDisabledDiagnosticDoesNotAssumeAnEntitlementFailure() {
+        let error = NSError(domain: "NEVPNConnectionErrorDomain", code: 14)
+        let controller = TunnelController(logs: [], maximumLogEntries: 100)
+
+        controller.appendLastDisconnectError(error)
+
+        let entries = controller.logs.joined(separator: "\n")
+        XCTAssertTrue(entries.contains("unavailable or needs an update"))
+        XCTAssertTrue(entries.contains("Remove the saved Hop VPN"))
+        XCTAssertTrue(entries.contains("own provisioning profile"))
+        XCTAssertFalse(entries.contains("missing the Packet Tunnel entitlement"))
     }
 
     func testLegacyExtensionLogGatePurgesBeforeImport() async throws {

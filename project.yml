@@ -8,7 +8,8 @@ settings:
     SWIFT_VERSION: "6.2"
     IPHONEOS_DEPLOYMENT_TARGET: "26.0"
     MARKETING_VERSION: "0.1.2"
-    CURRENT_PROJECT_VERSION: "3"
+    # CI overrides this with the workflow run number for every published IPA.
+    CURRENT_PROJECT_VERSION: "4"
     DEVELOPMENT_TEAM: ""
   configs:
     Release:

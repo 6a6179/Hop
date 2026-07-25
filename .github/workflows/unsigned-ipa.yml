@@ -20,6 +20,10 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # A failed publish job can be rerun without rebuilding its IPA. Keep the
+  # product version stable across attempts so release metadata always matches
+  # the artifact, while each new workflow run still advances both bundles.
+  BUNDLE_VERSION: ${{ github.run_number }}
   # scripts/build-libxray.sh verifies this exact toolchain before running any
   # upstream code. Go's built-in toolchain manager supplies it from the
   # bootstrap Go installation on the runner.
@@ -140,6 +144,7 @@ jobs:
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
             DEPLOYMENT_POSTPROCESSING=YES \
+            CURRENT_PROJECT_VERSION="$BUNDLE_VERSION" \
             build
 
       - name: Package unsigned IPA
@@ -153,6 +158,18 @@ jobs:
           rm -rf "$STAGE" build/UnsignedIPA/Hop-unsigned.ipa
           mkdir -p "$STAGE/Payload"
           ditto "$APP" "$STAGE/Payload/Hop.app"
+
+          packaged_app="$STAGE/Payload/Hop.app"
+          packaged_extension="$packaged_app/PlugIns/HopTunnel.appex"
+          test -d "$packaged_extension"
+          app_build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$packaged_app/Info.plist")"
+          extension_build_version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$packaged_extension/Info.plist")"
+          if [[ "$app_build_version" != "$BUNDLE_VERSION" || "$extension_build_version" != "$BUNDLE_VERSION" ]]; then
+            echo "::error title=Unexpected CFBundleVersion::Expected ${BUNDLE_VERSION}; Hop.app=${app_build_version}; HopTunnel.appex=${extension_build_version}"
+            exit 1
+          fi
+          echo "Verified CFBundleVersion ${BUNDLE_VERSION} on Hop.app and HopTunnel.appex"
+
           find "$STAGE/Payload/Hop.app" \( -name _CodeSignature -o -name embedded.mobileprovision \) -print -exec rm -rf {} +
           xattr -cr "$STAGE/Payload/Hop.app" || true
 
@@ -195,6 +212,7 @@ jobs:
             echo "- File: \`Hop-unsigned.ipa\`"
             echo "- Size: \`${size_bytes} bytes\`"
             echo "- SHA-256: \`${sha256}\`"
+            echo "- Product build (CFBundleVersion): \`${BUNDLE_VERSION}\`"
             echo "- Release tag: \`${release_tag}\`"
             echo
             echo "> This IPA is ad-hoc fakesigned (entitlements embedded for re-signers). It still needs proper signing/provisioning before installation on a physical device; the signer must keep the Packet Tunnel entitlement on HopTunnel.appex."
@@ -283,6 +301,7 @@ jobs:
 
           - Branch/ref: ${GITHUB_REF_NAME}
           - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Product build (CFBundleVersion): ${BUNDLE_VERSION}
           - Size: ${size_bytes} bytes
           - SHA-256: ${sha256}
 
