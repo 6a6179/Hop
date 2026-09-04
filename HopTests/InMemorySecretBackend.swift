@@ -1,6 +1,10 @@
 import Foundation
 @testable import Hop
 
+func persistedStatePayload(at url: URL) throws -> Data {
+    try JSONDecoder().decode(AppStateEnvelope.self, from: Data(contentsOf: url)).payload
+}
+
 /// In-memory `SecretBackend` for tests. The real Keychain is unavailable to
 /// unsigned simulator unit tests, so tests exercise the secret logic
 /// (redaction, tokenization, migration, store semantics) against this backend.
@@ -72,6 +76,27 @@ extension SecretStore {
     /// A fresh, isolated in-memory store for tests.
     static func inMemory() -> SecretStore {
         SecretStore(backend: InMemorySecretBackend())
+    }
+}
+
+/// Backend that rejects every write and stores nothing, for exercising save
+/// paths that must abort cleanly when the runtime Keychain is unavailable.
+final class RejectingSecretBackend: SecretBackend, @unchecked Sendable {
+    func value(forKey _: String) -> String? {
+        nil
+    }
+
+    func setValue(_: String, forKey _: String) -> Bool {
+        false
+    }
+
+    func removeValue(forKey _: String) -> Bool {
+        false
+    }
+
+    func removeAll() {}
+    func allKeys() -> [String] {
+        []
     }
 }
 

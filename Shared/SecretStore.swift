@@ -99,16 +99,28 @@ struct SecretStore {
     /// `SecretResolver` finds nothing and fails a concurrent start/reload.
     /// Returns false if any write or prune failed; the set may then be partial.
     @discardableResult
-    func replaceAll(with items: [(key: String, value: String)]) -> Bool {
+    func replaceAll(with items: [(key: String, value: String)], preservingKeys: Set<String> = []) -> Bool {
         var allSucceeded = true
         for item in items {
             allSucceeded = backend.setValue(item.value, forKey: item.key) && allSucceeded
         }
-        let keep = Set(items.map(\.key))
+        guard allSucceeded else { return false }
+        let keep = Set(items.map(\.key)).union(preservingKeys)
         for key in backend.allKeys() where !keep.contains(key) {
             allSucceeded = backend.removeValue(forKey: key) && allSucceeded
         }
         return allSucceeded
+    }
+
+    /// Only runtime credential snapshots are pruned; authentication keys stay.
+    @discardableResult
+    func pruneTunnelSnapshots(keeping nonces: Set<String>) -> Bool {
+        let prefixes = nonces.map { HopSecret.runtimeKeyPrefix(nonce: $0) }
+        var succeeded = true
+        for key in backend.allKeys() where key.hasPrefix("tunnel-snapshot.") && !prefixes.contains(where: key.hasPrefix) {
+            succeeded = backend.removeValue(forKey: key) && succeeded
+        }
+        return succeeded
     }
 
     /// Keychain account for the HMAC key that authenticates the App Group
@@ -130,11 +142,6 @@ struct SecretStore {
         value(forKey: Self.appStateAuthenticationKey) ?? ""
     }
 
-    @discardableResult
-    func ensureAppStateAuthenticationSecret() -> String {
-        ensureRuntimeSecret(forKey: Self.appStateAuthenticationKey)
-    }
-
     private func ensureRuntimeSecret(forKey key: String) -> String {
         if let existing = value(forKey: key), !existing.isEmpty {
             return existing
@@ -144,7 +151,7 @@ struct SecretStore {
         return secret
     }
 
-    private static func randomSecret() -> String {
+    static func randomSecret() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         let status = bytes.withUnsafeMutableBytes { buffer in
             SecRandomCopyBytes(kSecRandomDefault, buffer.count, buffer.baseAddress!)
@@ -226,7 +233,19 @@ struct KeychainSecretBackend: SecretBackend {
             _ = Self.didLogEntitlementFallback
             return keys(includeGroup: false)
         }
-        guard status == errSecSuccess, let items = result as? [[String: Any]] else {
+        guard status == errSecSuccess else {
+            return []
+        }
+
+        // Like `values(includeGroup:)`: a single match can come back as a bare
+        // dictionary. Treating it as "no items" would make `replaceAll` skip
+        // pruning the last remaining stale key.
+        let items: [[String: Any]]
+        if let matches = result as? [[String: Any]] {
+            items = matches
+        } else if let match = result as? [String: Any] {
+            items = [match]
+        } else {
             return []
         }
         return items.compactMap { $0[kSecAttrAccount as String] as? String }

@@ -31,22 +31,22 @@ struct XrayMigrationReport: Codable, Equatable {
             lines.append("Removed empty groups: \(removedGroupNames.joined(separator: ", ")).")
         }
         if removedRuleCount > 0 {
-            lines.append("Removed \(removedRuleCount) rule(s) that referenced removed nodes or groups.")
+            lines.append("Removed \(removedRuleCount) rules with missing nodes or groups.")
         }
         if !blockedTLSProfileNames.isEmpty {
-            lines.append("These nodes must be edited before connecting because Xray does not accept allowInsecure: \(blockedTLSProfileNames.joined(separator: ", ")).")
+            lines.append("Blocked by allowInsecure: \(blockedTLSProfileNames.joined(separator: ", ")). Enable verification or add certificate pins.")
         }
         if let blockedAdvancedTLSProfileNames, !blockedAdvancedTLSProfileNames.isEmpty {
-            lines.append("These nodes retain advanced TLS trust-policy fields that could not be migrated safely and must be reviewed before connecting: \(blockedAdvancedTLSProfileNames.joined(separator: ", ")).")
+            lines.append("Advanced TLS trust settings need review before connecting: \(blockedAdvancedTLSProfileNames.joined(separator: ", ")).")
         }
         if let disabledLegacySubscriptionGroupNames, !disabledLegacySubscriptionGroupNames.isEmpty {
-            lines.append("Disabled legacy imported groups, groups that depended on them, and removed dynamic targets that could retarget across sources: \(disabledLegacySubscriptionGroupNames.joined(separator: ", ")). Review their remaining members before enabling them.")
+            lines.append("Disabled legacy and dependent groups: \(disabledLegacySubscriptionGroupNames.joined(separator: ", ")). Removed targets that could switch sources. Review members before enabling.")
         }
         if let clearedLegacySelectionName {
-            lines.append("Cleared the legacy selection \(clearedLegacySelectionName) because its subscription ownership could not be proven. Select a reviewed outbound before connecting.")
+            lines.append("Cleared \(clearedLegacySelectionName): unknown subscription source. Select a reviewed outbound before connecting.")
         }
         if requiresLegacyRoutingReview == true {
-            lines.append("Custom legacy routing rules may have come from a subscription. They were preserved for review, and Rule mode was not allowed to remain active.")
+            lines.append("Legacy rules may come from subscriptions. Kept for review; Rule mode disabled.")
         }
         return lines.joined(separator: "\n")
     }
@@ -72,6 +72,10 @@ struct HopAppData: Codable {
     /// migrate; never written by current builds (optionals are omitted on encode).
     var rules: [RoutingRule]?
     var pendingXrayMigrationReport: XrayMigrationReport?
+    var routingConfigurationMigrationVersion: Int?
+    /// Immutable Keychain snapshot referenced by the authenticated state file.
+    var secretGeneration: UUID?
+    var secretKeys: [String]?
 
     init(
         profiles: [ProxyProfile],
@@ -87,6 +91,7 @@ struct HopAppData: Codable {
         schemaVersion: Int? = HopAppData.currentSchemaVersion,
         legacyExtensionLogPurgePending: Bool? = nil,
         pendingXrayMigrationReport: XrayMigrationReport? = nil,
+        routingConfigurationMigrationVersion: Int? = 1,
     ) {
         self.schemaVersion = schemaVersion
         self.legacyExtensionLogPurgePending = legacyExtensionLogPurgePending
@@ -101,7 +106,13 @@ struct HopAppData: Codable {
         self.activeRuleConfigurationID = activeRuleConfigurationID
         self.rules = rules
         self.pendingXrayMigrationReport = pendingXrayMigrationReport
+        self.routingConfigurationMigrationVersion = routingConfigurationMigrationVersion
     }
+}
+
+struct AppStateEnvelope: Codable {
+    var payload: Data
+    var signature: String
 }
 
 struct HopAppDataStore {
@@ -129,14 +140,57 @@ struct HopAppDataStore {
             return nil
         }
 
-        let hadAuthenticationSecret = !authenticationStore.appStateAuthenticationSecret().isEmpty
-        guard !hadAuthenticationSecret || isAuthenticated(data) else {
-            NSLog("Hop: app state authentication failed")
+        let envelope = try? JSONDecoder().decode(AppStateEnvelope.self, from: data)
+        let payload: Data
+        if let envelope {
+            guard TunnelConfigAuthenticator.isValidSignature(
+                envelope.signature, for: envelope.payload,
+                secret: authenticationStore.appStateAuthenticationSecret(),
+            ) else {
+                NSLog("Hop: app state authentication failed")
+                return nil
+            }
+            payload = envelope.payload
+        } else {
+            // Only genuinely unsigned legacy state may bootstrap a key. A
+            // sidecar with an unavailable key must not become unsigned input.
+            if FileManager.default.fileExists(atPath: signatureURL.path),
+               authenticationStore.appStateAuthenticationSecret().isEmpty
+            {
+                _ = try? prepareAuthenticationSecret()
+            }
+            guard authenticationStore.appStateAuthenticationSecret().isEmpty
+                && !FileManager.default.fileExists(atPath: signatureURL.path)
+                || isAuthenticated(data)
+            else {
+                NSLog("Hop: legacy app state authentication failed")
+                return nil
+            }
+            payload = data
+        }
+
+        guard var decoded = try? JSONDecoder.hop.decode(HopAppData.self, from: payload),
+              envelope == nil || (decoded.secretGeneration != nil && decoded.secretKeys != nil)
+        else {
             return nil
         }
 
-        guard var decoded = try? JSONDecoder.hop.decode(HopAppData.self, from: data) else {
-            return nil
+        // Resolve exactly the committed generation, never the mutable runtime
+        // aliases. Missing keys reject the snapshot instead of erasing secrets.
+        var storedSecrets: [String: String] = [:]
+        if !decoded.profiles.isEmpty || !decoded.subscriptions.isEmpty {
+            let values = secretStore.allValues()
+            if let generation = decoded.secretGeneration, let keys = decoded.secretKeys {
+                for key in keys {
+                    guard let value = values[Self.snapshotKey(key, generation: generation)] else {
+                        NSLog("Hop: saved credentials are unavailable; leaving state unchanged")
+                        return nil
+                    }
+                    storedSecrets[key] = value
+                }
+            } else {
+                storedSecrets = values
+            }
         }
 
         let didMigrateToXray = migrateToXrayIfNeeded(&decoded)
@@ -157,11 +211,10 @@ struct HopAppDataStore {
             // every protocol, REALITY, WireGuard-peer, advanced-JSON, and
             // subscription-URL field. App-state loading already hydrates all
             // of these values into memory; only the round-trip count changes.
-            let storedSecrets = secretStore.allValues()
             decoded.profiles = decoded.profiles.map { $0.hydratingSecrets(from: storedSecrets) }
             decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: storedSecrets) }
         }
-        if !hadAuthenticationSecret || hadInlineProfileSecrets || hadInlineSubscriptionURLs || didMigrateToXray || didMigrateSubscriptionProvenance || didMigrateAdvancedTLS || didMigrateLegacyLogState {
+        if envelope == nil || hadInlineProfileSecrets || hadInlineSubscriptionURLs || didMigrateToXray || didMigrateSubscriptionProvenance || didMigrateAdvancedTLS || didMigrateLegacyLogState {
             save(decoded) // move secrets to the Keychain and rewrite the JSON without them
         }
         return decoded
@@ -404,7 +457,7 @@ struct HopAppDataStore {
             }
             group.subscriptionID = nil
             group.isEnabled = false
-            group.warning = "Legacy imported group disabled for routing review."
+            group.warning = "Legacy group disabled. Review routing before enabling."
             if group != data.groups[index] {
                 data.groups[index] = group
                 didChange = true
@@ -421,7 +474,7 @@ struct HopAppDataStore {
                 fallback: "Dependent Group",
             ))
             group.isEnabled = false
-            group.warning = "Group disabled because it depends on a legacy imported group that requires routing review."
+            group.warning = "Disabled due to legacy group routing. Review dependencies before enabling."
             if group != data.groups[index] {
                 data.groups[index] = group
                 didChange = true
@@ -677,54 +730,108 @@ struct HopAppDataStore {
         return true
     }
 
-    func save(_ data: HopAppData) {
+    @discardableResult
+    func save(_ data: HopAppData) -> Bool {
         do {
-            // Move secrets into the Keychain and strip them from the JSON so
-            // credentials, UUIDs, and private keys are never written in
-            // cleartext. `replaceAll` costs one Keychain round-trip per secret
-            // plus an enumerate-and-prune pass — with hundreds of imported
-            // profiles that dominates every save — so it runs only when the
-            // secret set actually changed since the last write. Most saves
-            // (log updates, settings, rule edits) change no secret at all.
-            // The first save after launch always writes, so a Keychain that
-            // drifted while the app was not running heals on next persist.
-            let secretItems = data.profiles.flatMap(\.keychainSecretItems) + data.subscriptions.compactMap(\.keychainURLItem)
-            if secretWriteCache.changedSinceLastWrite(secretItems) {
-                if !secretStore.replaceAll(with: secretItems) {
-                    // A write failed inside the Keychain. Drop the cache so the
-                    // next save retries the full set instead of skipping forever
-                    // on a state that never actually landed.
-                    secretWriteCache.invalidate()
-                }
-            }
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let secretItems = Dictionary(data.profiles.flatMap(\.keychainSecretItems) + data.subscriptions.compactMap(\.keychainURLItem), uniquingKeysWith: { _, last in last })
+            let snapshot = secretWriteCache.prepare(secretItems)
             var redacted = data
             redacted.profiles = data.profiles.map { $0.redactingSecrets() }
             redacted.subscriptions = data.subscriptions.map { $0.redactingSecrets() }
-
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            redacted.secretGeneration = snapshot.generation
+            redacted.secretKeys = secretItems.keys.sorted()
             let encoded = try JSONEncoder.hop.encode(redacted)
-            guard let signature = signature(for: encoded) else {
-                NSLog("Hop: unable to authenticate app state; skipping save")
-                return
+            let secret = try prepareAuthenticationSecret()
+            guard let signature = TunnelConfigAuthenticator.signature(for: encoded, secret: secret) else {
+                throw CocoaError(.fileWriteUnknown)
             }
-            // Defense-in-depth: protect the (now secret-free) state at rest too.
-            try encoded.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
-            try Data(signature.utf8).write(to: signatureURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            let envelope = try JSONEncoder().encode(AppStateEnvelope(payload: encoded, signature: signature))
+            let generationKeys = Set(secretItems.keys.map { Self.snapshotKey($0, generation: snapshot.generation) })
+            if snapshot.needsWrite {
+                // Never overwrite the old generation: a failed write or process
+                // termination must leave the previous state AND its secrets usable.
+                for (key, value) in secretItems {
+                    guard secretStore.setValue(value, forKey: Self.snapshotKey(key, generation: snapshot.generation)) else {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                }
+            }
+            try envelope.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            // Mirror stable compatibility aliases only after the authenticated
+            // state points at its complete immutable snapshot. Tunnel starts
+            // use separate nonce-scoped runtime snapshots.
+            if snapshot.needsWrite,
+               !secretStore.replaceAll(with: secretItems.map { (key: $0.key, value: $0.value) }, preservingKeys: generationKeys)
+            {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            try? FileManager.default.removeItem(at: signatureURL)
+            return true
         } catch {
-            assertionFailure("Unable to persist Hop app data: \(error)")
+            secretWriteCache.invalidate()
+            NSLog("Hop: unable to persist app state; retry required (code %ld)", (error as NSError).code)
+            return false
         }
+    }
+
+    static func snapshotKey(_ key: String, generation: UUID) -> String {
+        "app-state.\(generation.uuidString).\(key)"
     }
 
     private var signatureURL: URL {
         TunnelConfigAuthenticator.signatureURL(forConfigURL: url)
     }
 
-    private func signature(for data: Data) -> String? {
-        let secret = authenticationStore.ensureAppStateAuthenticationSecret()
-        guard !secret.isEmpty, authenticationStore.appStateAuthenticationSecret() == secret else {
-            return nil
+    private static let pendingAuthenticationKey = "pending-app-state-authentication-key"
+
+    /// Bootstrap unsigned legacy state without stranding it between creating the
+    /// first authentication key and committing its replacement. A pending key
+    /// lets the next launch finish an interrupted sidecar/key handoff.
+    @discardableResult
+    private func prepareAuthenticationSecret() throws -> String {
+        let existing = authenticationStore.appStateAuthenticationSecret()
+        if !existing.isEmpty {
+            return existing
         }
-        return TunnelConfigAuthenticator.signature(for: data, secret: secret)
+        let previous = try? Data(contentsOf: url)
+        let pending = authenticationStore.value(forKey: Self.pendingAuthenticationKey)
+        let secret = pending ?? SecretStore.randomSecret()
+        if let previous {
+            guard (try? JSONDecoder.hop.decode(HopAppData.self, from: previous)) != nil else {
+                // An explicit replacement of undecodable legacy state needs no
+                // migration, but an envelope must never be re-signed without its key.
+                guard (try? JSONDecoder().decode(AppStateEnvelope.self, from: previous)) == nil,
+                      !FileManager.default.fileExists(atPath: signatureURL.path)
+                else {
+                    throw CocoaError(.fileReadNoPermission)
+                }
+                return try storeAuthenticationSecret(secret)
+            }
+            if let signature = try? String(contentsOf: signatureURL, encoding: .utf8) {
+                guard pending != nil, TunnelConfigAuthenticator.isValidSignature(signature, for: previous, secret: secret) else {
+                    throw CocoaError(.fileReadNoPermission)
+                }
+            } else {
+                guard authenticationStore.setValue(secret, forKey: Self.pendingAuthenticationKey),
+                      let signature = TunnelConfigAuthenticator.signature(for: previous, secret: secret)
+                else {
+                    throw CocoaError(.fileWriteUnknown)
+                }
+                try Data(signature.utf8).write(to: signatureURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            }
+        }
+        return try storeAuthenticationSecret(secret)
+    }
+
+    private func storeAuthenticationSecret(_ secret: String) throws -> String {
+        guard authenticationStore.setValue(secret, forKey: SecretStore.appStateAuthenticationKey),
+              authenticationStore.appStateAuthenticationSecret() == secret
+        else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        authenticationStore.removeValue(forKey: Self.pendingAuthenticationKey)
+        return secret
     }
 
     private func isAuthenticated(_ data: Data) -> Bool {
@@ -746,18 +853,19 @@ struct HopAppDataStore {
 private final class SecretWriteCache: @unchecked Sendable {
     private let lock = NSLock()
     private var lastWritten: [String: String]?
+    private var generation = UUID()
 
     /// Records `items` as the latest intended Keychain state and reports
     /// whether they differ from the previous write (always true for the first).
-    func changedSinceLastWrite(_ items: [(key: String, value: String)]) -> Bool {
-        let dictionary = Dictionary(items, uniquingKeysWith: { _, last in last })
+    func prepare(_ items: [String: String]) -> (generation: UUID, needsWrite: Bool) {
         lock.lock()
         defer { lock.unlock() }
-        if lastWritten == dictionary {
-            return false
+        if lastWritten == items {
+            return (generation, false)
         }
-        lastWritten = dictionary
-        return true
+        lastWritten = items
+        generation = UUID()
+        return (generation, true)
     }
 
     /// Forgets the recorded state after a failed Keychain write, so the next

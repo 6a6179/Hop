@@ -16,24 +16,46 @@ extension View {
     func insecureTLSImportConfirmation(
         isPresented: Binding<Bool>,
         profileNames: [String],
+        onCancel: @escaping () -> Void = {},
         onConfirm: @escaping () -> Void,
     ) -> some View {
         alert("Disable Certificate Verification?", isPresented: isPresented) {
             Button("Import Anyway", role: .destructive, action: onConfirm)
-            Button("Cancel", role: .cancel) {}
+            Button("Cancel", role: .cancel, action: onCancel)
         } message: {
-            Text("\(profileNames.count == 1 ? "1 node turns" : "\(profileNames.count) nodes turn") off TLS certificate verification (allow-insecure), so traffic to \(profileNames.count == 1 ? "it" : "them") can be intercepted: \(profileNames.prefix(5).joined(separator: ", "))\(profileNames.count > 5 ? ", …" : "")")
+            Text("TLS verification is off for \(profileNames.count) node\(profileNames.count == 1 ? "" : "s"). Traffic can be intercepted.\n\n\(profileNames.prefix(5).joined(separator: ", "))\(profileNames.count > 5 ? ", …" : "")")
         }
+    }
+}
+
+struct ImportTextDraft {
+    var text: String {
+        didSet {
+            guard text != oldValue else { return }
+            result = nil
+            error = nil
+            subscriptionURL = nil
+        }
+    }
+
+    var result: ImportResult?
+    var error: String?
+    var subscriptionURL: URL?
+
+    mutating func finishPreview(_ result: ImportResult, subscriptionURL: URL?, for input: String) throws {
+        try Task.checkCancellation()
+        guard text == input else { return }
+        self.result = result
+        self.subscriptionURL = subscriptionURL
+        error = nil
     }
 }
 
 struct ImportTextSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var importText: String
-    @State private var importResult: ImportResult?
-    @State private var importError: String?
-    @State private var detectedSubscriptionURL: URL?
+    @State private var draft: ImportTextDraft
     @State private var isLoading = false
+    @State private var previewTask: Task<Void, Never>?
     @State private var showInsecureTLSConfirmation = false
 
     let importService: ProxyImportService
@@ -45,14 +67,14 @@ struct ImportTextSheet: View {
     init(importService: ProxyImportService, initialText: String = "", onSave: @escaping (ImportTextSaveResult) -> Void) {
         self.importService = importService
         self.onSave = onSave
-        _importText = State(initialValue: initialText)
+        _draft = State(initialValue: ImportTextDraft(text: initialText))
     }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("Paste node links, subscription text, or a compatible .conf file", text: $importText, axis: .vertical)
+                    TextField("Paste links, a subscription URL, or config text", text: $draft.text, axis: .vertical)
                         .lineLimit(6 ... 14)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -62,21 +84,24 @@ struct ImportTextSheet: View {
                         previewImport()
                     } label: {
                         if isLoading {
-                            Label("Previewing...", systemImage: "arrow.down.circle")
+                            HStack {
+                                ProgressView()
+                                Text("Previewing…")
+                            }
                         } else {
                             Label("Preview Import", systemImage: "eye")
                         }
                     }
                     .disabled(isLoading || trimmedImportText.isEmpty)
                 } header: {
-                    Text("Paste Import")
+                    Text("Links or Config")
                 } footer: {
-                    Text("Subscription URLs are detected and saved as subscriptions. Proxy share links and base64/plain payloads are imported as nodes, groups, or rules.")
+                    Text("Preview fetches subscription URLs.")
                 }
 
-                if let importResult {
-                    Section(detectedSubscriptionURL == nil ? "Import Preview" : "Subscription Preview") {
-                        if let detectedSubscriptionURL {
+                if let importResult = draft.result {
+                    Section(draft.subscriptionURL == nil ? "Import Preview" : "Subscription Preview") {
+                        if let detectedSubscriptionURL = draft.subscriptionURL {
                             LabeledContent("URL") {
                                 Text(SubscriptionSource(name: "Subscription", url: detectedSubscriptionURL.absoluteString).redactedDisplayURL)
                                     .lineLimit(1)
@@ -87,7 +112,7 @@ struct ImportTextSheet: View {
                     }
                 }
 
-                if let importError {
+                if let importError = draft.error {
                     Section {
                         Text(importError)
                             .font(.footnote)
@@ -100,13 +125,13 @@ struct ImportTextSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
+                        cancelPreview()
                         dismiss()
                     }
-                    .disabled(isLoading)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
-                        guard let importResult else {
+                        guard let importResult = draft.result else {
                             return
                         }
                         if importResult.insecureTLSProfileNames.isEmpty {
@@ -115,19 +140,22 @@ struct ImportTextSheet: View {
                             showInsecureTLSConfirmation = true
                         }
                     }
-                    .disabled(isLoading || (importResult?.isEmpty ?? true))
+                    .disabled(isLoading || (draft.result?.isEmpty ?? true))
                 }
             }
             .insecureTLSImportConfirmation(
                 isPresented: $showInsecureTLSConfirmation,
-                profileNames: importResult?.insecureTLSProfileNames ?? [],
+                profileNames: draft.result?.insecureTLSProfileNames ?? [],
             ) {
-                if let importResult {
+                if let importResult = draft.result {
                     save(importResult)
                 }
             }
             .onAppear {
                 autoPreviewPrefill()
+            }
+            .onDisappear {
+                cancelPreview()
             }
         }
     }
@@ -138,7 +166,7 @@ struct ImportTextSheet: View {
     /// request to an arbitrary server without an explicit user action.
     private func autoPreviewPrefill() {
         let trimmed = trimmedImportText
-        guard !trimmed.isEmpty, importResult == nil, importError == nil, !isLoading else {
+        guard !trimmed.isEmpty, draft.result == nil, draft.error == nil, !isLoading else {
             return
         }
         guard case .importText = ProfileImportPayloadDetector.detect(trimmed) else {
@@ -148,7 +176,7 @@ struct ImportTextSheet: View {
     }
 
     private func save(_ importResult: ImportResult) {
-        if let detectedSubscriptionURL {
+        if let detectedSubscriptionURL = draft.subscriptionURL {
             let importResult = importResult
                 .droppingRules()
                 .requiringSubscriptionGroupReview()
@@ -168,78 +196,148 @@ struct ImportTextSheet: View {
     }
 
     private func previewImport() {
+        cancelPreview()
+        let input = draft.text
         let trimmed = trimmedImportText
         guard let payload = ProfileImportPayloadDetector.detect(trimmed) else {
-            importResult = nil
-            detectedSubscriptionURL = nil
-            importError = ProxyLinkParseError.invalidURL.localizedDescription
+            draft.result = nil
+            draft.subscriptionURL = nil
+            draft.error = ProxyLinkParseError.invalidURL.localizedDescription
             return
         }
 
-        importError = nil
-        importResult = nil
-        detectedSubscriptionURL = nil
+        draft.error = nil
+        draft.result = nil
+        draft.subscriptionURL = nil
 
-        switch payload {
-        case let .subscription(url):
-            isLoading = true
-            Task {
-                do {
-                    let result = try await importService.importSubscription(url: url)
+        isLoading = true
+        previewTask = Task { @MainActor in
+            do {
+                let result: ImportResult
+                let subscriptionURL: URL?
+                switch payload {
+                case let .subscription(url):
+                    result = try await importService.importSubscription(url: url)
                         .droppingRules()
                         .requiringSubscriptionGroupReview()
-                    await MainActor.run {
-                        detectedSubscriptionURL = url
-                        importResult = result
-                        isLoading = false
-                    }
-                } catch {
-                    await MainActor.run {
-                        importError = error.localizedDescription
-                        isLoading = false
-                    }
+                    subscriptionURL = url
+                case let .importText(text):
+                    result = try await importService.importTextOffMain(text)
+                    subscriptionURL = nil
                 }
+                try draft.finishPreview(result, subscriptionURL: subscriptionURL, for: input)
+            } catch {
+                guard !Task.isCancelled, draft.text == input else { return }
+                draft.error = error.localizedDescription
             }
-        case let .importText(text):
-            isLoading = true
-            Task {
-                do {
-                    let result = try await importService.importTextOffMain(text)
-                    await MainActor.run {
-                        importResult = result
-                        isLoading = false
-                    }
-                } catch {
-                    await MainActor.run {
-                        importError = error.localizedDescription
-                        isLoading = false
-                    }
-                }
-            }
+            guard !Task.isCancelled else { return }
+            isLoading = false
+            previewTask = nil
         }
     }
 
+    private func cancelPreview() {
+        previewTask?.cancel()
+        previewTask = nil
+        isLoading = false
+    }
+
     private var trimmedImportText: String {
-        importText.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
 private struct ImportPreviewView: View {
+    @Environment(HopStore.self) private var store
     let result: ImportResult
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        if !result.profiles.isEmpty {
             LabeledContent("Nodes", value: "\(result.profiles.count)")
-            LabeledContent("Groups", value: "\(result.groups.count)")
-            LabeledContent("Rules", value: "\(result.rules.count)")
-            LabeledContent("Warnings", value: "\(result.warnings.count)")
-
-            ForEach(result.warnings.prefix(4)) { warning in
-                Text(warning.message)
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .lineLimit(2)
+            ForEach(result.profiles.prefix(3)) { profile in
+                nodeRow(profile)
             }
+            if result.profiles.count > 3 {
+                DisclosureGroup("More Nodes (\(result.profiles.count - 3))") {
+                    ForEach(result.profiles.dropFirst(3)) { profile in
+                        nodeRow(profile)
+                    }
+                }
+            }
+        }
+
+        if !result.groups.isEmpty {
+            DisclosureGroup("Groups (\(result.groups.count))") {
+                ForEach(result.groups) { group in
+                    DisclosureGroup(group.name) {
+                        LabeledContent("Type", value: group.type.displayName)
+                        LabeledContent("Status", value: group.isEnabled ? "Enabled" : "Disabled")
+                        LabeledContent("Default", value: group.defaultTarget.map(targetName) ?? "First Member")
+                        DisclosureGroup("Members (\(group.members.count))") {
+                            ForEach(Array(group.members.enumerated()), id: \.offset) { _, target in
+                                Text(targetName(target))
+                            }
+                        }
+                        if let warning = group.warning {
+                            warningRow(warning)
+                        }
+                    }
+                }
+            }
+        }
+
+        if !result.rules.isEmpty {
+            DisclosureGroup("Rules (\(result.rules.count))") {
+                ForEach(result.rules) { rule in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(rule.value)
+                        Text("\(rule.kind.displayName) → \(targetName(rule.target))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+
+        if let warning = result.warnings.first {
+            warningRow(warning.message)
+            if result.warnings.count > 1 {
+                DisclosureGroup("More Warnings (\(result.warnings.count - 1))") {
+                    ForEach(result.warnings.dropFirst()) { warning in
+                        warningRow(warning.message)
+                    }
+                }
+            }
+        }
+    }
+
+    private func nodeRow(_ profile: ProxyProfile) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(profile.name)
+                .font(.body.weight(.semibold))
+            Text("\(profile.proto.displayName) · \(profile.endpoint.host):\(profile.endpoint.port)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func warningRow(_ message: String) -> some View {
+        Label(message, systemImage: "exclamationmark.triangle")
+            .font(.footnote)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func targetName(_ target: OutboundTarget) -> String {
+        switch target {
+        case let .profile(id):
+            result.profiles.first { $0.id == id }?.name ?? store.displayName(for: target)
+        case let .group(id):
+            result.groups.first { $0.id == id }?.name ?? store.displayName(for: target)
+        default:
+            store.displayName(for: target)
         }
     }
 }
@@ -261,7 +359,7 @@ struct QRCodeScannerSheet: View {
                     ContentUnavailableView(
                         "Scanner Unavailable",
                         systemImage: "camera.viewfinder",
-                        description: Text("Camera scanning is unavailable on this device or camera access is not allowed. Use + > Paste Links or Config instead."),
+                        description: Text("Camera unavailable or access denied. Use + → Paste or Import."),
                     )
                     .padding()
                 }

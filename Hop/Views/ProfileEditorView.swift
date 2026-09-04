@@ -6,10 +6,12 @@ struct ProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft: ProfileEditorDraft
 
+    let isNew: Bool
     let onSave: (ProxyProfile) -> Void
 
-    init(profile: ProxyProfile, onSave: @escaping (ProxyProfile) -> Void) {
+    init(profile: ProxyProfile, isNew: Bool = false, onSave: @escaping (ProxyProfile) -> Void) {
         _draft = State(initialValue: ProfileEditorDraft(profile: profile))
+        self.isNew = isNew
         self.onSave = onSave
     }
 
@@ -18,6 +20,14 @@ struct ProfileEditorView: View {
 
         NavigationStack {
             Form {
+                if let validationMessage = validation.message {
+                    Section {
+                        Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 Section("Basics") {
                     ProfileTextField("Name", text: $draft.name, capitalization: .words, autocorrectionDisabled: false)
                     Picker("Protocol", selection: $draft.proto) {
@@ -25,34 +35,29 @@ struct ProfileEditorView: View {
                             Text(proto.displayName).tag(proto)
                         }
                     }
-                    ProfileTextField("Host", text: $draft.host)
-                    ProfileTextField("Port", text: $draft.port, prompt: "443", keyboardType: .numberPad)
+                    ProfileTextField(draft.proto == .wireGuard ? "Peer Host" : "Host", text: $draft.host)
+                    ProfileTextField(draft.proto == .wireGuard ? "Peer Port" : "Port", text: $draft.port, prompt: "443", keyboardType: .numberPad)
                 }
 
                 credentialsSection
-                securitySection
+                if draft.proto != .wireGuard {
+                    securitySection
+                }
                 transportSection
+                connectionSection
 
                 Section {
-                    TextEditor(text: $draft.xrayAdvancedJSON)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(minHeight: 140)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                } header: {
-                    Text("Advanced Xray JSON")
-                } footer: {
-                    Text("Optional client-only overrides for the pinned v26.6.27 schema. Typed fields, listeners, APIs, file paths, and un-tokenized secrets are rejected.")
-                }
-
-                if let validationMessage = validation.message {
-                    Section {
-                        Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.orange)
+                    DisclosureGroup("Raw JSON") {
+                        TextEditor(text: $draft.xrayAdvancedJSON)
+                            .font(.system(.caption, design: .monospaced))
+                            .frame(minHeight: 140)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .accessibilityLabel("Advanced Xray JSON")
                     }
                 }
             }
-            .navigationTitle("Edit Profile")
+            .navigationTitle(isNew ? "New Node" : "Edit Node")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -92,11 +97,11 @@ struct ProfileEditorView: View {
                 ProfileTextField("Password", text: $draft.hysteriaPassword, isSecure: true)
                 ProfileTextField("Obfuscation", text: $draft.hysteriaObfs, prompt: "salamander")
                 ProfileTextField("Obfs Password", text: $draft.hysteriaObfsPassword, isSecure: true)
-                ProfileTextField("Upload Rate", text: $draft.hysteriaUp, prompt: "20 mbps")
-                ProfileTextField("Download Rate", text: $draft.hysteriaDown, prompt: "100 mbps")
+                ProfileTextField("Upload", text: $draft.hysteriaUp, prompt: "20 mbps")
+                ProfileTextField("Download", text: $draft.hysteriaDown, prompt: "100 mbps")
                 ProfileTextField("Port Hopping", text: $draft.hysteriaPorts, prompt: "20000-50000")
-                ProfileTextField("Hop Interval", text: $draft.hysteriaHopInterval, prompt: "30", keyboardType: .numberPad)
-                ProfileTextField("UDP Idle Timeout", text: $draft.hysteriaUDPIdleTimeout, prompt: "60", keyboardType: .numberPad)
+                ProfileTextField("Hop Interval (s)", text: $draft.hysteriaHopInterval, prompt: "30", keyboardType: .numberPad)
+                ProfileTextField("UDP Idle (s)", text: $draft.hysteriaUDPIdleTimeout, prompt: "60", keyboardType: .numberPad)
             case .tuic:
                 ProfileTextField("UUID", text: $draft.tuicUUID, isSecure: true)
                 ProfileTextField("Password", text: $draft.tuicPassword, isSecure: true)
@@ -107,7 +112,9 @@ struct ProfileEditorView: View {
             case .vmess:
                 ProfileTextField("UUID", text: $draft.vmessUUID, isSecure: true)
                 ProfileTextField("Security", text: $draft.vmessSecurity, prompt: "auto")
-                ProfileTextField("Alter ID", text: $draft.vmessAlterID, prompt: "0", keyboardType: .numberPad)
+                if draft.vmessAlterID != "0" {
+                    Button("Use VMess AEAD") { draft.vmessAlterID = "0" }
+                }
             case .http:
                 ProfileTextField("Username", text: $draft.httpUsername)
                 ProfileTextField("Password", text: $draft.httpPassword, isSecure: true)
@@ -117,15 +124,25 @@ struct ProfileEditorView: View {
             case .wireGuard:
                 ProfileTextField("Private Key", text: $draft.wireGuardPrivateKey, isSecure: true)
                 ProfileTextField("Peer Public Key", text: $draft.wireGuardPeerPublicKey)
-                ProfileTextField("Pre-Shared Key", text: $draft.wireGuardPreSharedKey, prompt: "optional", isSecure: true)
+                ProfileTextField("Pre-shared Key", text: $draft.wireGuardPreSharedKey, prompt: "optional", isSecure: true)
                 ProfileTextField("Local Addresses", text: $draft.wireGuardLocalAddresses, prompt: "10.0.0.2/32, fd00::2/128")
                 ProfileTextField("Allowed IPs", text: $draft.wireGuardAllowedIPs, prompt: "0.0.0.0/0, ::/0")
                 ProfileTextField("Reserved Bytes", text: $draft.wireGuardReserved, prompt: "0, 0, 0")
-                ProfileTextField("Keepalive", text: $draft.wireGuardKeepAlive, prompt: "25", keyboardType: .numberPad)
+                ProfileTextField("Keepalive (s)", text: $draft.wireGuardKeepAlive, prompt: "25", keyboardType: .numberPad)
                 ProfileTextField("MTU", text: $draft.wireGuardMTU, prompt: "1280", keyboardType: .numberPad)
                 ProfileTextField("Domain Strategy", text: $draft.wireGuardDomainStrategy, prompt: "ForceIP")
+                if draft.wireGuardHasExplicitEndpoint {
+                    DisclosureGroup("Node Endpoint") {
+                        ProfileTextField("Host", text: $draft.wireGuardFallbackHost)
+                        ProfileTextField("Port", text: $draft.wireGuardFallbackPort, keyboardType: .numberPad)
+                    }
+                }
+                WireGuardPeerFields(peers: $draft.extraWireGuardPeers)
             case .anyTLS:
                 ProfileTextField("Password", text: $draft.anyTLSPassword, isSecure: true)
+            }
+            if let definition = draft.protocolDefinition {
+                advancedFields("More Options", definition: definition, path: ["settings"], allowedKeys: XrayConfigBuilder.editorProtocolKeys(draft.proto))
             }
         }
     }
@@ -140,22 +157,25 @@ struct ProfileEditorView: View {
 
             switch draft.securityLayer {
             case .none:
-                Label("No TLS or REALITY will be configured.", systemImage: "exclamationmark.triangle")
+                Label("TLS off", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.secondary)
             case .tls:
                 ProfileTextField("SNI", text: $draft.tlsServerName, prompt: "example.com")
-                MultiSelectMenu("ALPN", options: ProfileEditorChoices.alpn, selection: $draft.tlsALPN)
+                ProfileTextField("ALPN", text: $draft.tlsALPN, prompt: "h2, http/1.1")
                 UTLSFingerprintPicker(selection: $draft.tlsFingerprint)
-                ProfileTextField("Certificate SHA-256 Pins", text: $draft.tlsPinnedCertificates, prompt: "hex, comma-separated")
-                ProfileTextField("Verify Certificate Names", text: $draft.tlsVerifyNames, prompt: "example.com")
-                ProfileTextField("ECH Config", text: $draft.tlsECHConfigList, prompt: "inline base64", isSecure: true)
-                ProfileTextField("TLS Curves", text: $draft.tlsCurves, prompt: "X25519MLKEM768")
-                ProfileTextField("Minimum TLS", text: $draft.tlsMinVersion, prompt: "1.2")
-                ProfileTextField("Maximum TLS", text: $draft.tlsMaxVersion, prompt: "1.3")
-                ProfileTextField("Cipher Suites", text: $draft.tlsCipherSuites, prompt: "optional")
-                Toggle("Session Resumption", isOn: $draft.tlsSessionResumption)
-                if draft.tlsAllowInsecure {
-                    Label("This legacy node used allowInsecure, which Xray rejects. Choose normal certificate validation or add a certificate pin, then save.", systemImage: "exclamationmark.triangle.fill")
+                DisclosureGroup("More Options") {
+                    ProfileTextField("SHA-256 Pins", text: $draft.tlsPinnedCertificates, prompt: "hex, comma-separated")
+                    ProfileTextField("Verify Names", text: $draft.tlsVerifyNames, prompt: "example.com")
+                    ProfileTextField("ECH Config", text: $draft.tlsECHConfigList, prompt: "base64", isSecure: true)
+                    ProfileTextField("Curves", text: $draft.tlsCurves, prompt: "X25519MLKEM768")
+                    ProfileTextField("Min TLS", text: $draft.tlsMinVersion, prompt: "1.2")
+                    ProfileTextField("Max TLS", text: $draft.tlsMaxVersion, prompt: "1.3")
+                    ProfileTextField("Cipher Suites", text: $draft.tlsCipherSuites, prompt: "optional")
+                    Toggle("Session Resumption", isOn: $draft.tlsSessionResumption)
+                    existingAdvancedFields(definition: "TLSConfig", path: ["streamSettings", "tlsSettings"])
+                }
+                if draft.tlsAllowInsecure, draft.tlsPinnedCertificates.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Label("Insecure TLS blocked. Verify TLS or add a certificate pin.", systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
                         .foregroundStyle(.red)
                     Button("Use Verified TLS") {
@@ -167,44 +187,114 @@ struct ProfileEditorView: View {
                 ProfileTextField("Short ID", text: $draft.realityShortID)
                 ProfileTextField("SNI", text: $draft.realityServerName, prompt: "camouflage domain")
                 ProfileTextField("Spider Path", text: $draft.realitySpiderX, prompt: "/")
-                ProfileTextField("ML-DSA-65 Verify Key", text: $draft.realityMLDSA65Verify, prompt: "pqv", isSecure: true)
-                Text("When supplied, ML-DSA-65 verification is enforced. REALITY still negotiates its supported hybrid key exchange; this setting does not force a PQ-only exchange.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                MultiSelectMenu("ALPN", options: ProfileEditorChoices.alpn, selection: $draft.tlsALPN)
+                ProfileTextField("ML-DSA Verify Key", text: $draft.realityMLDSA65Verify, isSecure: true)
                 UTLSFingerprintPicker(selection: $draft.realityFingerprint)
+                existingAdvancedFields(definition: "REALITYConfig", path: ["streamSettings", "realitySettings"])
             }
         }
     }
 
     private var transportSection: some View {
         Section("Transport") {
-            Picker("Type", selection: $draft.transportType) {
-                ForEach(ProfileEditorChoices.supportedTransports, id: \.self) { type in
-                    Text(type.displayName).tag(type)
+            if draft.proto == .hysteria2 {
+                LabeledContent("Type", value: "Hysteria2")
+            } else if draft.proto == .wireGuard {
+                LabeledContent("Type", value: "WireGuard")
+            } else {
+                Picker("Type", selection: $draft.transportType) {
+                    ForEach(ProfileEditorChoices.supportedTransports, id: \.self) { type in
+                        Text(type.displayName).tag(type)
+                    }
+                }
+
+                switch draft.transportType {
+                case .tcp, .mKCP, .hysteria, .quic:
+                    EmptyView()
+                case .websocket, .httpUpgrade:
+                    ProfileTextField("Path", text: $draft.transportPath, prompt: "/")
+                    ProfileTextField("Host Header", text: $draft.transportHost)
+                case .grpc:
+                    ProfileTextField("Service Name", text: $draft.transportServiceName)
+                    ProfileTextField("Authority", text: $draft.transportHost)
+                case .xhttp:
+                    ProfileTextField("Path", text: $draft.transportPath, prompt: "/")
+                    ProfileTextField("Host", text: $draft.transportHost)
+                    ProfileTextField("Mode", text: $draft.xhttpMode, prompt: "auto")
+                }
+                if draft.transportType == .mKCP {
+                    XrayFieldsEditor(definition: "KCPConfig", value: $draft.kcpFields, allowedKeys: XrayConfigBuilder.editorTransportKeys(.mKCP))
+                }
+                if draft.transportType == .xhttp, draft.xhttpExtra != nil {
+                    DisclosureGroup("XHTTP Options") {
+                        XrayFieldsEditor(definition: "SplitHTTPConfig", value: $draft.xhttpExtra, allowedKeys: draft.extraTransportKeys.subtracting(["extra"]))
+                    }
+                }
+                if let definition = draft.transportDefinition,
+                   draft.transportType != .mKCP || draft.advancedValue(at: ["streamSettings", draft.transportSettingsKey]) != nil
+                {
+                    advancedFields("More Options", definition: definition, path: ["streamSettings", draft.transportSettingsKey], allowedKeys: draft.extraTransportKeys)
                 }
             }
-
-            switch draft.transportType {
-            case .tcp, .mKCP, .hysteria, .quic:
-                EmptyView()
-            case .websocket, .httpUpgrade:
-                ProfileTextField("Path", text: $draft.transportPath, prompt: "/")
-                ProfileTextField("Host Header", text: $draft.transportHost)
-            case .grpc:
-                ProfileTextField("Service Name", text: $draft.transportServiceName)
-            case .xhttp:
-                ProfileTextField("Path", text: $draft.transportPath, prompt: "/")
-                ProfileTextField("Host", text: $draft.transportHost)
-                ProfileTextField("Mode", text: $draft.xhttpMode, prompt: "auto")
-            }
         }
+    }
+
+    private var connectionSection: some View {
+        Section("Connection") {
+            if draft.proto != .wireGuard {
+                DisclosureGroup("Multiplexing") {
+                    if draft.muxFields != nil || draft.advancedValue(at: ["mux"]) == nil {
+                        XrayFieldsEditor(definition: "MuxConfig", value: $draft.muxFields)
+                        existingAdvancedFields(definition: "MuxConfig", path: ["mux"])
+                    } else {
+                        XrayFieldsEditor(definition: "MuxConfig", value: advancedBinding(["mux"]))
+                    }
+                }
+                DisclosureGroup("Socket") {
+                    if draft.socketOptions != nil {
+                        XrayFieldsEditor(definition: "SocketConfig", value: $draft.socketOptions, allowedKeys: XrayConfigBuilder.editorSocketKeys)
+                        existingAdvancedFields(definition: "SocketConfig", path: ["streamSettings", "sockopt"])
+                    } else {
+                        XrayFieldsEditor(definition: "SocketConfig", value: advancedBinding(["streamSettings", "sockopt"]), allowedKeys: XrayConfigBuilder.editorSocketKeys)
+                    }
+                }
+                DisclosureGroup("FinalMask") {
+                    if draft.finalMask != nil || draft.advancedValue(at: ["streamSettings", "finalmask"]) == nil {
+                        XrayFieldsEditor(definition: "FinalMask", value: $draft.finalMask)
+                        existingAdvancedFields(definition: "FinalMask", path: ["streamSettings", "finalmask"])
+                    } else {
+                        XrayFieldsEditor(definition: "FinalMask", value: advancedBinding(["streamSettings", "finalmask"]))
+                    }
+                }
+            }
+            advancedFields("Outbound", definition: "OutboundDetourConfig", path: [], allowedKeys: ["sendThrough", "targetStrategy", "proxySettings"])
+        }
+    }
+
+    @ViewBuilder private func existingAdvancedFields(definition: String, path: [String]) -> some View {
+        if let object = draft.advancedValue(at: path)?.objectValue, !object.isEmpty {
+            advancedFields("Overrides", definition: definition, path: path, allowedKeys: Set(object.keys))
+        }
+    }
+
+    private func advancedFields(_ title: String, definition: String, path: [String], allowedKeys: Set<String>) -> some View {
+        DisclosureGroup(title) {
+            XrayFieldsEditor(definition: definition, value: advancedBinding(path), allowedKeys: allowedKeys)
+        }
+        .disabled(!draft.hasValidAdvancedJSON)
+    }
+
+    private func advancedBinding(_ path: [String]) -> Binding<JSONValue?> {
+        Binding(
+            get: { draft.advancedValue(at: path) },
+            set: { draft.setAdvancedValue($0, at: path) },
+        )
     }
 }
 
 /// Trailing-aligned labeled text field shared by the profile, group, and
 /// import forms.
 struct ProfileTextField: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let title: String
     @Binding var text: String
     let prompt: String
@@ -232,14 +322,15 @@ struct ProfileTextField: View {
     }
 
     var body: some View {
-        // A plain HStack, not LabeledContent: LabeledContent wraps the value
-        // onto its own full-width line when label + value don't fit, so long
-        // values (hosts, keys) made rows grow to two lines. Here the row is
-        // always one line — the label keeps its natural size and the field
-        // squeezes and truncates in the middle instead.
-        HStack(spacing: 12) {
+        let stacked = dynamicTypeSize.isAccessibilitySize
+        let layout = stacked
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+            : AnyLayout(HStackLayout(spacing: 12))
+
+        layout {
             Text(title)
-                .fixedSize(horizontal: true, vertical: false)
+                .fixedSize(horizontal: !stacked, vertical: true)
+                .accessibilityHidden(true)
 
             // Passwords and private keys render as `SecureField` so they stay masked.
             Group {
@@ -249,13 +340,14 @@ struct ProfileTextField: View {
                     TextField(prompt, text: $text)
                 }
             }
-            .multilineTextAlignment(.trailing)
+            .accessibilityLabel(title)
+            .multilineTextAlignment(stacked ? .leading : .trailing)
             .keyboardType(keyboardType)
             .textInputAutocapitalization(capitalization)
             .autocorrectionDisabled(autocorrectionDisabled)
             .lineLimit(1)
             .truncationMode(.middle)
-            .frame(maxWidth: .infinity, alignment: .trailing)
+            .frame(maxWidth: .infinity, alignment: stacked ? .leading : .trailing)
         }
     }
 }
@@ -279,57 +371,12 @@ private struct UTLSFingerprintPicker: View {
     }
 }
 
-private struct MultiSelectMenu: View {
-    let title: String
-    let options: [String]
-    @Binding var selection: Set<String>
-
-    init(_ title: String, options: [String], selection: Binding<Set<String>>) {
-        self.title = title
-        self.options = options
-        _selection = selection
-    }
-
-    var body: some View {
-        let selected = options.filter { selection.contains($0) }
-        let summary = selected.isEmpty ? "None" : selected.joined(separator: ", ")
-
-        Menu {
-            ForEach(options, id: \.self) { option in
-                Toggle(option, isOn: binding(for: option))
-            }
-        } label: {
-            LabeledContent(title) {
-                HStack(spacing: 4) {
-                    Text(summary)
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func binding(for option: String) -> Binding<Bool> {
-        Binding {
-            selection.contains(option)
-        } set: { isSelected in
-            if isSelected {
-                selection.insert(option)
-            } else {
-                selection.remove(option)
-            }
-        }
-    }
-}
-
 private enum ProfileEditorChoices {
     static let supportedProtocols = ProxyProtocol.allCases.filter {
         $0 != .tuic && $0 != .anyTLS
     }
 
-    static let supportedTransports = TransportType.allCases.filter { $0 != .quic }
+    static let supportedTransports = TransportType.allCases.filter { $0 != .quic && $0 != .hysteria }
 
     static let utlsFingerprints = [
         "chrome",
@@ -342,12 +389,6 @@ private enum ProfileEditorChoices {
         "randomized",
     ]
 
-    static let alpn = [
-        "h2",
-        "http/1.1",
-        "h3",
-    ]
-
     static func utlsFingerprintTitle(_ value: String) -> String {
         switch value {
         case "ios":
@@ -358,7 +399,7 @@ private enum ProfileEditorChoices {
     }
 }
 
-private struct ProfileEditorValidation {
+struct ProfileEditorValidation {
     let profile: ProxyProfile?
     let message: String?
 
@@ -371,11 +412,31 @@ private struct ProfileEditorValidation {
     }
 }
 
-private struct ProfileEditorDraft {
+struct ProfileEditorDraft {
     let id: UUID
     let subscriptionID: UUID?
     var name: String
-    var proto: ProxyProtocol
+    var proto: ProxyProtocol {
+        didSet {
+            guard proto != oldValue else { return }
+            switch proto {
+            case .hysteria2:
+                transportType = .hysteria
+                securityLayer = .tls
+            case .wireGuard:
+                transportType = .tcp
+                securityLayer = .none
+            default:
+                if transportType == .hysteria {
+                    transportType = .tcp
+                }
+                if oldValue == .wireGuard {
+                    securityLayer = .tls
+                }
+            }
+        }
+    }
+
     var host: String
     var port: String
 
@@ -412,14 +473,19 @@ private struct ProfileEditorDraft {
     var wireGuardKeepAlive = ""
     var wireGuardMTU = ""
     var wireGuardDomainStrategy = ""
-    /// Extra imported peers are not exposed by the compact editor yet, but
-    /// must survive edits. The existing fields edit only the effective first peer.
     var wireGuardPeers: [WireGuardPeer]?
+    var extraWireGuardPeers: [WireGuardPeerDraft] = []
+    /// Explicit first-peer endpoints are edited independently of the fallback
+    /// used by other peers whose endpoint is nil.
+    var wireGuardHasExplicitEndpoint = false
+    var wireGuardFallbackHost = ""
+    var wireGuardFallbackPort = ""
     var anyTLSPassword = ""
 
     var securityLayer: SecurityLayer
     var tlsServerName = ""
-    var tlsALPN: Set<String> = []
+    var tlsALPN = ""
+    private var importedALPN: [String] = []
     var tlsFingerprint = "chrome"
     var tlsAllowInsecure = false
     var tlsPinnedCertificates = ""
@@ -443,9 +509,9 @@ private struct ProfileEditorDraft {
     var transportServiceName = ""
     var xhttpMode = ""
     var xhttpExtra: JSONValue?
-    var kcpOptions: XrayKCPOptions?
+    var kcpFields: JSONValue?
     var finalMask: JSONValue?
-    var muxOptions: XrayMuxOptions?
+    var muxFields: JSONValue?
     var socketOptions: JSONValue?
     var xrayAdvancedJSON = "{}"
 
@@ -494,6 +560,13 @@ private struct ProfileEditorDraft {
             socksPassword = options.password ?? ""
         case let .wireGuard(options):
             let firstPeer = options.effectivePeers.first
+            if let endpoint = firstPeer?.endpoint {
+                wireGuardHasExplicitEndpoint = true
+                wireGuardFallbackHost = profile.endpoint.host
+                wireGuardFallbackPort = String(profile.endpoint.port)
+                host = endpoint.host
+                port = String(endpoint.port)
+            }
             wireGuardPrivateKey = options.privateKey
             wireGuardPeerPublicKey = firstPeer?.publicKey ?? options.peerPublicKey
             wireGuardPreSharedKey = firstPeer?.preSharedKey ?? ""
@@ -504,13 +577,15 @@ private struct ProfileEditorDraft {
             wireGuardMTU = options.mtu.map(String.init) ?? ""
             wireGuardDomainStrategy = options.domainStrategy ?? ""
             wireGuardPeers = options.peers
+            extraWireGuardPeers = (options.peers ?? []).dropFirst().map(WireGuardPeerDraft.init(peer:))
         case let .anyTLS(options):
             anyTLSPassword = options.password
         }
 
         if let tls = profile.security.tls {
             tlsServerName = tls.serverName ?? ""
-            tlsALPN = Set(tls.alpn)
+            importedALPN = tls.alpn
+            tlsALPN = tls.alpn.joined(separator: ", ")
             tlsFingerprint = tls.utlsFingerprint ?? "chrome"
             tlsAllowInsecure = tls.allowInsecure
             tlsPinnedCertificates = tls.pinnedPeerCertSHA256 ?? ""
@@ -537,106 +612,131 @@ private struct ProfileEditorDraft {
         transportServiceName = profile.transport.serviceName ?? ""
         xhttpMode = profile.transport.xhttpMode ?? ""
         xhttpExtra = profile.transport.xhttpExtra
-        kcpOptions = profile.transport.kcp
+        kcpFields = profile.transport.kcp.flatMap(Self.encodeFields)
         finalMask = profile.transport.finalMask
-        muxOptions = profile.transport.mux
+        muxFields = profile.transport.mux.flatMap(Self.encodeFields)
         socketOptions = profile.transport.socketOptions
         xrayAdvancedJSON = profile.xrayAdvanced?.jsonString ?? "{}"
     }
 
     var validation: ProfileEditorValidation {
         guard !trimmed(name).isEmpty else {
-            return .invalid("Name is required.")
+            return .invalid("Enter a name.")
         }
         guard !trimmed(host).isEmpty else {
-            return .invalid("Host is required.")
+            return .invalid("Enter a host.")
         }
         guard let portNumber = Int(trimmed(port)), (1 ... 65535).contains(portNumber) else {
-            return .invalid("Port must be between 1 and 65535.")
+            return .invalid("Port: use 1–65535.")
         }
 
         switch proto {
         case .vless:
-            guard !trimmed(vlessUUID).isEmpty else { return .invalid("VLESS UUID is required.") }
+            guard !trimmed(vlessUUID).isEmpty else { return .invalid("Enter a VLESS UUID.") }
             if let encryptionError = Self.vlessEncryptionValidationError(optional(vlessEncryption)) {
                 return .invalid(encryptionError)
             }
         case .trojan:
-            guard !trimmed(trojanPassword).isEmpty else { return .invalid("Trojan password is required.") }
+            guard !trojanPassword.isEmpty else { return .invalid("Enter a Trojan password.") }
         case .hysteria2:
-            guard !trimmed(hysteriaPassword).isEmpty else { return .invalid("Hysteria2 password is required.") }
+            guard !hysteriaPassword.isEmpty else { return .invalid("Enter a Hysteria2 password.") }
         case .tuic:
-            return .invalid("TUIC is not supported by Xray-core v26.6.27.")
+            return .invalid("Xray v26.6.27 does not support TUIC.")
         case .shadowsocks:
-            guard !trimmed(shadowsocksMethod).isEmpty else { return .invalid("Shadowsocks method is required.") }
-            guard !trimmed(shadowsocksPassword).isEmpty else { return .invalid("Shadowsocks password is required.") }
+            guard !trimmed(shadowsocksMethod).isEmpty else { return .invalid("Enter a Shadowsocks method.") }
+            guard !shadowsocksPassword.isEmpty else { return .invalid("Enter a Shadowsocks password.") }
             guard Self.shadowsocksMethods.contains(trimmed(shadowsocksMethod).lowercased()) else {
-                return .invalid("This Shadowsocks cipher is not supported by the pinned Xray engine.")
+                return .invalid("Unsupported Shadowsocks cipher.")
             }
         case .vmess:
-            guard !trimmed(vmessUUID).isEmpty else { return .invalid("VMess UUID is required.") }
-            guard Int(trimmed(vmessAlterID)) == 0 else { return .invalid("Xray requires VMess Alter ID 0 (AEAD).") }
+            guard !trimmed(vmessUUID).isEmpty else { return .invalid("Enter a VMess UUID.") }
+            guard Int(trimmed(vmessAlterID)) == 0 else { return .invalid("VMess requires Alter ID 0 (AEAD).") }
             guard Self.vmessSecurityValues.contains(trimmed(vmessSecurity).lowercased()) else {
-                return .invalid("VMess security must be auto, aes-128-gcm, or chacha20-poly1305.")
+                return .invalid("VMess security: auto, aes-128-gcm, or chacha20-poly1305.")
             }
         case .http, .socks:
             break
         case .wireGuard:
-            guard !trimmed(wireGuardPrivateKey).isEmpty else { return .invalid("WireGuard private key is required.") }
-            guard !trimmed(wireGuardPeerPublicKey).isEmpty else { return .invalid("WireGuard peer public key is required.") }
-            guard !list(from: wireGuardLocalAddresses).isEmpty else { return .invalid("WireGuard local address is required.") }
+            guard !trimmed(wireGuardPrivateKey).isEmpty else { return .invalid("Enter a WireGuard private key.") }
+            guard !trimmed(wireGuardPeerPublicKey).isEmpty else { return .invalid("Enter a WireGuard peer public key.") }
+            guard !list(from: wireGuardLocalAddresses).isEmpty else { return .invalid("Enter a WireGuard local address.") }
         case .anyTLS:
-            return .invalid("AnyTLS is not supported by Xray-core v26.6.27.")
+            return .invalid("Xray v26.6.27 does not support AnyTLS.")
         }
 
-        if tlsAllowInsecure {
-            return .invalid("Xray rejects allowInsecure. Use verified TLS or add a certificate pin.")
+        if securityLayer == .tls, tlsAllowInsecure, trimmed(tlsPinnedCertificates).isEmpty {
+            return .invalid("Insecure TLS blocked. Verify TLS or add a certificate pin.")
         }
 
         if securityLayer == .reality, trimmed(realityPublicKey).isEmpty {
-            return .invalid("REALITY public key is required.")
+            return .invalid("Enter a REALITY public key.")
         }
         if securityLayer == .reality, trimmed(realityServerName).isEmpty {
-            return .invalid("REALITY requires an SNI — the camouflage domain the handshake presents.")
+            return .invalid("Enter a REALITY SNI.")
         }
         if proto == .hysteria2, securityLayer != .tls {
-            return .invalid("Hysteria2 requires TLS security.")
+            return .invalid("Hysteria2 requires TLS.")
         }
         if transportType == .quic {
-            return .invalid("Legacy QUIC transport was removed from Xray; use XHTTP stream-one instead.")
+            return .invalid("QUIC was removed. Use XHTTP stream-one.")
         }
         if securityLayer == .reality, ![.tcp, .xhttp, .grpc].contains(transportType) {
-            return .invalid("REALITY is supported only with RAW, XHTTP, or gRPC.")
+            return .invalid("Use RAW, XHTTP, or gRPC with REALITY.")
         }
-        if proto == .hysteria2, !trimmed(hysteriaObfs).isEmpty, trimmed(hysteriaObfsPassword).isEmpty {
-            return .invalid("Hysteria2 obfuscation requires an obfs password.")
+        if proto == .hysteria2, !trimmed(hysteriaObfs).isEmpty, hysteriaObfsPassword.isEmpty {
+            return .invalid("Enter the Hysteria2 obfs password.")
         }
-        if !trimmed(xhttpMode).isEmpty,
+        if transportType == .xhttp, !trimmed(xhttpMode).isEmpty,
            !["auto", "packet-up", "stream-up", "stream-one"].contains(trimmed(xhttpMode).lowercased())
         {
-            return .invalid("XHTTP mode must be auto, packet-up, stream-up, or stream-one.")
+            return .invalid("XHTTP mode: auto, packet-up, stream-up, or stream-one.")
         }
-        if let error = validateOptionalInteger(hysteriaHopInterval, label: "Hop interval", range: 5 ... 3600) {
-            return .invalid(error)
+        if proto == .hysteria2 {
+            if let error = validateOptionalInteger(hysteriaHopInterval, label: "Hop interval (s)", range: 5 ... 3600) {
+                return .invalid(error)
+            }
+            if let error = validateOptionalInteger(hysteriaUDPIdleTimeout, label: "UDP idle timeout (s)", range: 2 ... 600) {
+                return .invalid(error)
+            }
         }
-        if let error = validateOptionalInteger(hysteriaUDPIdleTimeout, label: "UDP idle timeout", range: 1 ... 3600) {
-            return .invalid(error)
+        if proto == .wireGuard {
+            if let error = validateOptionalInteger(wireGuardKeepAlive, label: "WireGuard keepalive (s)", range: 0 ... 65535) {
+                return .invalid(error)
+            }
+            if let error = validateOptionalInteger(wireGuardMTU, label: "WireGuard MTU", range: 576 ... 1500) {
+                return .invalid(error)
+            }
+            let reserved = integerList(from: wireGuardReserved)
+            if !trimmed(wireGuardReserved).isEmpty,
+               wireGuardReserved.split(separator: ",", omittingEmptySubsequences: false).count != 3 ||
+               reserved.count != 3 || reserved.contains(where: { !(0 ... 255).contains($0) })
+            {
+                return .invalid("WireGuard reserved bytes: enter three values, 0–255.")
+            }
         }
-        if let error = validateOptionalInteger(wireGuardKeepAlive, label: "WireGuard keepalive", range: 0 ... 65535) {
-            return .invalid(error)
-        }
-        if let error = validateOptionalInteger(wireGuardMTU, label: "WireGuard MTU", range: 576 ... 9000) {
-            return .invalid(error)
-        }
-        let reserved = integerList(from: wireGuardReserved)
-        if !trimmed(wireGuardReserved).isEmpty,
-           reserved.count != 3 || reserved.contains(where: { !(0 ... 255).contains($0) })
-        {
-            return .invalid("WireGuard reserved bytes must be three values from 0 to 255.")
+        let fieldGroups: [(String, JSONValue?)] = [
+            (protocolDefinition ?? "HysteriaClientConfig", advancedValue(at: ["settings"])),
+            (transportDefinition ?? "HysteriaConfig", advancedValue(at: ["streamSettings", transportSettingsKey])),
+            ("TLSConfig", advancedValue(at: ["streamSettings", "tlsSettings"])),
+            ("REALITYConfig", advancedValue(at: ["streamSettings", "realitySettings"])),
+            ("SplitHTTPConfig", transportType == .xhttp ? xhttpExtra : nil),
+            ("KCPConfig", transportType == .mKCP ? kcpFields : nil),
+            ("MuxConfig", proto == .wireGuard ? nil : muxFields),
+            ("MuxConfig", advancedValue(at: ["mux"])),
+            ("FinalMask", proto == .wireGuard ? nil : finalMask),
+            ("FinalMask", advancedValue(at: ["streamSettings", "finalmask"])),
+            ("SocketConfig", proto == .wireGuard ? nil : socketOptions),
+            ("SocketConfig", advancedValue(at: ["streamSettings", "sockopt"])),
+            ("OutboundDetourConfig", advancedValue(at: [])),
+        ]
+        for (definition, value) in fieldGroups {
+            if let error = XrayFormSchema.shared.validationError(definition: definition, value: value) {
+                return .invalid(error)
+            }
         }
         do {
             let advanced = try XrayAdvancedDocument(jsonString: xrayAdvancedJSON)
-            let candidate = makeProfile(advanced: advanced.isEmpty ? nil : advanced)
+            let candidate = try makeProfile(advanced: advanced.isEmpty ? nil : advanced)
             if let issue = XrayConfigBuilder().validationIssues(
                 profiles: [candidate],
                 groups: [],
@@ -652,11 +752,13 @@ private struct ProfileEditorDraft {
         }
     }
 
-    private func makeProfile(advanced: XrayAdvancedDocument?) -> ProxyProfile {
-        ProxyProfile(
+    private func makeProfile(advanced: XrayAdvancedDocument?) throws -> ProxyProfile {
+        try ProxyProfile(
             id: id,
             name: trimmed(name),
-            endpoint: Endpoint(host: trimmed(host), port: Int(trimmed(port)) ?? 0),
+            endpoint: proto == .wireGuard && wireGuardHasExplicitEndpoint
+                ? Endpoint(host: trimmed(wireGuardFallbackHost), port: Int(trimmed(wireGuardFallbackPort)) ?? 0)
+                : editedEndpoint,
             options: protocolOptions,
             security: securityOptions,
             transport: transportOptions,
@@ -665,64 +767,79 @@ private struct ProfileEditorDraft {
         )
     }
 
+    private var editedEndpoint: Endpoint {
+        Endpoint(host: trimmed(host), port: Int(trimmed(port)) ?? 0)
+    }
+
     private var protocolOptions: ProtocolOptions {
-        switch proto {
-        case .vless:
-            .vless(VLESSOptions(uuid: trimmed(vlessUUID), flow: optional(vlessFlow), encryption: optional(vlessEncryption)))
-        case .trojan:
-            .trojan(TrojanOptions(password: trimmed(trojanPassword)))
-        case .hysteria2:
-            .hysteria2(Hysteria2Options(
-                password: trimmed(hysteriaPassword),
-                obfs: optional(hysteriaObfs),
-                obfsPassword: optional(hysteriaObfsPassword),
-                up: optional(hysteriaUp),
-                down: optional(hysteriaDown),
-                ports: optional(hysteriaPorts),
-                hopIntervalSeconds: Int(trimmed(hysteriaHopInterval)),
-                udpIdleTimeoutSeconds: Int(trimmed(hysteriaUDPIdleTimeout)),
-            ))
-        case .tuic:
-            .tuic(TUICOptions(uuid: trimmed(tuicUUID), password: trimmed(tuicPassword), congestionControl: optional(tuicCongestionControl)))
-        case .shadowsocks:
-            .shadowsocks(ShadowsocksOptions(method: trimmed(shadowsocksMethod), password: trimmed(shadowsocksPassword)))
-        case .vmess:
-            .vmess(VMessOptions(uuid: trimmed(vmessUUID), security: optional(vmessSecurity) ?? "auto", alterID: Int(trimmed(vmessAlterID)) ?? 0))
-        case .http:
-            .http(HTTPOptions(username: optional(httpUsername), password: optional(httpPassword)))
-        case .socks:
-            .socks(SOCKSOptions(username: optional(socksUsername), password: optional(socksPassword)))
-        case .wireGuard:
-            wireGuardProtocolOptions
-        case .anyTLS:
-            .anyTLS(AnyTLSOptions(password: trimmed(anyTLSPassword)))
+        get throws {
+            switch proto {
+            case .vless:
+                .vless(VLESSOptions(uuid: trimmed(vlessUUID), flow: optional(vlessFlow), encryption: optional(vlessEncryption)))
+            case .trojan:
+                .trojan(TrojanOptions(password: trojanPassword))
+            case .hysteria2:
+                .hysteria2(Hysteria2Options(
+                    password: hysteriaPassword,
+                    obfs: optional(hysteriaObfs),
+                    obfsPassword: optionalCredential(hysteriaObfsPassword),
+                    up: optional(hysteriaUp),
+                    down: optional(hysteriaDown),
+                    ports: optional(hysteriaPorts),
+                    hopIntervalSeconds: Int(trimmed(hysteriaHopInterval)),
+                    udpIdleTimeoutSeconds: Int(trimmed(hysteriaUDPIdleTimeout)),
+                ))
+            case .tuic:
+                .tuic(TUICOptions(uuid: trimmed(tuicUUID), password: tuicPassword, congestionControl: optional(tuicCongestionControl)))
+            case .shadowsocks:
+                .shadowsocks(ShadowsocksOptions(method: trimmed(shadowsocksMethod), password: shadowsocksPassword))
+            case .vmess:
+                .vmess(VMessOptions(uuid: trimmed(vmessUUID), security: optional(vmessSecurity) ?? "auto", alterID: Int(trimmed(vmessAlterID)) ?? 0))
+            case .http:
+                .http(HTTPOptions(username: optionalCredential(httpUsername), password: optionalCredential(httpPassword)))
+            case .socks:
+                .socks(SOCKSOptions(username: optionalCredential(socksUsername), password: optionalCredential(socksPassword)))
+            case .wireGuard:
+                try wireGuardProtocolOptions
+            case .anyTLS:
+                .anyTLS(AnyTLSOptions(password: anyTLSPassword))
+            }
         }
     }
 
     private var wireGuardProtocolOptions: ProtocolOptions {
-        let publicKey = trimmed(wireGuardPeerPublicKey)
-        let preSharedKey = optional(wireGuardPreSharedKey)
-        let allowedIPs = optionalList(from: wireGuardAllowedIPs)
-        let keepAlive = Int(trimmed(wireGuardKeepAlive))
-        var peers = wireGuardPeers
-        if peers?.isEmpty == false {
-            peers?[0].publicKey = publicKey
-            peers?[0].preSharedKey = preSharedKey
-            peers?[0].allowedIPs = allowedIPs
-            peers?[0].keepAliveSeconds = keepAlive
+        get throws {
+            let publicKey = trimmed(wireGuardPeerPublicKey)
+            let preSharedKey = optional(wireGuardPreSharedKey)
+            let allowedIPs = optionalList(from: wireGuardAllowedIPs)
+            let keepAlive = Int(trimmed(wireGuardKeepAlive))
+            var peers = wireGuardPeers
+            if peers?.isEmpty == false {
+                if peers?[0].endpoint != nil {
+                    peers?[0].endpoint = editedEndpoint
+                }
+                peers?[0].publicKey = publicKey
+                peers?[0].preSharedKey = preSharedKey
+                peers?[0].allowedIPs = allowedIPs
+                peers?[0].keepAliveSeconds = keepAlive
+            }
+            if !extraWireGuardPeers.isEmpty || peers?.isEmpty == false {
+                let first = peers?.first ?? WireGuardPeer(publicKey: publicKey, preSharedKey: preSharedKey, allowedIPs: allowedIPs, keepAliveSeconds: keepAlive)
+                peers = try [first] + (extraWireGuardPeers.map { try $0.makePeer() })
+            }
+            return .wireGuard(WireGuardOptions(
+                privateKey: trimmed(wireGuardPrivateKey),
+                peerPublicKey: publicKey,
+                preSharedKey: peers == nil ? preSharedKey : nil,
+                localAddress: list(from: wireGuardLocalAddresses),
+                allowedIPs: allowedIPs,
+                reserved: trimmed(wireGuardReserved).isEmpty ? nil : integerList(from: wireGuardReserved).map(UInt8.init),
+                keepAliveSeconds: keepAlive,
+                mtu: Int(trimmed(wireGuardMTU)),
+                domainStrategy: optional(wireGuardDomainStrategy),
+                peers: peers,
+            ))
         }
-        return .wireGuard(WireGuardOptions(
-            privateKey: trimmed(wireGuardPrivateKey),
-            peerPublicKey: publicKey,
-            preSharedKey: peers == nil ? preSharedKey : nil,
-            localAddress: list(from: wireGuardLocalAddresses),
-            allowedIPs: allowedIPs,
-            reserved: trimmed(wireGuardReserved).isEmpty ? nil : integerList(from: wireGuardReserved).map(UInt8.init),
-            keepAliveSeconds: keepAlive,
-            mtu: Int(trimmed(wireGuardMTU)),
-            domainStrategy: optional(wireGuardDomainStrategy),
-            peers: peers,
-        ))
     }
 
     private var securityOptions: ProxySecurity {
@@ -760,22 +877,115 @@ private struct ProfileEditorDraft {
     }
 
     private var transportOptions: TransportOptions {
-        TransportOptions(
-            type: transportType,
-            path: optional(transportPath),
-            host: optional(transportHost),
-            serviceName: optional(transportServiceName),
-            xhttpMode: optional(xhttpMode),
-            xhttpExtra: xhttpExtra,
-            kcp: kcpOptions,
-            finalMask: finalMask,
-            mux: muxOptions,
-            socketOptions: socketOptions,
-        )
+        get throws {
+            // Keep inactive edits in the draft, not in the saved runtime config.
+            guard proto != .wireGuard else { return .tcp }
+            return try TransportOptions(
+                type: transportType,
+                path: optional(transportPath),
+                host: optional(transportHost),
+                serviceName: optional(transportServiceName),
+                xhttpMode: transportType == .xhttp ? optional(xhttpMode) : nil,
+                xhttpExtra: transportType == .xhttp ? xhttpExtra : nil,
+                kcp: transportType == .mKCP ? Self.decodeFields(XrayKCPOptions.self, from: kcpFields) : nil,
+                finalMask: finalMask,
+                mux: Self.decodeFields(XrayMuxOptions.self, from: muxFields, defaults: Self.encodeFields(XrayMuxOptions())),
+                socketOptions: socketOptions,
+            )
+        }
+    }
+
+    private static func encodeFields(_ value: some Encodable) -> JSONValue? {
+        try? JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value))
+    }
+
+    private static func decodeFields<T: Decodable>(_ type: T.Type, from value: JSONValue?, defaults: JSONValue? = nil) throws -> T? {
+        guard let value else { return nil }
+        let merged: JSONValue = if let object = value.objectValue, let defaults = defaults?.objectValue {
+            .object(defaults.merging(object) { _, value in value })
+        } else {
+            value
+        }
+        return try JSONDecoder().decode(type, from: JSONEncoder().encode(merged))
+    }
+
+    var hasValidAdvancedJSON: Bool {
+        (try? XrayAdvancedDocument(jsonString: xrayAdvancedJSON)) != nil
+    }
+
+    func advancedValue(at path: [String]) -> JSONValue? {
+        guard let document = try? XrayAdvancedDocument(jsonString: xrayAdvancedJSON) else { return nil }
+        return path.reduce(Optional(JSONValue.object(document.values))) { $0?.objectValue?[$1] }
+    }
+
+    mutating func setAdvancedValue(_ value: JSONValue?, at path: [String]) {
+        guard let document = try? XrayAdvancedDocument(jsonString: xrayAdvancedJSON) else { return }
+        func replacing(_ current: JSONValue?, path: ArraySlice<String>) -> JSONValue? {
+            guard let key = path.first else { return value }
+            var object = current?.objectValue ?? [:]
+            object[key] = replacing(object[key], path: path.dropFirst())
+            return object.isEmpty ? nil : .object(object)
+        }
+        xrayAdvancedJSON = XrayAdvancedDocument(replacing(.object(document.values), path: path[...])?.objectValue ?? [:]).jsonString
+    }
+
+    var protocolDefinition: String? {
+        switch proto {
+        case .vless: "VLessOutboundConfig"
+        case .trojan: "TrojanClientConfig"
+        case .shadowsocks: "ShadowsocksClientConfig"
+        case .vmess: "VMessOutboundConfig"
+        case .http: "HTTPClientConfig"
+        case .socks: "SocksClientConfig"
+        case .hysteria2, .wireGuard, .tuic, .anyTLS: nil
+        }
+    }
+
+    var transportDefinition: String? {
+        switch transportType {
+        case .tcp: "TCPConfig"
+        case .websocket: "WebSocketConfig"
+        case .grpc: "GRPCConfig"
+        case .httpUpgrade: "HttpUpgradeConfig"
+        case .xhttp: "SplitHTTPConfig"
+        case .mKCP: "KCPConfig"
+        case .hysteria, .quic: nil
+        }
+    }
+
+    var transportSettingsKey: String {
+        switch transportType {
+        case .tcp: "rawSettings"
+        case .websocket: "wsSettings"
+        case .grpc: "grpcSettings"
+        case .httpUpgrade: "httpupgradeSettings"
+        case .xhttp: "xhttpSettings"
+        case .mKCP: "kcpSettings"
+        case .hysteria: "hysteriaSettings"
+        case .quic: "quicSettings"
+        }
+    }
+
+    var extraTransportKeys: Set<String> {
+        let typedKeys: Set<String> = switch transportType {
+        case .websocket, .httpUpgrade: ["host", "path"]
+        case .grpc: ["serviceName", "authority", "initial_windows_size"]
+        case .xhttp: ["host", "path", "mode"]
+        case .mKCP: ["mtu", "maxSendingWindow"]
+        default: []
+        }
+        return XrayConfigBuilder.editorTransportKeys(transportType).subtracting(typedKeys)
+    }
+
+    private func optionalCredential(_ value: String) -> String? {
+        value.isEmpty ? nil : value
     }
 
     private var selectedALPN: [String] {
-        ProfileEditorChoices.alpn.filter { tlsALPN.contains($0) }
+        // ponytail: comma-separated editing; use token rows if comma-bearing ALPNs need editing.
+        // Untouched imported tokens remain byte-for-byte intact, even when a
+        // token contains the editor's comma delimiter or whitespace.
+        tlsALPN == importedALPN.joined(separator: ", ") ? importedALPN : list(from: tlsALPN)
     }
 
     private func optional(_ value: String) -> String? {
@@ -805,7 +1015,7 @@ private struct ProfileEditorDraft {
         let value = trimmed(value)
         guard !value.isEmpty else { return nil }
         guard let number = Int(value), range.contains(number) else {
-            return "\(label) must be between \(range.lowerBound) and \(range.upperBound)."
+            return "\(label): use \(range.lowerBound)–\(range.upperBound)."
         }
         return nil
     }
@@ -834,10 +1044,10 @@ private struct ProfileEditorDraft {
               ["native", "xorpub", "random"].contains(blocks[1].lowercased()),
               ["0rtt", "1rtt"].contains(blocks[2].lowercased())
         else {
-            return "VLESS Encryption must use the Xray mlkem768x25519plus client grammar."
+            return "VLESS Encryption: use mlkem768x25519plus client syntax."
         }
         guard blocks.count <= 23 else {
-            return "VLESS Encryption exceeds the iOS limit of 16 padding directives and 4 authentication keys."
+            return "VLESS Encryption: max 16 padding directives and 4 auth keys."
         }
         return nil
     }

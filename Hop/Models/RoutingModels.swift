@@ -177,51 +177,51 @@ enum RoutingRuleKind: String, CaseIterable, Codable, Identifiable {
     var footerText: String {
         switch self {
         case .final:
-            "Matches anything that reaches this rule. Keep final rules at the bottom."
+            "Matches all remaining traffic. Keep last."
         case .domain:
-            "Matches an exact destination domain."
+            "Exact destination domain."
         case .domainSuffix:
-            "Matches domains ending with this suffix."
+            "Domain and subdomains."
         case .domainKeyword:
-            "Matches domains containing this keyword."
+            "Keyword anywhere in the domain."
         case .domainRegex:
-            "Matches domains with a regular expression."
+            "Domain regular expression."
         case .ipCIDR:
-            "Matches destination IP ranges in CIDR notation."
+            "Destination IP range in CIDR notation."
         case .ipIsPrivate:
-            "Matches non-public destination IPs."
+            "Non-public destination IPs."
         case .sourceIPCIDR:
-            "Matches source IP ranges in CIDR notation."
+            "Source IP range in CIDR notation."
         case .sourceIPIsPrivate:
-            "Matches non-public source IPs."
+            "Non-public source IPs."
         case .port:
-            "Matches destination ports. Separate multiple ports with commas."
+            "Destination ports, comma-separated."
         case .portRange:
-            "Matches destination port ranges like 1000:2000, :3000, or 4000:."
+            "Destination ranges: 1000:2000, :3000, or 4000:."
         case .sourcePort:
-            "Matches source ports. Separate multiple ports with commas."
+            "Source ports, comma-separated."
         case .sourcePortRange:
-            "Matches source port ranges like 1000:2000, :3000, or 4000:."
+            "Source ranges: 1000:2000, :3000, or 4000:."
         case .network:
-            "Matches network types: tcp, udp, or icmp."
+            "tcp or udp, comma-separated."
         case .protocolSniff:
-            "Matches sniffed protocols such as tls, http, or quic."
+            "tls, http, or quic. Requires traffic sniffing."
         case .geoSite:
-            "Matches an Xray GeoSite category from verified local geodata."
+            "GeoSite category from local geodata."
         case .geoIP:
-            "Matches an Xray GeoIP category from verified local geodata."
+            "GeoIP category from local geodata."
         case .sourceGeoIP:
-            "Matches a source GeoIP name. Legacy field; rule sets are preferred."
+            "Source GeoIP category from local geodata."
         case .networkType:
-            "Matches Apple network type, such as wifi, cellular, ethernet, or other."
+            "Unavailable in Hop."
         case .networkIsExpensive:
-            "Matches expensive networks such as cellular or Personal Hotspot."
+            "Unavailable in Hop."
         case .networkIsConstrained:
-            "Matches Apple Low Data Mode networks."
+            "Unavailable in Hop."
         case .wifiSSID:
-            "Matches the current Wi-Fi SSID on iOS."
+            "Unavailable in Hop."
         case .wifiBSSID:
-            "Matches the current Wi-Fi BSSID on iOS."
+            "Unavailable in Hop."
         }
     }
 }

@@ -68,14 +68,6 @@ struct XrayAdvancedDocument: Hashable, Codable, Sendable {
     }
 }
 
-struct XrayClientOverrides: Hashable, Codable, Sendable {
-    var protocolSettings: [String: JSONValue] = [:]
-    var streamSettings: [String: JSONValue] = [:]
-    var proxySettings: [String: JSONValue] = [:]
-    var mux: [String: JSONValue] = [:]
-    var targetStrategy: String?
-}
-
 /// Runtime-only secret values. Persist only token strings in advanced JSON;
 /// raw sidecar values must follow the existing SecretStore path.
 struct XraySecretSidecar: Hashable, Sendable {
@@ -160,6 +152,7 @@ struct IOSRuntimeLimits: Hashable, Sendable {
     let maxObservatoryTargets = 16
     let maxVLESSAuthenticationKeys = 4
     let maxVLESSPaddingDirectives = 16
+    let maxVLESSPreconnections = 8
     let maxMuxConcurrency = 8
     let maxXUDPConcurrency = 16
     let maxKCPReadBufferBytes = 1 * 1024 * 1024

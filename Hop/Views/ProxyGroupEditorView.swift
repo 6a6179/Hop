@@ -23,7 +23,7 @@ struct ProxyGroupEditorView: View {
                 Section("Basics") {
                     ProfileTextField("Name", text: $draft.name, capitalization: .words, autocorrectionDisabled: false)
                     Picker("Type", selection: $draft.type) {
-                        Text("Manual Select").tag(ProxyGroupType.select)
+                        Text("Manual").tag(ProxyGroupType.select)
                         Text("URL Test").tag(ProxyGroupType.urlTest)
                         if draft.type == .unsupported {
                             Text("Unsupported").tag(ProxyGroupType.unsupported)
@@ -46,7 +46,7 @@ struct ProxyGroupEditorView: View {
                 } header: {
                     Text("Members")
                 } footer: {
-                    Text("Review Direct and Reject alongside nodes and nested groups. Avoid circular group nesting.")
+                    Text("Review Direct/Reject targets. Avoid circular groups.")
                 }
 
                 Section("Default") {
@@ -61,8 +61,8 @@ struct ProxyGroupEditorView: View {
                 if draft.type == .urlTest {
                     Section("URL Test") {
                         ProfileTextField("URL", text: $draft.url, prompt: "https://www.gstatic.com/generate_204")
-                        ProfileTextField("Interval", text: $draft.intervalSeconds, prompt: "600", keyboardType: .numberPad)
-                        ProfileTextField("Tolerance", text: $draft.toleranceMilliseconds, prompt: "50", keyboardType: .numberPad)
+                        ProfileTextField("Interval (s)", text: $draft.intervalSeconds, prompt: "600", keyboardType: .numberPad)
+                        ProfileTextField("Tolerance (ms)", text: $draft.toleranceMilliseconds, prompt: "50", keyboardType: .numberPad)
                     }
                 }
 
@@ -73,7 +73,7 @@ struct ProxyGroupEditorView: View {
                     }
                 }
             }
-            .navigationTitle("Edit Group")
+            .navigationTitle(store.groups.contains(where: { $0.id == draft.id }) ? "Edit Group" : "New Group")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

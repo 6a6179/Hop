@@ -8,34 +8,37 @@ struct RulesView: View {
         List {
             Section {
                 if store.ruleConfigurations.isEmpty {
-                    ContentUnavailableView("No Configurations", systemImage: "arrow.triangle.branch", description: Text("Add a routing configuration with the + button."))
+                    ContentUnavailableView("No Configurations", systemImage: "arrow.triangle.branch", description: Text("Tap + to add one."))
                 } else {
                     ForEach(store.ruleConfigurations) { configuration in
-                        ConfigRow(configuration: configuration, isActive: configuration.id == store.activeRuleConfigurationID)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                store.selectRuleConfiguration(id: configuration.id)
+                        Button {
+                            store.selectRuleConfiguration(id: configuration.id)
+                        } label: {
+                            ConfigRow(configuration: configuration, isActive: configuration.id == store.activeRuleConfigurationID)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(configuration.id == store.activeRuleConfigurationID ? .isSelected : [])
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                store.deleteRuleConfiguration(id: configuration.id)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
                             }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button(role: .destructive) {
-                                    store.deleteRuleConfiguration(id: configuration.id)
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
 
-                                Button {
-                                    editor = .edit(configuration)
-                                } label: {
-                                    Label("Edit", systemImage: "pencil")
-                                }
-                                .tint(.blue)
+                            Button {
+                                editor = .edit(configuration)
+                            } label: {
+                                Label("Edit", systemImage: "pencil")
                             }
+                            .tint(.blue)
+                        }
                     }
                 }
             } header: {
                 Text("Configurations")
             } footer: {
-                Text("Tap a configuration to make it active. Swipe left to edit or delete. China and Iran are generated for you. Pick Global/Direct routing on the Dashboard.")
+                Text("Tap to activate. Swipe left to edit or delete.")
             }
         }
         .navigationTitle("Rules")
@@ -79,7 +82,7 @@ private struct ConfigRow: View {
                     ActiveBadge()
                 }
             }
-            Text(count == 0 ? "No rules · proxies all matched traffic" : "\(count) rule\(count == 1 ? "" : "s")")
+            Text(count == 0 ? "No rules · uses active outbound" : "\(count) rule\(count == 1 ? "" : "s")")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }
@@ -130,18 +133,20 @@ private struct ConfigurationEditorView: View {
 
                 Section {
                     ForEach(draft.rules) { rule in
-                        RuleRow(rule: rule, targetName: store.displayName(for: rule.target))
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                ruleEditor = .edit(rule)
+                        Button {
+                            ruleEditor = .edit(rule)
+                        } label: {
+                            RuleRow(rule: rule, targetName: store.displayName(for: rule.target))
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) {
+                                draft.rules.removeAll { $0.id == rule.id }
+                            } label: {
+                                Label("Delete", systemImage: "trash")
                             }
-                            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                Button(role: .destructive) {
-                                    draft.rules.removeAll { $0.id == rule.id }
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            }
+                        }
                     }
 
                     Button {
@@ -153,7 +158,7 @@ private struct ConfigurationEditorView: View {
                 } header: {
                     Text("Rules")
                 } footer: {
-                    Text("Unmatched traffic uses the outbound selected on the Dashboard.")
+                    Text("Unmatched traffic uses the Dashboard outbound.")
                 }
             }
             .navigationTitle(isNew ? "New Configuration" : "Edit Configuration")
@@ -176,11 +181,7 @@ private struct ConfigurationEditorView: View {
             }
             .sheet(item: $ruleEditor) { state in
                 RuleEditorView(state: state) { rule in
-                    if let index = draft.rules.firstIndex(where: { $0.id == rule.id }) {
-                        draft.rules[index] = rule
-                    } else {
-                        draft.rules.append(rule)
-                    }
+                    draft.saveRule(rule)
                 }
             }
         }
@@ -230,6 +231,8 @@ private struct RuleEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(HopStore.self) private var store
     @State private var draft: RuleEditorDraft
+    @State private var isSaving = false
+    @State private var validationError: String?
 
     let state: RuleEditorState
     let onSave: (RoutingRule) -> Void
@@ -292,7 +295,16 @@ private struct RuleEditorView: View {
                 } footer: {
                     Text(draft.kind.footerText)
                 }
+
+                if let validationError {
+                    Section {
+                        Label(validationError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
             }
+            .disabled(isSaving)
             .navigationTitle(state.isNew ? "Add Rule" : "Edit Rule")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -300,21 +312,38 @@ private struct RuleEditorView: View {
                     Button("Cancel") {
                         dismiss()
                     }
+                    .disabled(isSaving)
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        onSave(draft.rule)
-                        dismiss()
+                    Button(isSaving ? "Checking…" : "Save") {
+                        let draft = draft
+                        isSaving = true
+                        validationError = nil
+                        Task { @MainActor in
+                            do {
+                                try await draft.validate()
+                                onSave(draft.rule)
+                                dismiss()
+                            } catch {
+                                if case let XrayCoreClientError.validationFailed(code) = error, code == "invalid_config" {
+                                    validationError = "Invalid rule value. Check the format."
+                                } else {
+                                    validationError = error.localizedDescription
+                                }
+                                isSaving = false
+                            }
+                        }
                     }
-                    .disabled(!draft.isValid)
+                    .disabled(!draft.isValid || isSaving)
                 }
             }
+            .interactiveDismissDisabled(isSaving)
         }
     }
 }
 
-private struct RuleEditorDraft {
+struct RuleEditorDraft {
     let id: RoutingRule.ID
     var kind: RoutingRuleKind
     var value: String
@@ -342,6 +371,17 @@ private struct RuleEditorDraft {
 
     var isValid: Bool {
         !trimmedValue.isEmpty
+    }
+
+    func validate() async throws {
+        // Validate the matcher independently of unrelated outbound credentials.
+        var candidate = rule
+        candidate.target = .direct
+        let json = try XrayConfigBuilder().build(
+            profiles: [], groups: [], selectedTarget: .direct,
+            routingMode: .rule, rules: [candidate],
+        )
+        try await XrayCoreClient.validate(configJSON: json)
     }
 }
 

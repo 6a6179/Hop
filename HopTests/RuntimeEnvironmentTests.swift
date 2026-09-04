@@ -83,7 +83,7 @@ final class RuntimeEnvironmentTests: XCTestCase {
             tunnelGroups: ["group.tunnel.only"],
         ))
 
-        XCTAssertTrue(error.localizedDescription.contains("do not share an App Group"))
+        XCTAssertTrue(error.localizedDescription.contains("No shared App Group"))
         XCTAssertTrue(error.localizedDescription.contains("group.app.only"))
         XCTAssertTrue(error.localizedDescription.contains("group.tunnel.only"))
     }

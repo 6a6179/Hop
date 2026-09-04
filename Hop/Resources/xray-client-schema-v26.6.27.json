@@ -1691,7 +1691,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client",
+          "applicability": "excluded-hop-fixed",
           "annotations": [
             "memory-sensitive"
           ]
@@ -1878,7 +1878,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "hop-enforced-level-zero"
         },
         "pass": {
           "goField": "Password",
@@ -2267,7 +2267,7 @@
             "string"
           ],
           "optional": true,
-          "applicability": "client"
+          "applicability": "excluded-ignored-by-core"
         },
         "down": {
           "goField": "Down",
@@ -2275,7 +2275,7 @@
             "string"
           ],
           "optional": true,
-          "applicability": "client"
+          "applicability": "excluded-ignored-by-core"
         },
         "masquerade": {
           "goField": "Masquerade",
@@ -2301,7 +2301,7 @@
           ],
           "$ref": "#/definitions/UdpHop",
           "optional": true,
-          "applicability": "client"
+          "applicability": "excluded-ignored-by-core"
         },
         "up": {
           "goField": "Up",
@@ -2309,7 +2309,7 @@
             "string"
           ],
           "optional": true,
-          "applicability": "client"
+          "applicability": "excluded-ignored-by-core"
         },
         "version": {
           "goField": "Version",
@@ -3467,7 +3467,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client",
+          "applicability": "excluded-hop-fixed",
           "annotations": [
             "memory-sensitive"
           ]
@@ -3686,7 +3686,7 @@
             "boolean"
           ],
           "optional": false,
-          "applicability": "client-and-server-shared-struct"
+          "applicability": "excluded-client-unsafe"
         },
         "spiderX": {
           "goField": "SpiderX",
@@ -3995,7 +3995,7 @@
           ],
           "$ref": "#/definitions/TLSConfig",
           "optional": true,
-          "applicability": "client"
+          "applicability": "excluded-unreviewed-trust"
         },
         "url": {
           "goField": "Url",
@@ -4171,7 +4171,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "hop-enforced-level-zero"
         },
         "method": {
           "goField": "Cipher",
@@ -4273,7 +4273,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "hop-enforced-level-zero"
         },
         "method": {
           "goField": "Cipher",
@@ -4483,7 +4483,7 @@
             "boolean"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "server-only"
         },
         "addressPortStrategy": {
           "goField": "AddressPortStrategy",
@@ -4571,7 +4571,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "excluded-ios-unavailable"
         },
         "penetrate": {
           "goField": "Penetrate",
@@ -4587,7 +4587,7 @@
             "string"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "excluded-ios-unavailable"
         },
         "tcpFastOpen": {
           "goField": "TFO",
@@ -4619,7 +4619,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "excluded-ios-unavailable"
         },
         "tcpMptcp": {
           "goField": "TcpMptcp",
@@ -4627,7 +4627,7 @@
             "boolean"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "excluded-ios-unavailable"
         },
         "tcpUserTimeout": {
           "goField": "TCPUserTimeout",
@@ -4635,7 +4635,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "excluded-ios-unavailable"
         },
         "tcpWindowClamp": {
           "goField": "TCPWindowClamp",
@@ -4643,7 +4643,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "excluded-ios-unavailable"
         },
         "tproxy": {
           "goField": "TProxy",
@@ -4656,7 +4656,7 @@
             "tproxy",
             "redirect"
           ],
-          "applicability": "client"
+          "applicability": "excluded-ios-unavailable"
         },
         "trustedXForwardedFor": {
           "goField": "TrustedXForwardedFor",
@@ -4670,7 +4670,7 @@
             "goType": "string"
           },
           "optional": false,
-          "applicability": "client"
+          "applicability": "server-only"
         },
         "v6only": {
           "goField": "V6only",
@@ -4678,7 +4678,7 @@
             "boolean"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "server-only"
         }
       }
     },
@@ -4745,7 +4745,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "hop-enforced-level-zero"
         },
         "pass": {
           "goField": "Password",
@@ -4914,7 +4914,7 @@
             "boolean"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "server-only"
         },
         "path": {
           "goField": "Path",
@@ -4930,7 +4930,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client",
+          "applicability": "server-only",
           "annotations": [
             "memory-sensitive"
           ]
@@ -4963,7 +4963,7 @@
             "string"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "server-only"
         },
         "seqKey": {
           "goField": "SeqKey",
@@ -4994,7 +4994,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "server-only"
         },
         "sessionIDKey": {
           "goField": "SessionIDKey",
@@ -5867,7 +5867,7 @@
           ],
           "$ref": "#/definitions/SocketConfig",
           "optional": true,
-          "applicability": "client-and-server-shared-struct"
+          "applicability": "excluded-hop-unsupported"
         },
         "enableSessionResumption": {
           "goField": "EnableSessionResumption",
@@ -5993,7 +5993,7 @@
             "string"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "excluded-removed-feature"
         },
         "level": {
           "goField": "Level",
@@ -6001,7 +6001,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "hop-enforced-level-zero"
         },
         "password": {
           "goField": "Password",
@@ -6072,7 +6072,7 @@
             "string"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "excluded-removed-feature"
         },
         "level": {
           "goField": "Level",
@@ -6080,7 +6080,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "hop-enforced-level-zero"
         },
         "password": {
           "goField": "Password",
@@ -6276,7 +6276,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "hop-enforced-level-zero"
         },
         "port": {
           "goField": "Port",
@@ -6301,7 +6301,7 @@
             "string"
           ],
           "optional": false,
-          "applicability": "client",
+          "applicability": "excluded-ignored-by-core",
           "annotations": [
             "secret",
             "security-critical"
@@ -6522,7 +6522,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "hop-enforced-level-zero"
         },
         "port": {
           "goField": "Port",
@@ -6876,7 +6876,7 @@
             "string"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "server-only"
         },
         "endpoint": {
           "goField": "Endpoint",
@@ -6900,7 +6900,7 @@
             "integer"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "server-only"
         },
         "preSharedKey": {
           "goField": "PreSharedKey",
@@ -6940,7 +6940,7 @@
             "any"
           ],
           "optional": false,
-          "applicability": "client"
+          "applicability": "excluded-removed-feature"
         },
         "domains": {
           "goField": "Domains",
@@ -6954,7 +6954,7 @@
             "goType": "string"
           },
           "optional": false,
-          "applicability": "client"
+          "applicability": "server-only"
         },
         "resolvers": {
           "goField": "Resolvers",
@@ -7341,12 +7341,36 @@
         "reason": "Metrics listeners are outside Hop's client schema."
       },
       {
+        "path": "/outbounds/*/settings/level",
+        "reason": "Hop enforces policy level 0 to preserve iOS memory limits."
+      },
+      {
         "path": "/outbounds/*/settings/reverse",
         "reason": "VLESS reverse proxy is outside Hop's client schema."
       },
       {
+        "path": "/outbounds/*/settings/seed",
+        "reason": "The pinned core parses but ignores the VLESS seed field."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/hysteriaSettings/congestion",
+        "reason": "Ignored by the pinned core; use finalmask/quicParams/congestion."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/hysteriaSettings/down",
+        "reason": "Ignored by the pinned core; use finalmask/quicParams/brutalDown."
+      },
+      {
         "path": "/outbounds/*/streamSettings/hysteriaSettings/masquerade",
         "reason": "Hysteria server masquerade settings are outside client schema."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/hysteriaSettings/udphop",
+        "reason": "Ignored by the pinned core; use finalmask/quicParams/udpHop."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/hysteriaSettings/up",
+        "reason": "Ignored by the pinned core; use finalmask/quicParams/brutalUp."
       },
       {
         "path": "/outbounds/*/streamSettings/kcpSettings/header",
@@ -7365,8 +7389,52 @@
         "reason": "Server-only REALITY fields are forbidden."
       },
       {
+        "path": "/outbounds/*/streamSettings/realitySettings/show",
+        "reason": "Debug output exposes handshake key material outside sanitized logging."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/acceptProxyProtocol",
+        "reason": "Listener-only socket option; Hop owns the local TUN inbound."
+      },
+      {
         "path": "/outbounds/*/streamSettings/sockopt/customSockopt",
         "reason": "Arbitrary platform socket options are unsafe and unavailable on iOS."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/mark",
+        "reason": "The pinned core does not implement this socket option on iOS."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/tcpCongestion",
+        "reason": "The pinned core does not implement this socket option on iOS."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/tcpMaxSeg",
+        "reason": "The pinned core does not implement this socket option on iOS."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/tcpMptcp",
+        "reason": "The pinned core does not implement this socket option on iOS."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/tcpUserTimeout",
+        "reason": "The pinned core does not implement this socket option on iOS."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/tcpWindowClamp",
+        "reason": "The pinned core does not implement this socket option on iOS."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/tproxy",
+        "reason": "The pinned core does not implement this socket option on iOS."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/trustedXForwardedFor",
+        "reason": "Listener-only socket option; Hop owns the local TUN inbound."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/sockopt/v6only",
+        "reason": "Listener-only socket option; Hop owns the local TUN inbound."
       },
       {
         "path": "/outbounds/*/streamSettings/tlsSettings/allowInsecure",
@@ -7379,6 +7447,10 @@
       {
         "path": "/outbounds/*/streamSettings/tlsSettings/certificates/*/keyFile",
         "reason": "Unverified external file reads and key files are forbidden."
+      },
+      {
+        "path": "/outbounds/*/streamSettings/tlsSettings/echSockopt",
+        "reason": "Only used for resolver-based ECH; Hop permits inline ECH config only."
       },
       {
         "path": "/outbounds/*/streamSettings/tlsSettings/masterKeyLog",

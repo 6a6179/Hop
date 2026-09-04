@@ -4,7 +4,6 @@ enum AppTab: Hashable {
     case dashboard
     case profiles
     case rules
-    case logs
     case settings
 }
 
@@ -42,14 +41,6 @@ struct AppShellView: View {
             .tag(AppTab.rules)
 
             NavigationStack {
-                LogsView()
-            }
-            .tabItem {
-                Label("Logs", systemImage: "doc.text.magnifyingglass")
-            }
-            .tag(AppTab.logs)
-
-            NavigationStack {
                 SettingsView()
             }
             .tabItem {
@@ -58,8 +49,10 @@ struct AppShellView: View {
             .tag(AppTab.settings)
         }
         .preferredColorScheme(preferredColorScheme)
+        .task { await store.tunnel.refreshStatus() }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
+                Task { await store.tunnel.refreshStatus() }
                 Task { await store.autoRefreshStaleSubscriptions() }
             }
         }
@@ -85,7 +78,23 @@ struct AppShellView: View {
                 store.acknowledgeXrayMigration()
             }
         } message: {
-            Text(store.pendingXrayMigrationReport?.message ?? "Hop upgraded its saved configuration for Xray-core.")
+            Text(store.pendingXrayMigrationReport?.message ?? "Saved configuration upgraded for Xray.")
+        }
+        .alert(
+            "Changes Not Saved",
+            isPresented: Binding(
+                get: { store.persistenceError != nil },
+                set: {
+                    if !$0 {
+                        store.persistenceError = nil
+                    }
+                },
+            ),
+        ) {
+            Button("Retry") { store.persist() }
+            Button("Dismiss", role: .cancel) { store.persistenceError = nil }
+        } message: {
+            Text("Retry saving before closing Hop.")
         }
     }
 

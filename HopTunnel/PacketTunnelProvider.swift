@@ -302,7 +302,12 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         guard !secretsAreResolved else {
             return rawConfig
         }
-        let (config, unresolvedSecrets) = SecretResolver.resolve(rawConfig, nonce: nonce)
+        let (config, unresolvedSecrets) = SecretResolver.resolve(
+            rawConfig,
+            nonce: nonce,
+            using: .runtime,
+            keyPrefix: HopSecret.runtimeKeyPrefix(nonce: nonce),
+        )
         guard unresolvedSecrets == 0 else {
             throw TunnelProviderError.unresolvedSecrets(unresolvedSecrets)
         }
@@ -575,27 +580,27 @@ private enum TunnelProviderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingConfig:
-            "The Hop tunnel extension could not find the tunnel settings."
+            "Tunnel settings missing."
         case .missingSecretNonce:
-            "The Hop tunnel extension received no secret nonce, so credentials cannot be resolved safely. Reconnect from the app."
+            "Credential nonce missing. Reconnect from Hop."
         case .configTooLarge:
-            "The tunnel configuration exceeds the 512 KiB extension limit."
+            "Tunnel config exceeds the 512 KiB limit."
         case .invalidConfig:
-            "The tunnel configuration is not a valid Xray JSON object."
+            "Tunnel config must be an Xray JSON object."
         case .configPathOutsideContainer:
-            "The Hop tunnel extension refused a config path outside the shared App Group container."
+            "Config rejected: path outside the shared App Group."
         case .missingConfigAuthenticationSecret:
-            "The Hop tunnel extension could not read the tunnel config authentication key from the shared Keychain."
+            "Cannot read tunnel authentication key from shared Keychain."
         case .configAuthenticationFailed:
-            "The Hop tunnel extension refused tunnel settings whose App Group integrity check failed."
+            "Tunnel settings rejected: integrity check failed."
         case let .unresolvedSecrets(count):
-            "\(count) credential reference(s) could not be resolved from the shared Keychain."
+            "Cannot resolve \(count) credential references from shared Keychain."
         case let .memoryBudgetExceeded(bytes):
-            "The tunnel stopped at \(PacketTunnelProvider.formatBytes(bytes)) to stay below the iOS Network Extension memory ceiling."
+            "Tunnel stopped at \(PacketTunnelProvider.formatBytes(bytes)) to avoid the iOS memory limit."
         case .xrayUnavailable:
-            "LibXray.xcframework is not linked. Build the pinned framework and regenerate the project."
+            "LibXray.xcframework not linked. Restore the pinned framework and regenerate the project."
         case let .xrayFailure(code):
-            "Xray rejected the tunnel configuration (\(XrayBridgeResponse.Failure.sanitizedCode(code)))."
+            "Xray rejected tunnel config (\(XrayBridgeResponse.Failure.sanitizedCode(code)))."
         }
     }
 }

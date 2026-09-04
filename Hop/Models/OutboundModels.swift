@@ -281,11 +281,11 @@ struct ImportResult: Hashable, Codable {
         }
         var copy = self
         copy.rules = []
-        copy.warnings.append(ImportWarning(message: "Ignored \(rules.count) routing rule(s) from subscription data. Import rules manually to review and apply them."))
+        copy.warnings.append(ImportWarning(message: "Ignored \(rules.count) routing rules from subscription. Import manually to review and apply."))
         return copy
     }
 
-    static let subscriptionGroupReviewWarning = "Subscription groups were saved disabled. Review each group's members and default target before enabling or selecting it."
+    static let subscriptionGroupReviewWarning = "Subscription groups disabled. Review members and default targets before enabling."
 
     /// Provider-controlled groups can hide DIRECT/REJECT defaults and nested
     /// routing behavior behind a count-only preview. Keep new groups available,
@@ -297,7 +297,7 @@ struct ImportResult: Hashable, Codable {
         copy.groups = groups.map {
             var group = $0
             group.isEnabled = false
-            group.warning = "Review this subscription group's routing before enabling it."
+            group.warning = "Review subscription routing before enabling."
             return group
         }
         if !warnings.contains(where: { $0.message == Self.subscriptionGroupReviewWarning }) {
@@ -360,7 +360,7 @@ struct ImportResult: Hashable, Codable {
         let keptRules = Array(rules.prefix(max(0, budget)))
 
         var trimmedWarnings = warnings
-        trimmedWarnings.append(ImportWarning(message: "Import truncated to \(maxItems) items; \(total - maxItems) were dropped."))
+        trimmedWarnings.append(ImportWarning(message: "Import truncated to \(maxItems) items; \(total - maxItems) dropped."))
 
         return ImportResult(
             profiles: keptProfiles,

@@ -253,9 +253,9 @@ final class HopAppDataStoreTests: XCTestCase {
                     settings: .defaults,
                     logs: [],
                 ))
-                var state = try Data(contentsOf: stateURL)
-                state.append(0x20)
-                try state.write(to: stateURL)
+                var envelope = try JSONDecoder().decode(AppStateEnvelope.self, from: Data(contentsOf: stateURL))
+                envelope.payload.append(0x20)
+                try JSONEncoder().encode(envelope).write(to: stateURL)
             case .undecodable:
                 try Data("{not-json".utf8).write(to: stateURL)
             }
@@ -496,7 +496,7 @@ final class HopAppDataStoreTests: XCTestCase {
 
         store.save(data)
 
-        let raw = try String(contentsOf: url, encoding: .utf8)
+        let raw = try String(decoding: persistedStatePayload(at: url), as: UTF8.self)
         XCTAssertFalse(raw.contains("path/token"), "subscription bearer URL leaked into JSON")
         XCTAssertEqual(secretStore.value(forKey: HopSecret.subscriptionURLKey(subscriptionID: subscription.id)), subscription.url)
         XCTAssertEqual(try XCTUnwrap(store.load()).subscriptions, [subscription])
@@ -523,11 +523,61 @@ final class HopAppDataStoreTests: XCTestCase {
         store.save(data)
         XCTAssertEqual(try XCTUnwrap(store.load()).profiles.first?.endpoint.host, "safe.example.com")
 
-        let tampered = try String(contentsOf: url, encoding: .utf8)
+        var envelope = try JSONDecoder().decode(AppStateEnvelope.self, from: Data(contentsOf: url))
+        let tampered = String(decoding: envelope.payload, as: UTF8.self)
             .replacingOccurrences(of: "safe.example.com", with: "evil.example.com")
-        try tampered.write(to: url, atomically: true, encoding: .utf8)
+        envelope.payload = Data(tampered.utf8)
+        try JSONEncoder().encode(envelope).write(to: url, options: .atomic)
 
         XCTAssertNil(store.load(), "state tamper must fail before Keychain-backed secrets are rebound")
+    }
+
+    func testSaveAbortedBySignatureFailureLeavesProfileSecretsUntouched() throws {
+        let url = tempStateURL()
+        let profileBackend = InMemorySecretBackend()
+        let profileStore = SecretStore(backend: profileBackend)
+        let writer = HopAppDataStore(url: url, secretStore: profileStore, authenticationStore: .inMemory())
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        let keep = trojanProfile(id: UUID(), name: "Keep", host: "keep.example.com", password: "keep-secret")
+        let doomed = trojanProfile(id: UUID(), name: "Doomed", host: "doomed.example.com", password: "doomed-secret")
+        writer.save(HopAppData(
+            profiles: [keep, doomed],
+            groups: [],
+            subscriptions: [],
+            routingMode: .global,
+            selectedTarget: .profile(keep.id),
+            settings: .defaults,
+            logs: [],
+        ))
+        let secretsBeforeFailedSave = profileBackend.allValues()
+
+        // The runtime Keychain rejects the signing secret, so this save (which
+        // deletes "Doomed") must abort before writing the state file — and
+        // before pruning the deleted profile's secret, or the profile still on
+        // disk would come back on next launch without its credential.
+        let failingWriter = HopAppDataStore(
+            url: url,
+            secretStore: profileStore,
+            authenticationStore: SecretStore(backend: RejectingSecretBackend()),
+        )
+        failingWriter.save(HopAppData(
+            profiles: [keep],
+            groups: [],
+            subscriptions: [],
+            routingMode: .global,
+            selectedTarget: .profile(keep.id),
+            settings: .defaults,
+            logs: [],
+        ))
+
+        XCTAssertEqual(
+            profileBackend.allValues(),
+            secretsBeforeFailedSave,
+            "an aborted save must not prune or rewrite profile secrets",
+        )
+        let loaded = try XCTUnwrap(writer.load())
+        XCTAssertEqual(loaded.profiles.map(\.name), ["Keep", "Doomed"], "the state file must be untouched by an aborted save")
     }
 
     func testKillSwitchSettingRoundTrips() throws {

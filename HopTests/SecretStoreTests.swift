@@ -72,6 +72,26 @@ final class SecretStoreTests: XCTestCase {
         XCTAssertNotEqual(SecretStore.runtimeService, SecretStore.defaultService)
     }
 
+    func testTunnelSnapshotPruningKeepsInstalledGenerationsAndAuthenticationKeys() {
+        let store = makeStore()
+        let current = UUID().uuidString
+        let previous = UUID().uuidString
+        let abandoned = UUID().uuidString
+        for nonce in [current, previous, abandoned] {
+            XCTAssertTrue(store.setValue(nonce, forKey: HopSecret.runtimeKeyPrefix(nonce: nonce) + "password"))
+        }
+        XCTAssertTrue(store.setValue("auth-key", forKey: SecretStore.tunnelConfigAuthenticationKey))
+        XCTAssertTrue(store.setValue("app-auth-key", forKey: SecretStore.appStateAuthenticationKey))
+
+        XCTAssertTrue(store.pruneTunnelSnapshots(keeping: [current, previous]))
+
+        XCTAssertEqual(store.value(forKey: HopSecret.runtimeKeyPrefix(nonce: current) + "password"), current)
+        XCTAssertEqual(store.value(forKey: HopSecret.runtimeKeyPrefix(nonce: previous) + "password"), previous)
+        XCTAssertNil(store.value(forKey: HopSecret.runtimeKeyPrefix(nonce: abandoned) + "password"))
+        XCTAssertEqual(store.tunnelConfigAuthenticationSecret(), "auth-key")
+        XCTAssertEqual(store.appStateAuthenticationSecret(), "app-auth-key")
+    }
+
     // MARK: - Profile redaction / hydration
 
     func testProfileRedactionRemovesSecretsAndHydrationRestores() {
@@ -270,7 +290,7 @@ final class SecretStoreTests: XCTestCase {
     func testStateFileContainsNoPlaintextSecrets() throws {
         let url = makeTempStateURL()
         let store = makeStore()
-        let dataStore = HopAppDataStore(url: url, secretStore: store, authenticationStore: store)
+        let dataStore = HopAppDataStore(url: url, secretStore: store, authenticationStore: .inMemory())
         defer {
             store.removeAll()
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -278,7 +298,7 @@ final class SecretStoreTests: XCTestCase {
 
         dataStore.save(sampleAppData())
 
-        let raw = try String(contentsOf: url, encoding: .utf8)
+        let raw = try String(decoding: persistedStatePayload(at: url), as: UTF8.self)
         XCTAssertFalse(raw.contains("replace-me"), "trojan/hysteria2 passwords leaked into JSON")
         XCTAssertFalse(raw.contains("obfs-secret"), "obfs password leaked into JSON")
         XCTAssertFalse(raw.contains("11111111-1111-4111-8111-111111111111"), "VLESS UUID leaked into JSON")
@@ -291,7 +311,7 @@ final class SecretStoreTests: XCTestCase {
     func testAdvancedSecretSidecarPersistsReferencesAndHydratesValues() throws {
         let url = makeTempStateURL()
         let store = makeStore()
-        let dataStore = HopAppDataStore(url: url, secretStore: store, authenticationStore: store)
+        let dataStore = HopAppDataStore(url: url, secretStore: store, authenticationStore: .inMemory())
         defer {
             store.removeAll()
             try? FileManager.default.removeItem(at: url.deletingLastPathComponent())
@@ -330,7 +350,7 @@ final class SecretStoreTests: XCTestCase {
         )
         dataStore.save(data)
 
-        let raw = try String(contentsOf: url, encoding: .utf8)
+        let raw = try String(decoding: persistedStatePayload(at: url), as: UTF8.self)
         for secret in ["vless-seed-secret", "Bearer advanced-secret", "mask-password", "realm://host/token"] {
             XCTAssertFalse(raw.contains(secret))
         }
@@ -369,11 +389,11 @@ final class SecretStoreTests: XCTestCase {
         try encoder.encode(legacy).write(to: url)
         XCTAssertTrue(try String(contentsOf: url, encoding: .utf8).contains("replace-me"))
 
-        let dataStore = HopAppDataStore(url: url, secretStore: store, authenticationStore: store)
+        let dataStore = HopAppDataStore(url: url, secretStore: store, authenticationStore: .inMemory())
         let loaded = try XCTUnwrap(dataStore.load())
 
         XCTAssertEqual(loaded.profiles, [SampleData.trojanTLS], "secrets must survive migration")
-        XCTAssertFalse(try String(contentsOf: url, encoding: .utf8).contains("replace-me"), "migration must rewrite the file without secrets")
+        XCTAssertFalse(try String(decoding: persistedStatePayload(at: url), as: UTF8.self).contains("replace-me"), "migration must rewrite the file without secrets")
         let key = HopSecret.key(profileID: SampleData.trojanTLS.id, fieldRaw: ProfileSecretField.password.rawValue)
         XCTAssertEqual(store.value(forKey: key), "replace-me", "migration must move the secret into the Keychain")
     }

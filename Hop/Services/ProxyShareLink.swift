@@ -55,8 +55,10 @@ enum ProxyShareLink {
             return link(scheme: "hysteria2", userInfo: options.password, profile: profile, query: query)
 
         case let .shadowsocks(options):
-            // SIP002: base64url(method:password) as the userinfo.
-            let userInfo = Data("\(options.method):\(options.password)".utf8)
+            // SIP002 requires percent-encoded plain userinfo for AEAD-2022.
+            let userInfo = options.method.hasPrefix("2022-")
+                ? "\(encoded(options.method)):\(encoded(options.password))"
+                : Data("\(options.method):\(options.password)".utf8)
                 .base64EncodedString()
                 .replacingOccurrences(of: "+", with: "-")
                 .replacingOccurrences(of: "/", with: "_")
@@ -169,6 +171,7 @@ enum ProxyShareLink {
         case .xhttp:
             object["path"] = profile.transport.path ?? ""
             object["host"] = profile.transport.host ?? ""
+            object["mode"] = profile.transport.xhttpMode
         }
         if profile.security.layer != .none, let tls = profile.security.tls {
             object["tls"] = profile.security.layer == .reality ? "reality" : "tls"
@@ -234,7 +237,7 @@ enum ProxyShareLink {
         case .grpc:
             "grpc"
         case .httpUpgrade:
-            "h2"
+            "httpupgrade"
         case .xhttp:
             "xhttp"
         case .mKCP:
@@ -383,12 +386,16 @@ enum ProxyShareLink {
     // MARK: - Encoding helpers
 
     private static func userInfo(_ username: String?, _ password: String?) -> String? {
-        guard let username, !username.isEmpty else {
+        let username = username ?? ""
+        let password = password ?? ""
+        if username.isEmpty, password.isEmpty {
             return nil
         }
-        guard let password, !password.isEmpty else {
+        if password.isEmpty {
             return encoded(username)
         }
+        // SOCKS/HTTP allow password-only credentials; ":password" round-trips
+        // through URLComponents as an empty user with a non-empty password.
         return "\(encoded(username)):\(encoded(password))"
     }
 

@@ -4,6 +4,43 @@ import XCTest
 final class RuleConfigurationTests: XCTestCase {
     private let builder = XrayConfigBuilder()
 
+    func testEditorInsertsNewMatchersBeforeFinalWithoutReorderingExistingRules() {
+        let first = RoutingRule(kind: .domainSuffix, value: "first.example", target: .direct)
+        let final = RoutingRule(kind: .final, value: "*", target: .reject)
+        let added = RoutingRule(kind: .port, value: "443", target: .selectedProxy)
+        var configuration = RuleConfiguration(name: "Ordering", rules: [first, final])
+        configuration.saveRule(added)
+        XCTAssertEqual(configuration.rules, [first, added, final])
+
+        var edited = first
+        edited.value = "edited.example"
+        configuration.saveRule(edited)
+        XCTAssertEqual(configuration.rules, [edited, added, final])
+
+        let newFinal = RoutingRule(kind: .final, value: "*", target: .direct)
+        configuration.saveRule(newFinal)
+        XCTAssertEqual(configuration.rules, [edited, added, final, newFinal])
+
+        var noFinal = RuleConfiguration(name: "Append", rules: [first])
+        noFinal.saveRule(added)
+        XCTAssertEqual(noFinal.rules, [first, added])
+    }
+
+    func testRuleEditorValidatesMatchersWithThePinnedCoreBeforeSaving() async throws {
+        for (kind, value) in [(RoutingRuleKind.wifiSSID, "Home"), (.ipCIDR, "not-an-ip"), (.port, "not-a-port")] {
+            let draft = RuleEditorDraft(rule: RoutingRule(kind: kind, value: value, target: .selectedProxy))
+            do {
+                try await draft.validate()
+                XCTFail("Accepted invalid \(kind): \(value)")
+            } catch {}
+        }
+        for (kind, value) in [(RoutingRuleKind.domainSuffix, "example.com"), (.ipCIDR, "10.0.0.0/8"), (.port, "443")] {
+            let draft = RuleEditorDraft(rule: RoutingRule(kind: kind, value: value, target: .profile(UUID())))
+            try await draft.validate()
+            XCTAssertEqual(draft.rule.value, value)
+        }
+    }
+
     private func tempStateURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("hop-config-tests-\(UUID().uuidString)", isDirectory: true)
@@ -124,6 +161,55 @@ final class RuleConfigurationTests: XCTestCase {
         XCTAssertTrue(store.ruleConfigurations.contains { $0.id == store.activeRuleConfigurationID })
     }
 
+    @MainActor
+    func testEditedBuiltInConfigurationsSurviveRelaunch() {
+        let dataStore = HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory())
+        let store = HopStore(dataStore: dataStore)
+        for var configuration in store.ruleConfigurations {
+            configuration.rules = [RoutingRule(kind: .domainSuffix, value: "apple.com", target: .selectedProxy)]
+            store.updateRuleConfiguration(configuration)
+        }
+        store.flushPendingPersists()
+
+        let reloaded = HopStore(dataStore: dataStore)
+        XCTAssertEqual(reloaded.ruleConfigurations, store.ruleConfigurations)
+    }
+
+    @MainActor
+    func testDeleteProfileAndGroupRemoveDanglingRuleTargets() {
+        let store = HopStore(dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()))
+        let profile = ProxyProfile(
+            name: "Rule Target",
+            endpoint: Endpoint(host: "target.example.net", port: 443),
+            options: .trojan(TrojanOptions(password: "secret")),
+            security: .tls(TLSOptions(serverName: "target.example.net")),
+        )
+        store.addProfile(profile)
+        let group = ProxyGroup(name: "Rule Group", type: .select, members: [.profile(profile.id)], defaultTarget: .profile(profile.id))
+        store.addGroup(group)
+        let config = RuleConfiguration(name: "Custom", rules: [
+            RoutingRule(kind: .domainSuffix, value: "a.example.com", target: .profile(profile.id)),
+            RoutingRule(kind: .domainSuffix, value: "b.example.com", target: .group(group.id)),
+            RoutingRule(kind: .domainSuffix, value: "c.example.com", target: .direct),
+        ])
+        store.addRuleConfiguration(config)
+
+        store.deleteProfile(id: profile.id)
+        var rules = store.ruleConfigurations.first { $0.id == config.id }?.rules ?? []
+        XCTAssertFalse(
+            rules.contains { $0.target == .profile(profile.id) },
+            "deleting a node must drop rules that target it, or the next config build fails on a dangling reference",
+        )
+
+        store.deleteGroup(id: group.id)
+        rules = store.ruleConfigurations.first { $0.id == config.id }?.rules ?? []
+        XCTAssertFalse(
+            rules.contains { $0.target == .group(group.id) },
+            "deleting a group must drop rules that target it",
+        )
+        XCTAssertTrue(rules.contains { $0.target == .direct }, "unrelated rules must survive the repair")
+    }
+
     // MARK: - Legacy migration
 
     @MainActor
@@ -180,6 +266,7 @@ final class RuleConfigurationTests: XCTestCase {
             logs: [],
             ruleConfigurations: [oldDefault, custom],
             activeRuleConfigurationID: oldDefault.id,
+            routingConfigurationMigrationVersion: nil,
         )
         HopAppDataStore(url: url, secretStore: secretStore, authenticationStore: authStore).save(loaded)
 
@@ -190,5 +277,38 @@ final class RuleConfigurationTests: XCTestCase {
         XCTAssertTrue(appleRule.value.contains("icloud.com"))
         XCTAssertTrue(appleRule.value.contains("apple.com"))
         XCTAssertEqual(store.ruleConfigurations.first { $0.id == custom.id }?.rules, custom.rules)
+
+        // Even an edit that recreates an old preset must not migrate again.
+        store.updateRuleConfiguration(oldDefault)
+        store.flushPendingPersists()
+        let reloaded = HopStore(dataStore: HopAppDataStore(url: url, secretStore: secretStore, authenticationStore: authStore))
+        XCTAssertEqual(reloaded.ruleConfigurations.first { $0.id == oldDefault.id }, oldDefault)
+    }
+
+    @MainActor
+    func testLegacyCustomConfigurationsWithPresetNamesAreNotRewritten() {
+        let dataStore = HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory())
+        let configurations = ["Default", "China", "Iran"].map { name in
+            RuleConfiguration(name: name, rules: [
+                RoutingRule(kind: .domainSuffix, value: "apple.com", target: .reject),
+                RoutingRule(kind: .geoSite, value: "category-ads-all", target: .reject),
+            ])
+        }
+        dataStore.save(HopAppData(
+            profiles: [],
+            groups: [],
+            subscriptions: [],
+            routingMode: .rule,
+            selectedTarget: nil,
+            settings: .defaults,
+            logs: [],
+            ruleConfigurations: configurations,
+            routingConfigurationMigrationVersion: nil,
+        ))
+
+        let store = HopStore(dataStore: dataStore)
+        XCTAssertEqual(store.ruleConfigurations, configurations)
+        store.flushPendingPersists()
+        XCTAssertEqual(dataStore.load()?.routingConfigurationMigrationVersion, 1)
     }
 }

@@ -57,13 +57,13 @@ enum XrayCoreClientError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .frameworkUnavailable:
-            "LibXray.xcframework is unavailable in this build."
+            "LibXray.xcframework is missing."
         case .invalidBridgeEncoding:
-            "The Xray validation bridge returned invalid data."
+            "Invalid Xray validation response."
         case let .unsupportedBridgeVersion(version):
-            "The Xray bridge returned unsupported API version \(version)."
+            "Unsupported Xray bridge API version: \(version)."
         case let .validationFailed(code):
-            "Xray configuration validation failed (\(XrayBridgeResponse.Failure.sanitizedCode(code))). Review the selected profile's settings."
+            "Xray validation failed (\(XrayBridgeResponse.Failure.sanitizedCode(code))). Review node settings."
         }
     }
 }

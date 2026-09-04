@@ -17,6 +17,8 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -244,22 +246,41 @@ var applicabilityOverlays = map[string]string{
 	"Config.version":          "client-advanced",
 	"Config.geodata":          "client-advanced-local-assets-only",
 
-	"OutboundDetourConfig.protocol":       "hop-typed",
-	"OutboundDetourConfig.tag":            "hop-typed",
-	"OutboundDetourConfig.settings":       "client-profile",
-	"OutboundDetourConfig.streamSettings": "client-profile",
-	"OutboundDetourConfig.proxySettings":  "client-profile",
-	"OutboundDetourConfig.mux":            "client-profile",
-	"VLessOutboundConfig.reverse":         "excluded-reverse-proxy",
-	"Policy.statsUserDownlink":            "excluded-app-telemetry",
-	"Policy.statsUserOnline":              "excluded-app-telemetry",
-	"Policy.statsUserUplink":              "excluded-app-telemetry",
-	"SystemPolicy.statsInboundDownlink":   "excluded-app-telemetry",
-	"SystemPolicy.statsInboundUplink":     "excluded-app-telemetry",
-	"SystemPolicy.statsOutboundDownlink":  "excluded-app-telemetry",
-	"SystemPolicy.statsOutboundUplink":    "excluded-app-telemetry",
-	"KCPConfig.header":                    "excluded-removed-feature",
-	"KCPConfig.seed":                      "excluded-removed-feature",
+	"OutboundDetourConfig.protocol":        "hop-typed",
+	"OutboundDetourConfig.tag":             "hop-typed",
+	"OutboundDetourConfig.settings":        "client-profile",
+	"OutboundDetourConfig.streamSettings":  "client-profile",
+	"OutboundDetourConfig.proxySettings":   "client-profile",
+	"OutboundDetourConfig.mux":             "client-profile",
+	"VLessOutboundConfig.reverse":          "excluded-reverse-proxy",
+	"VLessOutboundConfig.seed":             "excluded-ignored-by-core",
+	"VLessOutboundConfig.level":            "hop-enforced-level-zero",
+	"VMessOutboundConfig.level":            "hop-enforced-level-zero",
+	"TrojanClientConfig.level":             "hop-enforced-level-zero",
+	"TrojanServerTarget.level":             "hop-enforced-level-zero",
+	"TrojanClientConfig.flow":              "excluded-removed-feature",
+	"TrojanServerTarget.flow":              "excluded-removed-feature",
+	"ShadowsocksClientConfig.level":        "hop-enforced-level-zero",
+	"ShadowsocksServerTarget.level":        "hop-enforced-level-zero",
+	"HTTPClientConfig.level":               "hop-enforced-level-zero",
+	"SocksClientConfig.level":              "hop-enforced-level-zero",
+	"WireGuardPeerConfig.level":            "server-only",
+	"WireGuardPeerConfig.email":            "server-only",
+	"Policy.statsUserDownlink":             "excluded-app-telemetry",
+	"Policy.statsUserOnline":               "excluded-app-telemetry",
+	"Policy.statsUserUplink":               "excluded-app-telemetry",
+	"SystemPolicy.statsInboundDownlink":    "excluded-app-telemetry",
+	"SystemPolicy.statsInboundUplink":      "excluded-app-telemetry",
+	"SystemPolicy.statsOutboundDownlink":   "excluded-app-telemetry",
+	"SystemPolicy.statsOutboundUplink":     "excluded-app-telemetry",
+	"KCPConfig.header":                     "excluded-removed-feature",
+	"KCPConfig.seed":                       "excluded-removed-feature",
+	"SplitHTTPConfig.noSSEHeader":          "server-only",
+	"SplitHTTPConfig.scMaxBufferedPosts":   "server-only",
+	"SplitHTTPConfig.scStreamUpServerSecs": "server-only",
+	"SplitHTTPConfig.serverMaxHeaderBytes": "server-only",
+	"GRPCConfig.initial_windows_size":      "excluded-hop-fixed",
+	"QuicParamsConfig.maxIncomingStreams":  "excluded-hop-fixed",
 
 	"StreamConfig.address":  "hop-typed",
 	"StreamConfig.port":     "hop-typed",
@@ -267,6 +288,7 @@ var applicabilityOverlays = map[string]string{
 	"StreamConfig.security": "hop-typed",
 
 	"REALITYConfig.masterKeyLog":          "excluded-client-unsafe",
+	"REALITYConfig.show":                  "excluded-client-unsafe",
 	"REALITYConfig.target":                "server-only",
 	"REALITYConfig.dest":                  "server-only-legacy-alias",
 	"REALITYConfig.type":                  "server-only",
@@ -292,6 +314,8 @@ var applicabilityOverlays = map[string]string{
 	"TLSConfig.rejectUnknownSni":    "server-only",
 	"TLSConfig.echServerKeys":       "server-only",
 	"TLSConfig.masterKeyLog":        "excluded-client-unsafe",
+	"TLSConfig.echSockopt":          "excluded-hop-unsupported",
+	"Realm.tlsConfig":               "excluded-unreviewed-trust",
 	"TLSCertConfig.keyFile":         "excluded-external-file",
 	"TLSCertConfig.certificateFile": "excluded-external-file",
 
@@ -306,11 +330,28 @@ var applicabilityOverlays = map[string]string{
 	"Masquerade.headers":                    "server-only",
 	"Masquerade.statusCode":                 "server-only",
 	"HysteriaConfig.masquerade":             "server-only",
+	"HysteriaConfig.congestion":             "excluded-ignored-by-core",
+	"HysteriaConfig.up":                     "excluded-ignored-by-core",
+	"HysteriaConfig.down":                   "excluded-ignored-by-core",
+	"HysteriaConfig.udphop":                 "excluded-ignored-by-core",
 	"RawFieldRule.webhook":                  "excluded-unsupported-network-probe",
 	"RawFieldRule.process":                  "excluded-ios-unavailable",
 	"GeodataAssetConfig.url":                "excluded-network-download",
 	"GeodataAssetConfig.file":               "verified-local-only",
 	"SocketConfig.customSockopt":            "excluded-ios-unsafe",
+	"SocketConfig.acceptProxyProtocol":      "server-only",
+	"SocketConfig.trustedXForwardedFor":     "server-only",
+	"SocketConfig.v6only":                   "server-only",
+	"SocketConfig.mark":                     "excluded-ios-unavailable",
+	"SocketConfig.tproxy":                   "excluded-ios-unavailable",
+	"SocketConfig.tcpCongestion":            "excluded-ios-unavailable",
+	"SocketConfig.tcpWindowClamp":           "excluded-ios-unavailable",
+	"SocketConfig.tcpMaxSeg":                "excluded-ios-unavailable",
+	"SocketConfig.tcpUserTimeout":           "excluded-ios-unavailable",
+	"SocketConfig.tcpMptcp":                 "excluded-ios-unavailable",
+	"Xdns.domain":                           "excluded-removed-feature",
+	"Xdns.domains":                          "server-only",
+	"Xdns.resolvers":                        "client",
 }
 
 var annotationOverlays = map[string][]string{
@@ -579,7 +620,7 @@ func definitionFromAST(parsed parsedType, allTypes map[string]parsedType) defini
 				Items:         use.Items,
 				Optional:      optional || options["omitempty"],
 				Applicability: applicability(parsed.Name, fieldName),
-				Annotations:   sortedCopy(annotationOverlays[key]),
+				Annotations:   slices.Sorted(slices.Values(annotationOverlays[key])),
 			}
 			if stripsReference(key) {
 				item.Ref = ""
@@ -627,7 +668,7 @@ func jsonFieldName(field *ast.Field) (string, map[string]bool, bool, bool) {
 	if err != nil {
 		return "", options, false, false
 	}
-	tag := reflectStructTag(literal, "json")
+	tag := reflect.StructTag(literal).Get("json")
 	if tag == "-" {
 		return "", options, false, true
 	}
@@ -636,36 +677,6 @@ func jsonFieldName(field *ast.Field) (string, map[string]bool, bool, bool) {
 		options[option] = true
 	}
 	return parts[0], options, tag == "", false
-}
-
-// reflectStructTag is the small subset of reflect.StructTag.Get needed by the
-// generator, kept local so generation depends only on parsed pinned source.
-func reflectStructTag(tag, key string) string {
-	for tag != "" {
-		tag = strings.TrimLeft(tag, " ")
-		if tag == "" {
-			break
-		}
-		index := strings.IndexByte(tag, ':')
-		if index <= 0 {
-			break
-		}
-		name := tag[:index]
-		tag = tag[index+1:]
-		if tag == "" || tag[0] != '"' {
-			break
-		}
-		value, err := strconv.QuotedPrefix(tag)
-		if err != nil {
-			break
-		}
-		tag = tag[len(value):]
-		if name == key {
-			unquoted, _ := strconv.Unquote(value)
-			return unquoted
-		}
-	}
-	return ""
 }
 
 func typeUseFromExpr(expr ast.Expr, allTypes map[string]parsedType) (typeUse, bool) {
@@ -991,12 +1002,26 @@ func buildAnnotations() annotations {
 		{Path: "/outbounds/*/streamSettings/kcpSettings/header", Reason: "The pinned core removed legacy mKCP headers; use FinalMask instead."},
 		{Path: "/outbounds/*/streamSettings/kcpSettings/seed", Reason: "The pinned core removed legacy mKCP seed obfuscation; use FinalMask instead."},
 		{Path: "/outbounds/*/settings/reverse", Reason: "VLESS reverse proxy is outside Hop's client schema."},
+		{Path: "/outbounds/*/settings/seed", Reason: "The pinned core parses but ignores the VLESS seed field."},
+		{Path: "/outbounds/*/settings/level", Reason: "Hop enforces policy level 0 to preserve iOS memory limits."},
+		{Path: "/outbounds/*/streamSettings/realitySettings/show", Reason: "Debug output exposes handshake key material outside sanitized logging."},
+		{Path: "/outbounds/*/streamSettings/hysteriaSettings/congestion", Reason: "Ignored by the pinned core; use finalmask/quicParams/congestion."},
+		{Path: "/outbounds/*/streamSettings/hysteriaSettings/up", Reason: "Ignored by the pinned core; use finalmask/quicParams/brutalUp."},
+		{Path: "/outbounds/*/streamSettings/hysteriaSettings/down", Reason: "Ignored by the pinned core; use finalmask/quicParams/brutalDown."},
+		{Path: "/outbounds/*/streamSettings/hysteriaSettings/udphop", Reason: "Ignored by the pinned core; use finalmask/quicParams/udpHop."},
+		{Path: "/outbounds/*/streamSettings/tlsSettings/echSockopt", Reason: "Only used for resolver-based ECH; Hop permits inline ECH config only."},
+	}
+	for _, key := range []string{"mark", "tproxy", "tcpCongestion", "tcpWindowClamp", "tcpMaxSeg", "tcpUserTimeout", "tcpMptcp"} {
+		rejected = append(rejected, rejectedPath{Path: "/outbounds/*/streamSettings/sockopt/" + key, Reason: "The pinned core does not implement this socket option on iOS."})
+	}
+	for _, key := range []string{"acceptProxyProtocol", "trustedXForwardedFor", "v6only"} {
+		rejected = append(rejected, rejectedPath{Path: "/outbounds/*/streamSettings/sockopt/" + key, Reason: "Listener-only socket option; Hop owns the local TUN inbound."})
 	}
 	sort.Slice(rejected, func(i, j int) bool { return rejected[i].Path < rejected[j].Path })
 	return annotations{
-		SecretPaths:           unique(secret),
-		SecurityCriticalPaths: unique(security),
-		MemorySensitivePaths:  unique(memory),
+		SecretPaths:           slices.Compact(secret),
+		SecurityCriticalPaths: slices.Compact(security),
+		MemorySensitivePaths:  slices.Compact(memory),
 		HopManagedPaths:       hopManaged,
 		RejectedPaths:         rejected,
 	}
@@ -1070,28 +1095,6 @@ func applicability(typeName, fieldName string) string {
 }
 
 func ref(name string) string { return "#/definitions/" + name }
-
-func sortedCopy(values []string) []string {
-	if len(values) == 0 {
-		return nil
-	}
-	result := append([]string(nil), values...)
-	sort.Strings(result)
-	return result
-}
-
-func unique(values []string) []string {
-	if len(values) == 0 {
-		return values
-	}
-	result := values[:0]
-	for index, value := range values {
-		if index == 0 || value != values[index-1] {
-			result = append(result, value)
-		}
-	}
-	return result
-}
 
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "schema-manifest: "+format+"\n", args...)

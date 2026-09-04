@@ -30,6 +30,7 @@ struct SubscriptionSecurityChange: Hashable, Identifiable {
         case vlessEncryption = "VLESS Encryption/Auth"
         case realityPublicKey = "REALITY public key"
         case realityMLDSA = "REALITY ML-DSA-65 verification"
+        case wireGuardPeerPolicy = "WireGuard peers and routing"
     }
 
     let profileName: String
@@ -287,7 +288,7 @@ struct SubscriptionRefreshMerger {
         if existing.security.tls?.allowInsecure != true, security.tls?.allowInsecure == true {
             security.tls?.allowInsecure = false
             securityDowngradeWarnings.append(
-                "Refresh tried to disable TLS certificate verification for \(imported.name); kept verification enabled.",
+                "\(imported.name): blocked refresh from disabling TLS certificate verification.",
             )
         }
 
@@ -298,7 +299,7 @@ struct SubscriptionRefreshMerger {
 
         if security.layer != existing.security.layer {
             securityDowngradeWarnings.append(
-                "Refresh changed \(imported.name) from \(existing.security.layer.displayName) to \(security.layer.displayName); kept the existing security layer until it is reviewed manually.",
+                "\(imported.name): \(existing.security.layer.displayName) → \(security.layer.displayName) blocked pending review.",
             )
             security = existing.security
         } else {
@@ -314,14 +315,22 @@ struct SubscriptionRefreshMerger {
             importedOptions.encryption = existingOptions.encryption
             updated.options = .vless(importedOptions)
             securityDowngradeWarnings.append(
-                "Refresh changed or removed VLESS Encryption/Auth for \(imported.name); kept the existing value.",
+                "\(imported.name): kept VLESS Encryption/Auth; refresh change needs review.",
             )
         }
 
         if existing.transport.finalMask != imported.transport.finalMask {
             updated.transport.finalMask = existing.transport.finalMask
             securityDowngradeWarnings.append(
-                "Refresh changed FinalMask transport policy for \(imported.name); kept the existing value until it is reviewed manually.",
+                "\(imported.name): kept FinalMask policy; refresh change needs review.",
+            )
+        }
+
+        if Self.wireGuardPeerPolicyChanged(existing: existing, imported: imported) {
+            updated.options = existing.options
+            updated.endpoint = existing.endpoint
+            securityDowngradeWarnings.append(
+                "\(imported.name): kept WireGuard peers and routing; refresh change needs review.",
             )
         }
 
@@ -339,7 +348,7 @@ struct SubscriptionRefreshMerger {
             guard existingTLS != nil else { return }
             security.tls = existingTLS
             securityDowngradeWarnings.append(
-                "Refresh removed TLS verification settings for \(importedName); kept the existing values.",
+                "\(importedName): TLS verification removal blocked pending review.",
             )
             return
         }
@@ -352,7 +361,7 @@ struct SubscriptionRefreshMerger {
             guard Self.normalizedOptional(existingValue) != Self.normalizedOptional(importedValue) else { return }
             importedValue = existingValue
             securityDowngradeWarnings.append(
-                "Refresh changed or removed \(label) for \(importedName); kept the existing value.",
+                "\(importedName): kept \(label); refresh change needs review.",
             )
         }
 
@@ -367,14 +376,14 @@ struct SubscriptionRefreshMerger {
         if Self.postQuantumCurves(existingTLS?.curvePreferences ?? []) != Self.postQuantumCurves(importedTLS.curvePreferences) {
             importedTLS.curvePreferences = existingTLS?.curvePreferences ?? []
             securityDowngradeWarnings.append(
-                "Refresh changed post-quantum TLS curves for \(importedName); kept the existing curves.",
+                "\(importedName): kept post-quantum TLS curves; refresh change needs review.",
             )
         }
 
         if Self.normalizedOptional(importedTLS.minVersion) != Self.normalizedOptional(existingTLS?.minVersion) {
             importedTLS.minVersion = existingTLS?.minVersion
             securityDowngradeWarnings.append(
-                "Refresh changed the minimum TLS version for \(importedName); kept the existing minimum.",
+                "\(importedName): kept minimum TLS version; refresh change needs review.",
             )
         }
         security.tls = importedTLS
@@ -389,7 +398,7 @@ struct SubscriptionRefreshMerger {
         guard var importedReality = security.reality else {
             security.reality = existingReality
             securityDowngradeWarnings.append(
-                "Refresh removed REALITY authentication for \(importedName); kept the existing values.",
+                "\(importedName): REALITY authentication removal blocked pending review.",
             )
             return
         }
@@ -397,25 +406,25 @@ struct SubscriptionRefreshMerger {
         if Self.normalizedOptional(importedReality.publicKey) != Self.normalizedOptional(existingReality.publicKey) {
             importedReality.publicKey = existingReality.publicKey
             securityDowngradeWarnings.append(
-                "Refresh changed the REALITY public key for \(importedName); kept the existing key until it is reviewed manually.",
+                "\(importedName): kept REALITY public key; refresh change needs review.",
             )
         }
         if Self.normalizedOptional(importedReality.mldsa65Verify) != Self.normalizedOptional(existingReality.mldsa65Verify) {
             importedReality.mldsa65Verify = existingReality.mldsa65Verify
             securityDowngradeWarnings.append(
-                "Refresh changed REALITY ML-DSA-65 verification for \(importedName); kept the existing value until it is reviewed manually.",
+                "\(importedName): kept REALITY ML-DSA verify key; refresh change needs review.",
             )
         }
         if Self.normalizedOptional(importedReality.serverName) != Self.normalizedOptional(existingReality.serverName) {
             importedReality.serverName = existingReality.serverName
             securityDowngradeWarnings.append(
-                "Refresh changed the REALITY server name for \(importedName); kept the existing value until it is reviewed manually.",
+                "\(importedName): kept REALITY server name; refresh change needs review.",
             )
         }
         if Self.normalizedOptional(importedReality.utlsFingerprint) != Self.normalizedOptional(existingReality.utlsFingerprint) {
             importedReality.utlsFingerprint = existingReality.utlsFingerprint
             securityDowngradeWarnings.append(
-                "Refresh changed the REALITY client fingerprint for \(importedName); kept the existing value until it is reviewed manually.",
+                "\(importedName): kept REALITY fingerprint; refresh change needs review.",
             )
         }
         security.reality = importedReality
@@ -453,6 +462,9 @@ struct SubscriptionRefreshMerger {
         if existing.transport.finalMask != imported.transport.finalMask {
             fields.append(.finalMaskTransportPolicy)
         }
+        if wireGuardPeerPolicyChanged(existing: existing, imported: imported) {
+            fields.append(.wireGuardPeerPolicy)
+        }
 
         if case let .vless(existingOptions) = existing.options,
            case let .vless(importedOptions) = imported.options,
@@ -477,6 +489,19 @@ struct SubscriptionRefreshMerger {
             fields.append(.tlsClientFingerprint)
         }
         return fields
+    }
+
+    private static func wireGuardPeerPolicyChanged(existing: ProxyProfile, imported: ProxyProfile) -> Bool {
+        guard case let .wireGuard(old) = existing.options,
+              case let .wireGuard(new) = imported.options else { return false }
+        // Peer UUIDs identify Keychain accounts, not remote trust. Legacy
+        // effectivePeers generates fresh UUIDs on each read, so ignore them.
+        return !old.effectivePeers.elementsEqual(new.effectivePeers) { lhs, rhs in
+            lhs.publicKey == rhs.publicKey
+                && normalizedOptional(lhs.preSharedKey) == normalizedOptional(rhs.preSharedKey)
+                && (lhs.endpoint ?? existing.endpoint) == (rhs.endpoint ?? imported.endpoint)
+                && (lhs.allowedIPs ?? ["0.0.0.0/0", "::/0"]) == (rhs.allowedIPs ?? ["0.0.0.0/0", "::/0"])
+        }
     }
 
     private static func isPostQuantumCurve(_ value: String) -> Bool {
@@ -731,10 +756,10 @@ struct SubscriptionRefreshMerger {
         if !invalidatedGroupIDs.isEmpty {
             for index in groups.indices where invalidatedGroupIDs.contains(groups[index].id) {
                 groups[index].isEnabled = false
-                groups[index].warning = "Subscription refresh changed this group or a nested group's routing. Review it before enabling."
+                groups[index].warning = "Refresh changed group or nested routing. Review before enabling."
                 let name = ImportPolicy.sanitizeImportedName(groups[index].name, fallback: "Imported Group")
                 securityDowngradeWarnings.append(
-                    "Subscription refresh changed routing for group \(name) or a nested group; disabled it until the change is reviewed.",
+                    "\(name): disabled after a group or nested routing change. Review before enabling.",
                 )
             }
         }
@@ -779,7 +804,7 @@ struct SubscriptionRefreshMerger {
         }
     }
 
-    private enum ResolvedRoutingTarget: Hashable {
+    enum ResolvedRoutingTarget: Hashable {
         case direct
         case reject
         case profile(ProxyProfile.ID)
@@ -791,7 +816,7 @@ struct SubscriptionRefreshMerger {
     /// Name resolution mirrors `XrayReachabilityResolver`: built-ins win,
     /// profile/group name collisions are ambiguous, and `selectedProxy` uses
     /// the first profile or (only when there are none) first enabled group.
-    private struct RoutingTargetIndex {
+    struct RoutingTargetIndex {
         private let profileIDsByName: [String: [ProxyProfile.ID]]
         private let groupIDsByName: [String: [ProxyGroup.ID]]
         private let selectedProxy: ResolvedRoutingTarget
@@ -945,10 +970,6 @@ struct SubscriptionRefreshMerger {
             seen.insert(target)
             return true
         }
-    }
-
-    private func normalizedImportName(_ name: String) -> String {
-        name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func resolvedReplacement<ID: Hashable>(for id: ID, in replacements: [ID: ID]) -> ID {

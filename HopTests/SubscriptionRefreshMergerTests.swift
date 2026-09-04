@@ -5,6 +5,120 @@ import XCTest
 /// duplicate selection, reference remapping, and the persist batching the
 /// extraction exists for.
 final class SubscriptionRefreshMergerTests: XCTestCase {
+    @MainActor
+    func testWireGuardRefreshReviewsSingleAndMultiplePeerTrustAndRouting() {
+        for multiPeer in [false, true] {
+            let source = SubscriptionSource(name: "WireGuard", url: "https://example.com/sub")
+            let options = WireGuardOptions(
+                privateKey: "PRIVATE",
+                peerPublicKey: "PINNED",
+                preSharedKey: "PSK",
+                localAddress: ["10.0.0.2/32"],
+                peers: multiPeer ? [
+                    WireGuardPeer(publicKey: "FIRST"),
+                    WireGuardPeer(publicKey: "PINNED", preSharedKey: "PSK"),
+                ] : nil,
+            )
+            let existing = ProxyProfile(
+                name: "WG",
+                endpoint: Endpoint(host: "old.example.com", port: 51820),
+                options: .wireGuard(options),
+                security: .none,
+                subscriptionID: source.id,
+            )
+            let originalMerger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: .profile(existing.id))
+            var same = existing
+            same.id = UUID()
+            var renumbered = options
+            renumbered.peers = options.peers?.map { peer in
+                var peer = peer
+                peer.id = UUID()
+                return peer
+            }
+            same.options = .wireGuard(renumbered)
+            XCTAssertTrue(originalMerger.securityCriticalChanges(in: [same]).isEmpty, "Peer account IDs are not trust changes")
+
+            for change in 0 ..< 4 {
+                var changed = existing
+                changed.id = UUID()
+                var updated = options
+                switch change {
+                case 0:
+                    updated.peerPublicKey = "REPLACEMENT"
+                    updated.peers?[1].publicKey = "REPLACEMENT"
+                case 1:
+                    updated.preSharedKey = nil
+                    updated.peers?[1].preSharedKey = nil
+                case 2:
+                    changed.endpoint.host = "replacement.example.com"
+                default:
+                    updated.allowedIPs = ["10.0.0.0/8"]
+                    updated.peers?[1].allowedIPs = ["10.0.0.0/8"]
+                }
+                changed.options = .wireGuard(updated)
+                let result = ImportResult(profiles: [changed])
+                var automatic = originalMerger
+                automatic.merge(result)
+                XCTAssertEqual(automatic.profiles.first?.options, existing.options)
+                XCTAssertEqual(automatic.profiles.first?.endpoint, existing.endpoint)
+                XCTAssertFalse(automatic.securityDowngradeWarnings.isEmpty)
+
+                let store = HopStore(
+                    profiles: [existing],
+                    subscriptions: [source],
+                    dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
+                )
+                guard case let .needsSecurityConfirmation(reviewed, changes, names) = store.reviewSubscriptionRefresh(result, for: source) else {
+                    return XCTFail("WireGuard peer change \(change) must require review")
+                }
+                XCTAssertEqual(changes.map(\.fields), [[.wireGuardPeerPolicy]])
+                guard case .applied = store.confirmSecuritySubscriptionRefresh(
+                    reviewed, reviewedChanges: changes, reviewedInsecureProfileNames: names, for: source,
+                ) else {
+                    return XCTFail("Reviewed WireGuard change must apply")
+                }
+                XCTAssertEqual(store.profiles.first?.options, changed.options)
+                XCTAssertEqual(store.profiles.first?.endpoint, changed.endpoint)
+            }
+        }
+    }
+
+    @MainActor
+    func testPendingRefreshPreservesCurrentSourceAndRejectsChangedURL() {
+        let original = SubscriptionSource(name: "Original", url: "https://example.com/sub")
+        let store = HopStore(
+            subscriptions: [original],
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
+        )
+        let result = ImportResult(profiles: [trojanProfile(name: "Tokyo", host: "jp.example.com")])
+        var renamed = original
+        renamed.name = "Renamed"
+        store.updateSubscription(renamed)
+
+        guard case .applied = store.reviewSubscriptionRefresh(result, for: original) else {
+            return XCTFail("A display-name edit must not prevent the refresh")
+        }
+        XCTAssertEqual(store.subscriptions.first?.name, "Renamed")
+        XCTAssertNotNil(store.subscriptions.first?.lastUpdatedAt)
+
+        var moved = renamed
+        moved.url = "https://replacement.example/sub"
+        store.updateSubscription(moved)
+        let beforeProfiles = store.profiles
+        guard case .failed = store.reviewSubscriptionRefresh(result, for: original) else {
+            return XCTFail("An old URL's response must not replace the current source")
+        }
+        XCTAssertEqual(store.subscriptions, [moved])
+        XCTAssertEqual(store.profiles, beforeProfiles)
+
+        store.deleteSubscription(id: original.id)
+        guard case .failed = store.reviewSubscriptionRefresh(result, for: original) else {
+            return XCTFail("A deleted source must not be restored by its pending refresh")
+        }
+        XCTAssertTrue(store.subscriptions.isEmpty)
+        XCTAssertTrue(store.profiles.isEmpty)
+    }
+
     func testNameAndProtocolMatchUpdatesProfileInPlace() {
         let subscriptionID = UUID()
         let existing = trojanProfile(name: "Tokyo", host: "old.example.com", subscriptionID: subscriptionID)
@@ -1429,7 +1543,8 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         XCTAssertEqual(store.groups.map(\.id), [manualGroup.id])
         XCTAssertTrue(store.groups[0].members.isEmpty)
         XCTAssertNil(store.groups[0].defaultTarget)
-        XCTAssertTrue(store.rules.isEmpty)
+        XCTAssertEqual(store.rules.map(\.id), rules.rules.map(\.id))
+        XCTAssertEqual(store.rules.map(\.target), [.reject, .reject])
         XCTAssertNil(store.selectedTarget)
         XCTAssertEqual(store.subscriptions, [subscription])
         XCTAssertTrue(ownedSecretKeys.allSatisfy { backend.value(forKey: $0) == nil })

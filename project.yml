@@ -21,11 +21,7 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: Hop
-        excludes:
-          # Kept in source control for bridge/schema review tooling; the app
-          # never reads this build-time manifest at runtime.
-          - Resources/xray-client-schema-v26.6.27.json
+      - Hop
       - Shared
       - path: Geodata/geoip.dat
         buildPhase: resources

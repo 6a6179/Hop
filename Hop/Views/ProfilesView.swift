@@ -3,6 +3,7 @@ import UniformTypeIdentifiers
 
 struct ProfilesView: View {
     @Environment(HopStore.self) private var store
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var selectedSection: ProfilesSection = .nodes
     @State private var activeSheet: ProfilesSheet?
     @State private var importNotice: ProfileImportNotice?
@@ -33,7 +34,9 @@ struct ProfilesView: View {
             switch selectedSection {
             case .nodes:
                 nodesSection
-                groupsSection
+                if !store.groups.isEmpty {
+                    groupsSection
+                }
             case .subscriptions:
                 subscriptionsSection
             }
@@ -48,7 +51,7 @@ struct ProfilesView: View {
                         Button("Scan QR Code", systemImage: "qrcode.viewfinder") {
                             activeSheet = .scanner
                         }
-                        Button("Paste Links, Config, or Subscription", systemImage: "doc.on.clipboard") {
+                        Button("Paste or Import", systemImage: "doc.on.clipboard") {
                             activeSheet = .importText(prefill: "")
                         }
                     }
@@ -69,7 +72,7 @@ struct ProfilesView: View {
         .sheet(item: $activeSheet) { sheet in
             switch sheet {
             case let .profile(profile):
-                ProfileEditorView(profile: profile) { updatedProfile in
+                ProfileEditorView(profile: profile, isNew: !store.profiles.contains(where: { $0.id == profile.id })) { updatedProfile in
                     if store.profiles.contains(where: { $0.id == updatedProfile.id }) {
                         store.updateProfile(updatedProfile)
                     } else {
@@ -94,7 +97,7 @@ struct ProfilesView: View {
                         selectedSection = .nodes
                         importNotice = ProfileImportNotice(title: "Import Complete", message: result.summary)
                     case let .subscription(subscription, result):
-                        saveImportedSubscription(subscription, result: result, addedTitle: "Subscription URL Imported")
+                        saveImportedSubscription(subscription, result: result, addedTitle: "Subscription Added")
                     }
                 }
             case .scanner:
@@ -117,6 +120,7 @@ struct ProfilesView: View {
         .insecureTLSImportConfirmation(
             isPresented: $showInsecureRefreshConfirmation,
             profileNames: pendingInsecureRefresh?.insecureProfileNames ?? [],
+            onCancel: { pendingInsecureRefresh = nil },
         ) {
             applyPendingInsecureRefresh()
         }
@@ -140,6 +144,17 @@ struct ProfilesView: View {
         .onChange(of: store.pendingExternalImportText) {
             consumePendingExternalImport()
         }
+        // A payload that arrived while a sheet was up is consumed when the
+        // presentation ends. The one-turn defer lets an already-scheduled
+        // re-present (the scanner→import handoff) claim the sheet first;
+        // `consumePendingExternalImport` re-checks and keeps the payload.
+        .onChange(of: activeSheet == nil && shareQRItem == nil) { _, canPresent in
+            if canPresent {
+                DispatchQueue.main.async {
+                    consumePendingExternalImport()
+                }
+            }
+        }
         .sheet(item: $shareQRItem) { item in
             ProfileShareQRSheet(profileName: item.profileName, link: item.link)
         }
@@ -159,6 +174,14 @@ struct ProfilesView: View {
     /// the preview or the allow-insecure confirmation.
     private func consumePendingExternalImport() {
         guard let text = store.pendingExternalImportText else {
+            return
+        }
+        // A payload can arrive while another sheet is presented. Setting the
+        // sheet state mid-presentation can drop the import sheet entirely —
+        // losing the payload — and force-dismissing would destroy an edit in
+        // progress. Leave the payload in the store; the presentation observer
+        // retries once the current sheet closes.
+        guard activeSheet == nil, shareQRItem == nil else {
             return
         }
         store.pendingExternalImportText = nil
@@ -205,54 +228,80 @@ struct ProfilesView: View {
         let profiles = visibleProfiles
         return Section {
             if store.profiles.isEmpty {
-                ContentUnavailableView("No Nodes", systemImage: "server.rack", description: Text("Import or add a proxy node."))
+                ContentUnavailableView {
+                    Label("No Nodes", systemImage: "server.rack")
+                } description: {
+                    Text("Import links, configs, or subscriptions.")
+                } actions: {
+                    let layout = dynamicTypeSize.isAccessibilitySize
+                        ? AnyLayout(VStackLayout(spacing: 12))
+                        : AnyLayout(HStackLayout(spacing: 8))
+                    layout {
+                        Button("Import") {
+                            activeSheet = .importText(prefill: "")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Button("New Node") {
+                            activeSheet = .profile(Self.newProfile())
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .controlSize(.large)
+                }
+                .fixedSize(horizontal: false, vertical: true)
             } else if profiles.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             } else {
                 ForEach(profiles) { profile in
-                    ProfileRow(profile: profile, isSelected: store.selectedTarget == .profile(profile.id), latency: store.nodeLatencies[profile.id])
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            store.selectedTarget = .profile(profile.id)
+                    Button {
+                        store.selectedTarget = .profile(profile.id)
+                    } label: {
+                        ProfileRow(profile: profile, isSelected: store.selectedTarget == .profile(profile.id), latency: store.nodeLatencies[profile.id])
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(store.selectedTarget == .profile(profile.id) ? .isSelected : [])
+                    .contextMenu {
+                        Button("Edit", systemImage: "pencil") {
+                            activeSheet = .profile(profile)
                         }
-                        .contextMenu {
-                            if let link = ProxyShareLink.shareLink(for: profile) {
-                                // Share actions embed the node's credentials —
-                                // that is the point of sharing a node — and only
-                                // run from this explicit menu.
-                                Button("Copy Share Link", systemImage: "doc.on.doc") {
-                                    copyShareLink(link)
-                                }
-                                ShareLink(item: link) {
-                                    Label("Share Link", systemImage: "square.and.arrow.up")
-                                }
-                                Button("Show QR Code", systemImage: "qrcode") {
-                                    shareQRItem = ShareQRItem(profileName: profile.name, link: link)
-                                }
+                        if let link = ProxyShareLink.shareLink(for: profile) {
+                            // Share actions embed the node's credentials —
+                            // that is the point of sharing a node — and only
+                            // run from this explicit menu.
+                            Button("Copy Share Link", systemImage: "doc.on.doc") {
+                                copyShareLink(link)
+                            }
+                            ShareLink(item: link) {
+                                Label("Share Link", systemImage: "square.and.arrow.up")
+                            }
+                            Button("Show QR Code", systemImage: "qrcode") {
+                                shareQRItem = ShareQRItem(profileName: profile.name, link: link)
                             }
                         }
-                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                            Button {
-                                Task { await store.testLatency(for: profile) }
-                            } label: {
-                                Label("Test", systemImage: "bolt.horizontal.circle")
-                            }
-                            .tint(.green)
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                        Button {
+                            Task { await store.testLatency(for: profile) }
+                        } label: {
+                            Label("Test", systemImage: "bolt.horizontal.circle")
                         }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) {
-                                store.deleteProfile(id: profile.id)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
+                        .tint(.green)
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            store.deleteProfile(id: profile.id)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
 
-                            Button {
-                                activeSheet = .profile(profile)
-                            } label: {
-                                Label("Edit", systemImage: "pencil")
-                            }
-                            .tint(.blue)
+                        Button {
+                            activeSheet = .profile(profile)
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
                         }
+                        .tint(.blue)
+                    }
                 }
             }
         } header: {
@@ -270,47 +319,49 @@ struct ProfilesView: View {
                     .disabled(store.nodeLatencies.values.contains(.testing))
                 }
             }
-        } footer: {
-            Text("Existing nodes live here. Use Import/Add for new nodes or subscriptions.")
         }
     }
 
     private var groupsSection: some View {
         let groups = visibleGroups
         return Section {
-            if store.groups.isEmpty {
-                ContentUnavailableView("No Groups", systemImage: "rectangle.stack", description: Text("Create a manual or URL-tested proxy group."))
-            } else if groups.isEmpty {
+            if groups.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             } else {
                 ForEach(groups) { group in
-                    ProxyGroupRow(group: group, isSelected: store.selectedTarget == .group(group.id))
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            if group.isEnabled {
-                                store.selectedTarget = .group(group.id)
-                            }
+                    Button {
+                        if group.isEnabled {
+                            store.selectedTarget = .group(group.id)
                         }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) {
-                                store.deleteGroup(id: group.id)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
+                    } label: {
+                        ProxyGroupRow(group: group, isSelected: store.selectedTarget == .group(group.id))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(store.selectedTarget == .group(group.id) ? .isSelected : [])
+                    .contextMenu {
+                        Button("Edit", systemImage: "pencil") {
+                            activeSheet = .group(group)
+                        }
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button(role: .destructive) {
+                            store.deleteGroup(id: group.id)
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
 
-                            Button {
-                                activeSheet = .group(group)
-                            } label: {
-                                Label("Edit", systemImage: "pencil")
-                            }
-                            .tint(.blue)
+                        Button {
+                            activeSheet = .group(group)
+                        } label: {
+                            Label("Edit", systemImage: "pencil")
                         }
+                        .tint(.blue)
+                    }
                 }
             }
         } header: {
             Text("Proxy Groups")
-        } footer: {
-            Text("Existing groups live with nodes because both can be selected as active proxy targets.")
         }
     }
 
@@ -318,11 +369,18 @@ struct ProfilesView: View {
         let subscriptions = visibleSubscriptions
         return Section {
             if store.subscriptions.isEmpty {
-                ContentUnavailableView(
-                    "No Subscriptions",
-                    systemImage: "link",
-                    description: Text("Use + to add a subscription URL or scan a QR code."),
-                )
+                ContentUnavailableView {
+                    Label("No Subscriptions", systemImage: "link")
+                } description: {
+                    Text("Import a subscription URL.")
+                } actions: {
+                    Button("Import Subscription") {
+                        activeSheet = .importText(prefill: "")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                }
+                .fixedSize(horizontal: false, vertical: true)
             } else if subscriptions.isEmpty {
                 ContentUnavailableView.search(text: searchText)
             } else {
@@ -383,7 +441,7 @@ struct ProfilesView: View {
         } header: {
             Text("Subscriptions")
         } footer: {
-            Text("Refresh updates matching nodes/groups in place. Changes to pinned TLS, REALITY, PQ, or VLESS authentication require confirmation.")
+            Text("Pinned TLS, REALITY, PQ, and VLESS authentication changes require review.")
         }
     }
 
@@ -431,12 +489,12 @@ struct ProfilesView: View {
                 selectedSection = .subscriptions
                 importNotice = ProfileImportNotice(
                     title: "Subscription Updated",
-                    message: "\(result.summary)\n\nExisting subscription URL refreshed in place; matching nodes were updated instead of duplicated.",
+                    message: "\(result.summary)\n\nMatching nodes updated, not duplicated.",
                 )
             } else {
                 importNotice = ProfileImportNotice(
                     title: "Subscription Not Updated",
-                    message: "The imported data exceeds Hop's retained subscription safety limit.",
+                    message: "Subscription storage limit exceeded.",
                 )
             }
         } else {
@@ -451,7 +509,7 @@ struct ProfilesView: View {
         } else {
             importNotice = ProfileImportNotice(
                 title: "Subscription Not Added",
-                message: "The imported data exceeds Hop's retained subscription safety limit.",
+                message: "Subscription storage limit exceeded.",
             )
         }
     }
@@ -477,9 +535,29 @@ struct ProfilesView: View {
         guard !store.refreshingSubscriptionIDs.contains(subscription.id) else {
             return
         }
+        // An unresolved review keeps its confirmation slot until the user
+        // decides; re-present it rather than racing another refresh outcome
+        // into the same slot (which would silently drop one of them).
+        if pendingInsecureRefresh != nil {
+            showInsecureRefreshConfirmation = true
+            return
+        }
+        if pendingSecurityRefresh != nil {
+            showSecurityRefreshConfirmation = true
+            return
+        }
         Task {
             await handleRefreshOutcome(store.refreshSubscription(subscription), for: subscription)
         }
+    }
+
+    /// Shown instead of silently discarding a refresh whose confirmation slot
+    /// is occupied by another subscription's unresolved review.
+    private func deferredReviewNotice(for subscription: SubscriptionSource) -> ProfileImportNotice {
+        ProfileImportNotice(
+            title: "Refresh Needs Review",
+            message: "Finish the pending review, then refresh \(subscription.name) again to review its changes.",
+        )
     }
 
     private func handleRefreshOutcome(
@@ -491,6 +569,10 @@ struct ProfilesView: View {
             selectedSection = .subscriptions
             importNotice = ProfileImportNotice(title: "Subscription Refreshed", message: summary)
         case let .needsInsecureConfirmation(result, newInsecureNames):
+            guard pendingInsecureRefresh == nil, pendingSecurityRefresh == nil else {
+                importNotice = deferredReviewNotice(for: subscription)
+                return
+            }
             pendingInsecureRefresh = PendingInsecureRefresh(
                 result: result,
                 subscription: subscription,
@@ -498,6 +580,13 @@ struct ProfilesView: View {
             )
             showInsecureRefreshConfirmation = true
         case let .needsSecurityConfirmation(result, changes, reviewedInsecureProfileNames):
+            // `applyPendingInsecureRefresh` clears its slot before this chained
+            // outcome arrives, so both slots empty means no other refresh's
+            // review is being overwritten.
+            guard pendingInsecureRefresh == nil, pendingSecurityRefresh == nil else {
+                importNotice = deferredReviewNotice(for: subscription)
+                return
+            }
             pendingSecurityRefresh = PendingSecurityRefresh(
                 result: result,
                 subscription: subscription,
@@ -510,7 +599,7 @@ struct ProfilesView: View {
                 showSecurityRefreshConfirmation = true
             }
         case let .failed(message):
-            importNotice = ProfileImportNotice(title: "Could Not Refresh Subscription", message: message)
+            importNotice = ProfileImportNotice(title: "Refresh Failed", message: message)
         }
     }
 
@@ -589,8 +678,8 @@ private struct PendingSecurityRefresh {
 
     var confirmationMessage: String {
         let shown = changes.prefix(6).map(\.summary).joined(separator: "\n")
-        let remainder = changes.count > 6 ? "\n…and \(changes.count - 6) more node(s)." : ""
-        return "This subscription changed security settings for matched nodes. Apply only if you expected these changes:\n\n\(shown)\(remainder)"
+        let remainder = changes.count > 6 ? "\n…and \(changes.count - 6) more." : ""
+        return "Security changes on \(changes.count) node\(changes.count == 1 ? "" : "s"). Apply only if expected:\n\n\(shown)\(remainder)"
     }
 }
 

@@ -63,10 +63,6 @@ enum RuntimeEnvironment {
         sharedContainerURL.appendingPathComponent(stateFileName)
     }
 
-    static var configFileURL: URL {
-        sharedContainerURL.appendingPathComponent(configFileName)
-    }
-
     static var tunnelLogFileURL: URL {
         sharedContainerURL.appendingPathComponent(tunnelLogFileName)
     }
@@ -258,16 +254,33 @@ enum RuntimeEnvironmentError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case let .appGroupUnavailable(appGroup):
-            "App Group \(appGroup) is unavailable in this build."
+            "App Group unavailable: \(appGroup)."
         case let .noSharedAppGroup(appGroups, tunnelGroups):
-            "Hop.app and HopTunnel.appex do not share an App Group. App groups: \(appGroups.joined(separator: ", ")); tunnel groups: \(tunnelGroups.joined(separator: ", "))."
+            "No shared App Group. App: \(appGroups.joined(separator: ", ")); tunnel: \(tunnelGroups.joined(separator: ", "))."
         }
     }
 }
 
 struct SharedTunnelConfigurationStore {
-    func writeConfig(_ config: String) throws {
-        let url = RuntimeEnvironment.configFileURL
+    private var snapshotDirectory: URL {
+        RuntimeEnvironment.sharedContainerURL.appendingPathComponent("TunnelSnapshots", isDirectory: true)
+    }
+
+    func snapshotURL(nonce: String) -> URL {
+        snapshotDirectory.appendingPathComponent(nonce, isDirectory: true)
+            .appendingPathComponent(RuntimeEnvironment.configFileName)
+    }
+
+    func pruneSnapshots(keeping nonces: Set<String>) throws {
+        guard FileManager.default.fileExists(atPath: snapshotDirectory.path) else { return }
+        for directory in try FileManager.default.contentsOfDirectory(at: snapshotDirectory, includingPropertiesForKeys: nil) {
+            guard UUID(uuidString: directory.lastPathComponent) != nil,
+                  !nonces.contains(directory.lastPathComponent) else { continue }
+            try FileManager.default.removeItem(at: directory)
+        }
+    }
+
+    func writeConfig(_ config: String, to url: URL) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         let data = Data(config.utf8)
@@ -294,7 +307,7 @@ private enum TunnelConfigStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .authenticationSecretUnavailable:
-            "The tunnel config authentication key could not be saved to the shared Keychain. Verify the keychain-access-groups entitlement on both app targets."
+            "Cannot save tunnel authentication key. Check keychain-access-groups on both targets."
         }
     }
 }

@@ -14,7 +14,7 @@ struct LogsView: View {
 
         Group {
             if logs.isEmpty {
-                ContentUnavailableView("No Logs", systemImage: "doc.plaintext", description: Text("Connect the tunnel to see activity here."))
+                ContentUnavailableView("No Logs", systemImage: "doc.plaintext", description: Text("Connect to see tunnel logs."))
             } else {
                 // A lazy List virtualizes rows, so only the visible lines are laid
                 // out. (Rendering the whole log as one selectable Text laid out

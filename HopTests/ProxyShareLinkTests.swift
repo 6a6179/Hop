@@ -5,6 +5,24 @@ import XCTest
 final class ProxyShareLinkTests: XCTestCase {
     private let importService = ProxyImportService()
 
+    func testVMessTransportRoundTripsWithoutChangingProtocolOrMode() throws {
+        let transports = [
+            TransportOptions(type: .httpUpgrade, path: "/upgrade", host: "cdn.example.net"),
+            TransportOptions(type: .xhttp, path: "/x", host: "cdn.example.net", xhttpMode: "packet-up"),
+            TransportOptions(type: .quic),
+        ]
+        for transport in transports {
+            let profile = ProxyProfile(
+                name: "VMess transport",
+                endpoint: Endpoint(host: "edge.example.net", port: 443),
+                options: .vmess(VMessOptions(uuid: "11111111-1111-4111-8111-111111111111", security: "auto", alterID: 0)),
+                security: .none,
+                transport: transport,
+            )
+            XCTAssertEqual(try roundTrip(profile).transport, transport)
+        }
+    }
+
     // MARK: - Round-trip helpers
 
     private func roundTrip(_ profile: ProxyProfile, file: StaticString = #filePath, line: UInt = #line) throws -> ProxyProfile {
@@ -179,7 +197,7 @@ final class ProxyShareLinkTests: XCTestCase {
     // MARK: - Shadowsocks with special chars in password
 
     func testShadowsocksWithSpecialCharsInPasswordRoundTrip() throws {
-        // Password contains `:`, `@`, `/` — all must survive the SIP002 base64url encoding
+        // AEAD-2022 requires plain percent-encoded userinfo, not base64url.
         let profile = ProxyProfile(
             name: "SS Special",
             endpoint: Endpoint(host: "ss.example.net", port: 8388),
@@ -187,6 +205,8 @@ final class ProxyShareLinkTests: XCTestCase {
             security: .none,
         )
 
+        let link = try XCTUnwrap(ProxyShareLink.shareLink(for: profile))
+        XCTAssertTrue(link.hasPrefix("ss://2022-blake3-aes-128-gcm:p%3Aa%40s%2Fs@"))
         let reparsed = try roundTrip(profile)
 
         XCTAssertEqual(reparsed.proto, .shadowsocks)
@@ -267,6 +287,53 @@ final class ProxyShareLinkTests: XCTestCase {
             XCTAssertEqual(options.password, "socks-pass")
         } else {
             XCTFail("Expected SOCKS options")
+        }
+    }
+
+    // MARK: - SOCKS with password-only credentials
+
+    func testSOCKSPasswordOnlyCredentialRoundTrip() throws {
+        let profile = ProxyProfile(
+            name: "SOCKS password only",
+            endpoint: Endpoint(host: "socks.example.net", port: 1080),
+            options: .socks(SOCKSOptions(username: nil, password: "only%40pass%")),
+            security: .none,
+        )
+
+        let reparsed = try roundTrip(profile)
+
+        XCTAssertEqual(reparsed.proto, .socks)
+        if case let .socks(options) = reparsed.options {
+            XCTAssertEqual(options.username ?? "", "", "password-only links must not invent a username")
+            XCTAssertEqual(options.password, "only%40pass%", "password must survive a password-only share link")
+        } else {
+            XCTFail("Expected SOCKS options")
+        }
+    }
+
+    func testLiteralPercentEscapesSurviveCredentialsNamesAndQueryValues() throws {
+        let password = "keep%40literal%"
+        let variants: [ProtocolOptions] = [
+            .trojan(TrojanOptions(password: password)),
+            .http(HTTPOptions(username: "user%3Aname", password: password)),
+            .socks(SOCKSOptions(username: "user%3Aname", password: password)),
+            .hysteria2(Hysteria2Options(password: password, obfs: "salamander", obfsPassword: password)),
+            .shadowsocks(ShadowsocksOptions(method: "aes-128-gcm", password: password)),
+        ]
+        for options in variants {
+            let profile = ProxyProfile(
+                name: "Literal %41 Name %",
+                endpoint: Endpoint(host: "edge.example.net", port: 443),
+                options: options,
+                security: .tls(TLSOptions(serverName: "edge.example.net")),
+                transport: options.proto == .hysteria2
+                    ? TransportOptions(type: .hysteria)
+                    : TransportOptions(type: .websocket, path: "/literal%2F/%"),
+            )
+            let reparsed = try roundTrip(profile)
+            XCTAssertEqual(reparsed.options, profile.options)
+            XCTAssertEqual(reparsed.name, profile.name)
+            XCTAssertEqual(reparsed.transport.path, profile.transport.path)
         }
     }
 

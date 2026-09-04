@@ -34,6 +34,11 @@ enum HopSecret {
         "##HOP_SECRET:\(nonce):\(key)##"
     }
 
+    /// Runtime snapshots must not follow mutable app-state credential aliases.
+    static func runtimeKeyPrefix(nonce: String) -> String {
+        "tunnel-snapshot.\(nonce)."
+    }
+
     /// Matches a quoted token (a JSON string value) bearing `nonce` and
     /// captures its key. The nonce is matched literally (escaped), so only
     /// tokens this run emitted are resolvable.
@@ -59,7 +64,9 @@ enum SecretResolver {
     /// tokens that could not be resolved (for diagnostics / fail-closed checks).
     /// Tokens with a missing or foreign nonce are not matched and are left in
     /// place untouched — they are treated as inert literal text, never resolved.
-    static func resolve(_ config: String, nonce: String, using store: SecretStore = .shared) -> (config: String, unresolved: Int) {
+    /// Runtime callers supply their nonce-scoped prefix and `.runtime` store;
+    /// they must never fall back to the mutable profile aliases.
+    static func resolve(_ config: String, nonce: String, using store: SecretStore = .shared, keyPrefix: String = "") -> (config: String, unresolved: Int) {
         guard let (text, matches) = tokenMatches(in: config, nonce: nonce) else {
             return (config, 0)
         }
@@ -77,7 +84,7 @@ enum SecretResolver {
             result += text.substring(with: NSRange(location: cursor, length: full.location - cursor))
 
             let key = text.substring(with: match.range(at: 1))
-            if let value = store.value(forKey: key) {
+            if let value = store.value(forKey: keyPrefix + key) {
                 result += jsonStringLiteral(value)
             } else {
                 unresolved += 1

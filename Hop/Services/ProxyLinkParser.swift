@@ -17,23 +17,23 @@ enum ProxyLinkParseError: LocalizedError {
         case let .unsupportedScheme(scheme):
             "Unsupported proxy scheme: \(scheme)"
         case .invalidURL:
-            "The proxy link is not a valid URL."
+            "Invalid proxy URL."
         case .missingCredentials:
-            "The proxy link is missing credentials."
+            "Missing proxy credentials."
         case .missingHost:
-            "The proxy link is missing a host."
+            "Missing proxy host."
         case .missingPort:
-            "The proxy link is missing a port."
+            "Missing proxy port."
         case .noImportableItems:
-            "No importable profiles, groups, or rules were found."
+            "No nodes, groups, or rules found."
         case .insecureSubscriptionURL:
             "Subscription URLs must use HTTPS."
         case .disallowedSubscriptionHost:
-            "Subscription URLs cannot point to local, private, or metadata addresses."
+            "Local, private, and metadata subscription addresses are blocked."
         case .payloadTooLarge:
-            "The import payload is too large to process safely."
+            "Import exceeds the size limit."
         case .subscriptionUnavailable:
-            "The subscription could not be downloaded."
+            "Subscription download failed."
         }
     }
 }
@@ -174,13 +174,13 @@ struct ProxyImportService {
         let password = try requiredUser(components)
         let endpoint = try endpoint(from: components)
         let query = Query(components)
-        let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
+        let security = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: true)
 
         return try ProxyProfile(
             name: displayName(from: components, fallback: "Trojan \(endpoint.host)"),
             endpoint: endpoint,
             options: .trojan(TrojanOptions(password: password)),
-            security: security.layer == .none ? .tls(TLSOptions(serverName: endpoint.host)) : security,
+            security: security,
             transport: parseTransport(query: query),
         )
     }
@@ -191,7 +191,7 @@ struct ProxyImportService {
         let query = Query(components)
         // Hysteria2 runs over QUIC and always uses TLS. Links commonly omit an
         // explicit security parameter, so default to TLS on the host.
-        let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
+        let security = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: true)
 
         return try ProxyProfile(
             name: displayName(from: components, fallback: "Hysteria2 \(endpoint.host)"),
@@ -208,34 +208,8 @@ struct ProxyImportService {
                     udpIdleTimeoutSeconds: Int(query.first("udp-idle-timeout", "udp_idle_timeout") ?? ""),
                 ),
             ),
-            security: security.layer == .none ? .tls(TLSOptions(serverName: endpoint.host)) : security,
+            security: security,
             transport: parseTransport(query: query, defaultType: .hysteria),
-        )
-    }
-
-    private func parseTUIC(components: URLComponents) throws -> ProxyProfile {
-        let uuid = try requiredUser(components)
-        guard let password = components.password?.removingPercentEncoding, !password.isEmpty else {
-            throw ProxyLinkParseError.missingCredentials
-        }
-        let endpoint = try endpoint(from: components)
-        let query = Query(components)
-        // Kept only to decode legacy input for a precise unsupported-protocol
-        // report. TUIC is not admitted into the Xray runtime configuration.
-        let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
-
-        return ProxyProfile(
-            name: displayName(from: components, fallback: "TUIC \(endpoint.host)"),
-            endpoint: endpoint,
-            options: .tuic(
-                TUICOptions(
-                    uuid: uuid,
-                    password: password,
-                    congestionControl: query["congestion_control"] ?? query["congestionControl"],
-                ),
-            ),
-            security: security.layer == .none ? .tls(TLSOptions(serverName: endpoint.host)) : security,
-            transport: .tcp,
         )
     }
 
@@ -276,24 +250,23 @@ struct ProxyImportService {
         }
 
         let name = displayName(from: components, fallback: "Shadowsocks")
-        let userAndServer = decoded.split(separator: "@", maxSplits: 1).map(String.init)
-        guard userAndServer.count == 2 else {
+        guard let separator = decoded.lastIndex(of: "@") else {
             throw ProxyLinkParseError.missingCredentials
         }
 
-        let credentials = userAndServer[0].split(separator: ":", maxSplits: 1).map(String.init)
+        let credentials = decoded[..<separator].split(separator: ":", maxSplits: 1).map(String.init)
         guard credentials.count == 2 else {
             throw ProxyLinkParseError.missingCredentials
         }
 
-        let server = userAndServer[1].split(separator: ":", maxSplits: 1).map(String.init)
-        guard server.count == 2, let port = Int(server[1]), (1 ... 65535).contains(port) else {
-            throw ProxyLinkParseError.missingPort
+        let server = decoded[decoded.index(after: separator)...]
+        guard let serverComponents = URLComponents(string: "ss://\(server)") else {
+            throw ProxyLinkParseError.invalidURL
         }
 
-        return ProxyProfile(
+        return try ProxyProfile(
             name: name,
-            endpoint: Endpoint(host: server[0], port: port),
+            endpoint: endpoint(from: serverComponents),
             options: .shadowsocks(ShadowsocksOptions(method: credentials[0], password: credentials[1])),
             security: .none,
             transport: .tcp,
@@ -349,6 +322,9 @@ struct ProxyImportService {
                 .none
             }
             var transport = transportFromVMess(network: network, path: object["path"] as? String, host: object["host"] as? String)
+            if transport.type == .xhttp, let mode = object["mode"] as? String {
+                transport.xhttpMode = mode
+            }
             try applyTransportExtensions(from: object, to: &transport)
 
             return ProxyProfile(
@@ -391,14 +367,14 @@ struct ProxyImportService {
     private func parseHTTP(components: URLComponents, isTLS: Bool) throws -> ProxyProfile {
         let endpoint = try endpoint(from: components)
         let query = Query(components)
-        let username = components.user?.removingPercentEncoding
-        let password = components.password?.removingPercentEncoding
-        let parsedSecurity = parseSecurity(query: query, fallbackServerName: endpoint.host)
+        let username = components.user
+        let password = components.password
+        let parsedSecurity = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: isTLS)
         return try ProxyProfile(
             name: displayName(from: components, fallback: "\(isTLS ? "HTTPS" : "HTTP") \(endpoint.host)"),
             endpoint: endpoint,
             options: .http(HTTPOptions(username: username, password: password)),
-            security: parsedSecurity.layer == .none && isTLS ? .tls(TLSOptions(serverName: endpoint.host)) : parsedSecurity,
+            security: parsedSecurity,
             transport: parseTransport(query: query),
         )
     }
@@ -406,14 +382,14 @@ struct ProxyImportService {
     private func parseSOCKS(components: URLComponents, isTLS: Bool) throws -> ProxyProfile {
         let endpoint = try endpoint(from: components)
         let query = Query(components)
-        let username = components.user?.removingPercentEncoding
-        let password = components.password?.removingPercentEncoding
-        let parsedSecurity = parseSecurity(query: query, fallbackServerName: endpoint.host)
+        let username = components.user
+        let password = components.password
+        let parsedSecurity = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: isTLS)
         return try ProxyProfile(
             name: displayName(from: components, fallback: "SOCKS \(endpoint.host)"),
             endpoint: endpoint,
             options: .socks(SOCKSOptions(username: username, password: password)),
-            security: parsedSecurity.layer == .none && isTLS ? .tls(TLSOptions(serverName: endpoint.host)) : parsedSecurity,
+            security: parsedSecurity,
             transport: parseTransport(query: query),
         )
     }
@@ -485,7 +461,7 @@ struct ProxyImportService {
         }
     }
 
-    private func parseSecurity(query: Query, fallbackServerName: String) -> ProxySecurity {
+    private func parseSecurity(query: Query, fallbackServerName: String, defaultTLS: Bool = false) -> ProxySecurity {
         let security = (query.first("security", "tls") ?? "").lowercased()
         let serverName = query.first("sni", "serverName", "server_name", "server-name", "peer") ?? fallbackServerName
         let alpn = alpnValues(from: query.first("alpn"))
@@ -520,7 +496,7 @@ struct ProxyImportService {
             )
         }
 
-        if security == "tls" || boolOption(query["tls"]) || query["sni"] != nil || query["alpn"] != nil {
+        if defaultTLS || security == "tls" || boolOption(query["tls"]) || query["sni"] != nil || query["alpn"] != nil {
             return .tls(
                 TLSOptions(
                     serverName: serverName,
@@ -581,12 +557,16 @@ struct ProxyImportService {
             TransportOptions(type: .grpc, path: nil, host: nil, serviceName: path)
         case "h2", "http":
             TransportOptions(type: .xhttp, path: path, host: host, serviceName: nil, xhttpMode: "stream-up")
+        case "httpupgrade", "http-upgrade":
+            TransportOptions(type: .httpUpgrade, path: path, host: host)
         case "xhttp", "splithttp":
             TransportOptions(type: .xhttp, path: path, host: host, serviceName: nil)
         case "kcp", "mkcp":
             TransportOptions(type: .mKCP)
         case "hysteria":
             TransportOptions(type: .hysteria)
+        case "quic":
+            TransportOptions(type: .quic)
         default:
             .tcp
         }
@@ -625,7 +605,7 @@ struct ProxyImportService {
     }
 
     private func endpoint(from components: URLComponents) throws -> Endpoint {
-        guard let host = components.host?.removingPercentEncoding, !host.isEmpty else {
+        guard let host = components.host, !host.isEmpty else {
             throw ProxyLinkParseError.missingHost
         }
         // URLComponents accepts ports like 0 or 99999; reject them here so the
@@ -637,18 +617,21 @@ struct ProxyImportService {
     }
 
     private func requiredUser(_ components: URLComponents) throws -> String {
-        guard let user = components.user?.removingPercentEncoding, !user.isEmpty else {
+        guard let user = components.user, !user.isEmpty else {
             throw ProxyLinkParseError.missingCredentials
         }
         return user
     }
 
     private func displayName(from components: URLComponents, fallback: String) -> String {
-        components.fragment?.removingPercentEncoding.nilIfEmpty ?? fallback
+        components.fragment.nilIfEmpty ?? fallback
     }
 
     private func shadowsocksUserInfo(rawValue: String, components: URLComponents) throws -> String {
-        if let user = components.user?.removingPercentEncoding, !user.isEmpty {
+        if let user = components.user, !user.isEmpty {
+            if let password = components.password {
+                return "\(user):\(password)"
+            }
             if let decoded = decodeBase64String(user), decoded.contains(":") {
                 return decoded
             }
@@ -831,7 +814,7 @@ private struct Query {
 
     init(_ components: URLComponents) {
         for item in components.queryItems ?? [] {
-            guard let value = item.value?.removingPercentEncoding else {
+            guard let value = item.value else {
                 continue
             }
             values[item.name.lowercased()] = value

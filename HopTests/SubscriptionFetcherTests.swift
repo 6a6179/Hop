@@ -80,6 +80,50 @@ final class SubscriptionFetcherTests: XCTestCase {
         XCTAssertEqual(data.last, UInt8(ascii: "b"))
     }
 
+    func testCancellationStopsStalledTransfer() async throws {
+        let url = try XCTUnwrap(URL(string: "https://stub.invalid/stalled"))
+        let started = expectation(description: "Transfer started")
+        let stopped = expectation(description: "Transfer stopped")
+        let finished = expectation(description: "Fetch returned cancellation")
+        SubscriptionStubProtocol.registerStalled(url: url, started: started, stopped: stopped)
+        let configuration = importService.subscriptionSessionConfiguration
+        let task = Task {
+            do {
+                _ = try await SubscriptionFetcher.fetch(URLRequest(url: url, timeoutInterval: 5), configuration: configuration)
+                XCTFail("A cancelled fetch must not succeed")
+            } catch is CancellationError {
+                // Expected: the underlying transfer must stop as well.
+            } catch {
+                XCTFail("Expected CancellationError, got \(error)")
+            }
+            finished.fulfill()
+        }
+
+        await fulfillment(of: [started], timeout: 2)
+        task.cancel()
+        await fulfillment(of: [stopped, finished], timeout: 2)
+    }
+
+    func testPreCancelledFetchNeverStartsRequest() async throws {
+        let url = try XCTUnwrap(URL(string: "https://stub.invalid/pre-cancelled"))
+        SubscriptionStubProtocol.register(url: url, status: 200, chunks: [])
+        let configuration = importService.subscriptionSessionConfiguration
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            do {
+                _ = try await SubscriptionFetcher.fetch(URLRequest(url: url), configuration: configuration)
+                XCTFail("A pre-cancelled fetch must not succeed")
+            } catch is CancellationError {
+                // Expected before the request is started.
+            } catch {
+                XCTFail("Expected CancellationError, got \(error)")
+            }
+        }
+
+        await task.value
+        XCTAssertTrue(SubscriptionStubProtocol.requestedURLs.isEmpty)
+    }
+
     func testRedirectToDisallowedHostIsRefusedAndNeverRequested() async throws {
         let url = try XCTUnwrap(URL(string: "https://stub.invalid/bounce"))
         SubscriptionStubProtocol.register(
@@ -131,6 +175,7 @@ private final class SubscriptionStubProtocol: URLProtocol {
         var status: Int
         var headers: [String: String]
         var chunks: [Data]
+        var stalled: (started: XCTestExpectation, stopped: XCTestExpectation)?
     }
 
     private nonisolated(unsafe) static var stubs: [String: Stub] = [:]
@@ -148,6 +193,12 @@ private final class SubscriptionStubProtocol: URLProtocol {
         lock.lock()
         defer { lock.unlock() }
         stubs[url.absoluteString] = Stub(status: status, headers: headers, chunks: chunks)
+    }
+
+    static func registerStalled(url: URL, started: XCTestExpectation, stopped: XCTestExpectation) {
+        lock.lock()
+        defer { lock.unlock() }
+        stubs[url.absoluteString] = Stub(status: 200, headers: [:], chunks: [], stalled: (started, stopped))
     }
 
     static var requestedURLs: [String] {
@@ -182,6 +233,11 @@ private final class SubscriptionStubProtocol: URLProtocol {
             return
         }
 
+        if let stalled = stub.stalled {
+            stalled.started.fulfill()
+            return
+        }
+
         if (300 ..< 400).contains(stub.status), let location = stub.headers["Location"], let target = URL(string: location) {
             let response = HTTPURLResponse(url: url, statusCode: stub.status, httpVersion: "HTTP/1.1", headerFields: stub.headers)!
             client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: target), redirectResponse: response)
@@ -194,7 +250,13 @@ private final class SubscriptionStubProtocol: URLProtocol {
         respond(url: url, status: stub.status, headers: stub.headers, chunks: stub.chunks)
     }
 
-    override func stopLoading() {}
+    override func stopLoading() {
+        guard let url = request.url else { return }
+        Self.lock.lock()
+        let stopped = Self.stubs[url.absoluteString]?.stalled?.stopped
+        Self.lock.unlock()
+        stopped?.fulfill()
+    }
 
     private func respond(url: URL, status: Int, headers: [String: String], chunks: [Data]) {
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1", headerFields: headers)!

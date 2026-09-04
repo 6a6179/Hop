@@ -70,10 +70,14 @@ enum DNSPreset: String, CaseIterable, Codable, Identifiable {
 }
 
 enum DNSStrategy: String, CaseIterable, Codable, Identifiable {
+    case automatic
+    // Legacy preferences did not allow fallback in Xray's DNS resolver.
     case preferIPv4 = "prefer_ipv4"
     case preferIPv6 = "prefer_ipv6"
     case ipv4Only = "ipv4_only"
     case ipv6Only = "ipv6_only"
+
+    static let allCases: [DNSStrategy] = [.automatic, .ipv4Only, .ipv6Only]
 
     var id: String {
         rawValue
@@ -81,10 +85,8 @@ enum DNSStrategy: String, CaseIterable, Codable, Identifiable {
 
     var displayName: String {
         switch self {
-        case .preferIPv4:
-            "Prefer IPv4"
-        case .preferIPv6:
-            "Prefer IPv6"
+        case .automatic, .preferIPv4, .preferIPv6:
+            "Automatic"
         case .ipv4Only:
             "IPv4 Only"
         case .ipv6Only:
@@ -137,11 +139,11 @@ enum LatencyTestMethod: String, CaseIterable, Codable, Identifiable {
     var footnote: String {
         switch self {
         case .tcp:
-            "Times a TCP handshake to the node's host and port. Best for TCP-based nodes."
+            "TCP handshake."
         case .connect:
-            "Times a TCP plus TLS handshake (falls back to TCP for nodes without TLS)."
+            "TCP + TLS; TCP only for non-TLS nodes."
         case .icmp:
-            "Pings the node's host. Works for any protocol but may be blocked by some servers."
+            "Host ping; may be blocked."
         }
     }
 }
@@ -150,7 +152,7 @@ struct AppSettings: Hashable, Codable {
     var appearance: AppAppearance = .system
     var logLevel: ConfigLogLevel = .info
     var dnsPreset: DNSPreset = .cloudflare
-    var dnsStrategy: DNSStrategy = .preferIPv4
+    var dnsStrategy: DNSStrategy = .automatic
     var proxyDNS: Bool = true
     var sniffTraffic: Bool = true
     var strictRoute: Bool = true
@@ -189,6 +191,9 @@ extension AppSettings {
         logLevel = try container.decodeIfPresent(ConfigLogLevel.self, forKey: .logLevel) ?? defaults.logLevel
         dnsPreset = try container.decodeIfPresent(DNSPreset.self, forKey: .dnsPreset) ?? defaults.dnsPreset
         dnsStrategy = try container.decodeIfPresent(DNSStrategy.self, forKey: .dnsStrategy) ?? defaults.dnsStrategy
+        if dnsStrategy == .preferIPv4 || dnsStrategy == .preferIPv6 {
+            dnsStrategy = .automatic
+        }
         proxyDNS = try container.decodeIfPresent(Bool.self, forKey: .proxyDNS) ?? defaults.proxyDNS
         sniffTraffic = try container.decodeIfPresent(Bool.self, forKey: .sniffTraffic) ?? defaults.sniffTraffic
         strictRoute = try container.decodeIfPresent(Bool.self, forKey: .strictRoute) ?? defaults.strictRoute

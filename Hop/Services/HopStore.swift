@@ -106,6 +106,7 @@ final class HopStore {
     /// Untrusted by definition — never applied without the preview/confirm
     /// flow. Transient; not persisted.
     var pendingExternalImportText: String?
+    var persistenceError: String?
 
     private let dataStore: HopAppDataStore
     private let latencyTester = LatencyTester()
@@ -169,8 +170,8 @@ final class HopStore {
         self.groups = resolvedGroups
         self.subscriptions = subscriptions ?? loaded?.subscriptions ?? []
 
-        // Resolve named rule configurations, migrating legacy single-list state
-        // (and always seeding the auto-generated China/Iran configs).
+        // Migrate legacy single-list state, seeding built-ins only when no
+        // configuration list exists. An explicitly empty list stays empty.
         let resolved = Self.resolveConfigurations(
             explicit: ruleConfigurations,
             explicitActiveID: activeRuleConfigurationID,
@@ -222,10 +223,12 @@ final class HopStore {
         if let explicit {
             return (explicit, explicitActiveID ?? explicit.first?.id, false)
         }
-        if let configs = loaded?.ruleConfigurations, !configs.isEmpty {
-            let migrated = migrateGeneratedConfigurations(configs)
+        if let configs = loaded?.ruleConfigurations {
             let activeID = loaded?.activeRuleConfigurationID ?? configs.first?.id
-            return (migrated.configurations, activeID, migrated.didMigrate)
+            guard (loaded?.routingConfigurationMigrationVersion ?? 0) < 1 else {
+                return (configs, activeID, false)
+            }
+            return (migrateGeneratedConfigurations(configs), activeID, true)
         }
         if let legacy = loaded?.rules, !legacy.isEmpty {
             // Upgrade pre-configurations state: keep the user's rules as "Custom"
@@ -233,17 +236,48 @@ final class HopStore {
             let custom = RuleConfiguration(name: "Custom", rules: legacy)
             return ([custom, .china(), .iran()], custom.id, true)
         }
-        return (RuleConfiguration.builtInConfigurations, RuleConfiguration.defaultConfiguration.id, false)
+        return (RuleConfiguration.builtInConfigurations, RuleConfiguration.defaultConfiguration.id, loaded != nil)
     }
 
     private static func migrateGeneratedConfigurations(
         _ configurations: [RuleConfiguration],
-    ) -> (configurations: [RuleConfiguration], didMigrate: Bool) {
-        var didMigrate = false
-        let migrated = configurations.map { configuration in
-            guard ["Default", "China", "Iran"].contains(configuration.name) else {
+    ) -> [RuleConfiguration] {
+        let prefix = [
+            RoutingRule(kind: .geoSite, value: "category-ads-all", target: .reject),
+            RoutingRule(kind: .geoIP, value: "private", target: .direct),
+        ]
+        let appleVariants = [
+            [],
+            [RoutingRule(kind: .domainSuffix, value: "apple.com", target: .direct)],
+            RuleConfiguration.appleSystemBypassRules,
+        ]
+        return configurations.map { configuration in
+            let suffix: [RoutingRule]
+            switch configuration.name {
+            case "Default":
+                suffix = []
+            case "China":
+                suffix = [
+                    RoutingRule(kind: .geoSite, value: "cn", target: .direct),
+                    RoutingRule(kind: .geoIP, value: "cn", target: .direct),
+                ]
+            case "Iran":
+                suffix = [
+                    RoutingRule(kind: .geoSite, value: "category-ir", target: .direct),
+                    RoutingRule(kind: .geoIP, value: "ir", target: .direct),
+                ]
+            default:
                 return configuration
             }
+            // Legacy presets have no stable identity. Only recognize their exact
+            // rule shapes; a matching display name is not permission to edit.
+            guard appleVariants.contains(where: { appleRules in
+                let expected = prefix + appleRules + suffix
+                return configuration.rules.count == expected.count
+                    && zip(configuration.rules, expected).allSatisfy {
+                        $0.kind == $1.kind && $0.value == $1.value && $0.target == $1.target
+                    }
+            }) else { return configuration }
             var updated = configuration.withAppleSystemBypassRule()
             updated.rules.removeAll { rule in
                 rule.kind == .geoSite
@@ -251,10 +285,8 @@ final class HopStore {
                         VerifiedXrayGeodata.geoSiteCategories.contains(String($0).trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
                     }
             }
-            didMigrate = didMigrate || updated != configuration
             return updated
         }
-        return (migrated, didMigrate)
     }
 
     var selectedProfile: ProxyProfile? {
@@ -336,14 +368,9 @@ final class HopStore {
         withBatchedPersist {
             profiles.removeAll { $0.id == id }
             nodeLatencies[id] = nil
-            groups = groups.map { group in
-                var group = group
-                group.members.removeAll { $0 == .profile(id) }
-                if group.defaultTarget == .profile(id) {
-                    group.defaultTarget = group.members.first
-                }
-                return group
-            }
+            // Shared repair also drops routing rules that target the profile —
+            // a dangling rule target fails the next tunnel config build.
+            repairReferences(removingProfiles: [id], groups: [])
             normalizeSelectedTarget()
         }
     }
@@ -368,12 +395,9 @@ final class HopStore {
     func deleteGroup(id: ProxyGroup.ID) {
         withBatchedPersist {
             groups.removeAll { $0.id == id }
-            for index in groups.indices {
-                groups[index].members.removeAll { $0 == .group(id) }
-                if groups[index].defaultTarget == .group(id) {
-                    groups[index].defaultTarget = groups[index].members.first
-                }
-            }
+            // Shared repair also drops routing rules that target the group —
+            // a dangling rule target fails the next tunnel config build.
+            repairReferences(removingProfiles: [], groups: [id])
             normalizeSelectedTarget()
         }
     }
@@ -560,6 +584,15 @@ final class HopStore {
             return false
         }
 
+        let previousTargets = SubscriptionRefreshMerger.RoutingTargetIndex(profiles: profiles, groups: groups)
+        let currentTargets = SubscriptionRefreshMerger.RoutingTargetIndex(profiles: merger.profiles, groups: merger.groups)
+        let changedNamedRuleTargets = Set(ruleConfigurations.flatMap(\.rules).compactMap { rule -> OutboundTarget? in
+            guard case .named = rule.target,
+                  previousTargets.resolve(rule.target) != currentTargets.resolve(rule.target)
+            else { return nil }
+            return rule.target
+        })
+
         withBatchedPersist {
             profiles = merger.profiles
             groups = merger.groups
@@ -570,6 +603,8 @@ final class HopStore {
                 groups: merger.removedGroupIDs,
                 remappingProfiles: merger.profileIDReplacements,
                 remappingGroups: merger.groupIDReplacements,
+                rejectRemovedRuleTargets: true,
+                invalidatedRuleTargets: changedNamedRuleTargets,
             )
             normalizeSelectedTarget()
         }
@@ -757,7 +792,11 @@ final class HopStore {
         for subscription: SubscriptionSource,
         securityPolicy: SubscriptionRefreshSecurityPolicy,
     ) -> SubscriptionRefreshOutcome {
-        var refreshed = subscription
+        guard var refreshed = subscriptions.first(where: { $0.id == subscription.id }),
+              refreshed.url == subscription.url
+        else {
+            return .failed(message: "The subscription changed or was deleted. Refresh it again.")
+        }
         refreshed.lastUpdatedAt = .now
         refreshed.lastImportSummary = result.summary
         guard applySubscriptionRefresh(result, updating: refreshed, securityPolicy: securityPolicy) else {
@@ -837,8 +876,10 @@ final class HopStore {
         groups groupIDs: Set<ProxyGroup.ID>,
         remappingProfiles profileIDMap: [ProxyProfile.ID: ProxyProfile.ID] = [:],
         remappingGroups groupIDMap: [ProxyGroup.ID: ProxyGroup.ID] = [:],
+        rejectRemovedRuleTargets: Bool = false,
+        invalidatedRuleTargets: Set<OutboundTarget> = [],
     ) {
-        guard !profileIDs.isEmpty || !groupIDs.isEmpty || !profileIDMap.isEmpty || !groupIDMap.isEmpty else { return }
+        guard !profileIDs.isEmpty || !groupIDs.isEmpty || !profileIDMap.isEmpty || !groupIDMap.isEmpty || !invalidatedRuleTargets.isEmpty else { return }
 
         func repaired(_ target: OutboundTarget) -> OutboundTarget? {
             switch target {
@@ -869,13 +910,23 @@ final class HopStore {
             }
             return group
         }
+        var blockedRuleCount = 0
         for index in ruleConfigurations.indices {
             ruleConfigurations[index].rules = ruleConfigurations[index].rules.compactMap { rule in
-                guard let target = repaired(rule.target) else { return nil }
+                let target = invalidatedRuleTargets.contains(rule.target) ? nil : repaired(rule.target)
+                guard target != nil || rejectRemovedRuleTargets else { return nil }
                 var rule = rule
-                rule.target = target
+                // A provider removing an outbound must not delete local policy
+                // and expose its traffic to a later Direct/fallback rule.
+                rule.target = target ?? .reject
+                if target == nil {
+                    blockedRuleCount += 1
+                }
                 return rule
             }
+        }
+        if blockedRuleCount > 0 {
+            tunnel.appendLog("Refresh warning: Blocked \(blockedRuleCount) routing rule(s) whose targets changed or were removed. Review Rules.")
         }
         if let selectedTarget {
             self.selectedTarget = repaired(selectedTarget)
@@ -999,8 +1050,11 @@ final class HopStore {
             pendingXrayMigrationReport: pendingXrayMigrationReport,
         )
         let dataStore = dataStore
-        persistQueue.async {
-            dataStore.save(snapshot)
+        persistQueue.async { [weak self] in
+            let saved = dataStore.save(snapshot)
+            DispatchQueue.main.async { [weak self] in
+                self?.persistenceError = saved ? nil : "Changes are still in memory. Retry saving before closing Hop."
+            }
         }
     }
 

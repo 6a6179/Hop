@@ -74,9 +74,9 @@ struct XrayConfigBuilder {
         )
 
         try validateURLGroups(Array(resolver.urlGroups.values))
-        try validateHeavyOutboundCount(reachableProfiles)
 
         var outbounds = try reachableProfiles.map(outboundDictionary)
+        try validateHeavyOutboundCount(outbounds)
         outbounds.append([
             "tag": .string("direct"),
             "protocol": .string("freedom"),
@@ -92,6 +92,7 @@ struct XrayConfigBuilder {
             "protocol": .string("dns"),
             "settings": .object([:]),
         ])
+        try validateOutboundReferences(outbounds)
 
         var root: JSONObject = try [
             "log": .object([
@@ -119,7 +120,7 @@ struct XrayConfigBuilder {
                 selected: selectedDestination,
                 ruleDestinations: ruleDestinations,
                 resolver: resolver,
-                sniff: settings.sniffTraffic,
+                settings: settings,
             )),
         ]
 
@@ -176,6 +177,19 @@ struct XrayConfigBuilder {
         } catch {
             return [XrayValidationIssue(path: "/", message: error.localizedDescription)]
         }
+    }
+
+    /// The form uses the runtime allowlists instead of maintaining a second policy.
+    static func editorProtocolKeys(_ proto: ProxyProtocol) -> Set<String> {
+        XrayConfigBuilder().protocolAdvancedKeys(for: proto)
+    }
+
+    static func editorTransportKeys(_ transport: TransportType) -> Set<String> {
+        XrayConfigBuilder().transportAdvancedKeys(for: transport)
+    }
+
+    static var editorSocketKeys: Set<String> {
+        socketAdvancedKeys
     }
 
     /// Reuses the pinned runtime policy during persistence migration without
@@ -278,14 +292,12 @@ private extension XrayConfigBuilder {
     // Security-critical TLS settings are typed so subscription review and
     // central validation cannot be bypassed by filling an otherwise-empty raw
     // field. These remaining long-tail settings cannot change trust policy.
-    static let tlsAdvancedKeys: Set<String> = ["alpn", "enableSessionResumption", "echSockopt"]
+    static let tlsAdvancedKeys: Set<String> = ["alpn", "enableSessionResumption"]
     static let realityAdvancedKeys: Set<String> = ["fingerprint", "serverName", "password", "shortId", "mldsa65Verify", "spiderX"]
     static let finalMaskAdvancedKeys: Set<String> = ["tcp", "udp", "quicParams"]
     static let socketAdvancedKeys: Set<String> = [
-        "mark", "tcpFastOpen", "tproxy", "domainStrategy", "dialerProxy",
-        "tcpKeepAliveInterval", "tcpKeepAliveIdle", "tcpCongestion", "tcpWindowClamp", "tcpMaxSeg",
-        "penetrate", "tcpUserTimeout", "v6only", "interface", "tcpMptcp",
-        "addressPortStrategy", "happyEyeballs", "trustedXForwardedFor",
+        "tcpFastOpen", "domainStrategy", "dialerProxy", "tcpKeepAliveInterval", "tcpKeepAliveIdle",
+        "penetrate", "interface", "addressPortStrategy", "happyEyeballs",
     ]
 
     static let forbiddenAdvancedKeys: Set<String> = [
@@ -396,12 +408,15 @@ private extension XrayConfigBuilder {
             "localhost"
         }
         let strategy = switch settings.dnsStrategy {
-        case .preferIPv4, .ipv4Only:
+        case .automatic, .preferIPv4, .preferIPv6:
+            "UseIP"
+        case .ipv4Only:
             "UseIPv4"
-        case .preferIPv6, .ipv6Only:
+        case .ipv6Only:
             "UseIPv6"
         }
         return [
+            "tag": .string("dns-query"),
             "servers": .array([.string(server)]),
             "queryStrategy": .string(strategy),
             "disableCache": .bool(true),
@@ -432,10 +447,7 @@ private extension XrayConfigBuilder {
         case let .hysteria2(options):
             outbound["protocol"] = .string("hysteria")
             settings["version"] = .number(2)
-            outbound["settings"] = .object(settings)
             outbound["streamSettings"] = try .object(hysteriaStreamDictionary(profile: profile, options: options))
-            try applyProfileAdvanced(profile.xrayAdvanced, profile: profile, to: &outbound)
-            return outbound
         case let .shadowsocks(options):
             outbound["protocol"] = .string("shadowsocks")
             settings["method"] = .string(options.method)
@@ -460,7 +472,7 @@ private extension XrayConfigBuilder {
         }
 
         outbound["settings"] = .object(settings)
-        if profile.proto != .wireGuard {
+        if outbound["streamSettings"] == nil, profile.proto != .wireGuard {
             outbound["streamSettings"] = try .object(streamDictionary(for: profile))
         }
         if let mux = profile.transport.mux {
@@ -508,7 +520,7 @@ private extension XrayConfigBuilder {
                 try require((5 ... 3600).contains(interval), path: "\(path)/options/hopIntervalSeconds", "Hysteria2 hop interval must be between 5 and 3600 seconds.")
             }
             if let timeout = options.udpIdleTimeoutSeconds {
-                try require((1 ... 3600).contains(timeout), path: "\(path)/options/udpIdleTimeoutSeconds", "Hysteria2 UDP idle timeout must be between 1 and 3600 seconds.")
+                try require((2 ... 600).contains(timeout), path: "\(path)/options/udpIdleTimeoutSeconds", "Hysteria2 UDP idle timeout must be between 2 and 600 seconds.")
             }
             if let ports = options.ports {
                 let hops = ports.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -707,6 +719,16 @@ private extension XrayConfigBuilder {
         try require(advanced.schemaVersion == Self.coreVersion, path: "\(path)/xrayAdvanced/schemaVersion", "Advanced JSON targets \(advanced.schemaVersion), but this build runs \(Self.coreVersion).")
         try require(advanced.encodedByteCount <= limits.maxProfileAdvancedBytes, path: "\(path)/xrayAdvanced", "Profile advanced JSON exceeds \(limits.maxProfileAdvancedBytes) bytes.")
         try validateKeys(advanced.values, allowed: Self.profileAdvancedKeys, path: "\(path)/xrayAdvanced")
+        if let settings = advanced.values["settings"]?.objectValue {
+            for key in settings.keys.sorted() {
+                if jsonKeyEquals(key, "level") {
+                    try require(false, path: "\(path)/xrayAdvanced/settings/\(key)", "Hop enforces policy level 0 for the iOS memory limit.")
+                }
+                if profile.proto == .vless, jsonKeyEquals(key, "seed") {
+                    try require(false, path: "\(path)/xrayAdvanced/settings/\(key)", "The pinned Xray core ignores VLESS seed; use Encryption / Auth or Vision padding instead.")
+                }
+            }
+        }
         try validateForbiddenFields(.object(advanced.values), path: "\(path)/xrayAdvanced")
 
         if let settings = advanced.values["settings"] {
@@ -717,6 +739,30 @@ private extension XrayConfigBuilder {
                 try require(false, path: "\(path)/xrayAdvanced/settings/\(collision)", "Advanced JSON collides with a typed or iOS-enforced field.")
             }
             try validateObject(settings, allowed: protocolAdvancedKeys(for: profile.proto), path: "\(path)/xrayAdvanced/settings")
+            if profile.proto == .vless, let object = settings.objectValue {
+                if let preconnections = object["testpre"] {
+                    try require(
+                        preconnections.integerValue.map { (0 ... limits.maxVLESSPreconnections).contains($0) } == true,
+                        path: "\(path)/xrayAdvanced/settings/testpre",
+                        "VLESS preconnections must be between 0 and \(limits.maxVLESSPreconnections) on iOS.",
+                    )
+                }
+                if let padding = object["testseed"] {
+                    let values = padding.arrayValue?.compactMap(\.integerValue) ?? []
+                    try require(
+                        values.count == 4 && padding.arrayValue?.count == 4 && values.allSatisfy { (0 ... 8192).contains($0) },
+                        path: "\(path)/xrayAdvanced/settings/testseed",
+                        "Vision padding requires four integers between 0 and 8192.",
+                    )
+                    // The pinned core calls rand.Int on entries 1/3 and extends
+                    // its 8192-byte buffer by random + base - content length.
+                    try require(
+                        values[1] > 0 && values[3] > 0 && values[2] >= values[0] - 1,
+                        path: "\(path)/xrayAdvanced/settings/testseed",
+                        "Vision padding random ranges must be positive, and base must be at least threshold minus one.",
+                    )
+                }
+            }
         }
         if let mux = advanced.values["mux"] {
             try validateObject(mux, allowed: Self.muxAdvancedKeys, path: "\(path)/xrayAdvanced/mux")
@@ -741,9 +787,11 @@ private extension XrayConfigBuilder {
                 }
             }
             if let tls = stream["tlsSettings"] {
+                try require(profile.security.layer == .tls, path: "\(path)/xrayAdvanced/streamSettings/tlsSettings", "Advanced JSON cannot configure an unselected security layer.")
                 try validateObject(tls, allowed: Self.tlsAdvancedKeys, path: "\(path)/xrayAdvanced/streamSettings/tlsSettings")
             }
             if let reality = stream["realitySettings"] {
+                try require(profile.security.layer == .reality, path: "\(path)/xrayAdvanced/streamSettings/realitySettings", "Advanced JSON cannot configure an unselected security layer.")
                 try validateObject(reality, allowed: Self.realityAdvancedKeys, path: "\(path)/xrayAdvanced/streamSettings/realitySettings")
             }
             if let finalMask = stream["finalmask"] {
@@ -818,7 +866,7 @@ private extension XrayConfigBuilder {
     func protocolAdvancedKeys(for proto: ProxyProtocol) -> Set<String> {
         switch proto {
         case .vless:
-            ["email", "seed", "testpre", "testseed"]
+            ["email", "testpre", "testseed"]
         case .trojan, .shadowsocks:
             ["email"]
         case .vmess:
@@ -868,8 +916,8 @@ private extension XrayConfigBuilder {
                 "host", "path", "mode", "headers", "xPaddingBytes", "xPaddingObfsMode", "xPaddingKey",
                 "xPaddingHeader", "xPaddingPlacement", "xPaddingMethod", "uplinkHTTPMethod", "sessionIDPlacement",
                 "sessionIDKey", "sessionIDTable", "sessionIDLength", "seqPlacement", "seqKey", "uplinkDataPlacement",
-                "uplinkDataKey", "uplinkChunkSize", "noGRPCHeader", "noSSEHeader", "scMaxEachPostBytes",
-                "scMinPostsIntervalMs", "scMaxBufferedPosts", "scStreamUpServerSecs", "serverMaxHeaderBytes",
+                "uplinkDataKey", "uplinkChunkSize", "noGRPCHeader", "scMaxEachPostBytes",
+                "scMinPostsIntervalMs",
                 "xmux", "extra",
             ]
         case .mKCP:
@@ -969,9 +1017,6 @@ private extension XrayConfigBuilder {
         // equally narrow: Unicode-folded lookalikes are forbidden above but
         // never admitted as persistable secret paths.
         let components = path.split(separator: "/").map { $0.lowercased() }
-        if Array(components.suffix(3)) == ["xrayadvanced", "settings", "seed"] {
-            return true
-        }
         guard components.contains("finalmask"), components.count >= 4 else {
             return false
         }
@@ -1001,12 +1046,10 @@ private extension XrayConfigBuilder {
                 "host": profile.transport.host.map(JSONValue.string),
             ]))
         case .grpc:
-            var grpc = compactObject([
+            stream[key] = .object(compactObject([
                 "serviceName": profile.transport.serviceName.map(JSONValue.string),
                 "authority": profile.transport.host.map(JSONValue.string),
-            ])
-            grpc["initial_windows_size"] = .number(Double(limits.maxGRPCInitialWindowBytes))
-            stream[key] = .object(grpc)
+            ]))
         case .httpUpgrade:
             stream[key] = .object(compactObject([
                 "path": profile.transport.path.map(JSONValue.string),
@@ -1042,8 +1085,20 @@ private extension XrayConfigBuilder {
         ]
         try addSecurity(profile.security, to: &stream)
 
-        var finalMask = profile.transport.finalMask?.objectValue ?? [:]
+        var finalMask = try finalMaskWithSafeDefaults(profile.transport.finalMask ?? .object([:])).objectValue ?? [:]
         var quic = finalMask["quicParams"]?.objectValue ?? [:]
+        for (key, isTyped) in [
+            ("brutalUp", options.up != nil),
+            ("brutalDown", options.down != nil),
+            ("congestion", options.up != nil || options.down != nil),
+            ("udpHop", options.ports != nil),
+        ] where isTyped {
+            try require(
+                !quic.keys.contains(where: { jsonKeyEquals($0, key) }),
+                path: "/profiles/\(profile.id)/transport/finalMask/quicParams/\(key)",
+                "Advanced QUIC parameters collide with typed Hysteria2 options; configure one or the other.",
+            )
+        }
         if let up = options.up {
             quic["brutalUp"] = .string(up)
             quic["congestion"] = .string("brutal")
@@ -1068,6 +1123,11 @@ private extension XrayConfigBuilder {
                 try require(false, path: "/profiles/\(profile.id)/options/obfsPassword", "Salamander obfuscation requires a password.")
                 return stream
             }
+            try require(
+                !finalMask.keys.contains(where: { jsonKeyEquals($0, "udp") }),
+                path: "/profiles/\(profile.id)/transport/finalMask/udp",
+                "Advanced FinalMask udp layers cannot be combined with typed Salamander obfuscation; configure one or the other.",
+            )
             finalMask["udp"] = .array([
                 .object([
                     "type": .string("salamander"),
@@ -1178,19 +1238,39 @@ private extension XrayConfigBuilder {
     }
 
     func xhttpDictionary(_ transport: TransportOptions) throws -> JSONObject {
-        var extra = transport.xhttpExtra?.objectValue ?? [:]
+        let extra = transport.xhttpExtra?.objectValue ?? [:]
         try require(transport.xhttpExtra == nil || transport.xhttpExtra?.objectValue != nil, path: "/transport/xhttpExtra", "XHTTP extra must be a JSON object.")
-        var xmux = extra["xmux"]?.objectValue ?? [:]
-        fillIfMissing("maxConnections", value: .number(Double(limits.maxXHTTPConnections)), into: &xmux)
-        extra["xmux"] = .object(xmux)
-        fillIfMissing("scMaxBufferedPosts", value: .number(Double(limits.maxXHTTPBufferedPosts)), into: &extra)
-        fillIfMissing("scMaxEachPostBytes", value: .number(Double(limits.maxXHTTPPostBytes)), into: &extra)
         return compactObject([
             "path": nonempty(transport.path).map(JSONValue.string),
             "host": nonempty(transport.host).map(JSONValue.string),
             "mode": nonempty(transport.xhttpMode).map(JSONValue.string),
             "extra": .object(extra),
         ])
+    }
+
+    func finalizedXHTTPSettings(_ settings: JSONObject, path: String) throws -> JSONObject {
+        var result = settings
+        var extra = settings["extra"]?.objectValue ?? [:]
+        try require(settings["extra"] == nil || settings["extra"]?.objectValue != nil, path: "\(path)/extra", "XHTTP extra must be a JSON object.")
+        let outerKeys: Set = ["host", "path", "mode", "extra"]
+        for key in extra.keys.sorted() where outerKeys.contains(key) {
+            try require(false, path: "\(path)/extra/\(key)", "XHTTP \(key) belongs outside extra; the core ignores it here.")
+        }
+        // The core replaces the outer settings with extra, retaining only host,
+        // path and mode. Normalize before adding defaults so no field is lost.
+        for key in result.keys.sorted() where !outerKeys.contains(key) {
+            if let value = result.removeValue(forKey: key) {
+                try mergeAdvanced([key: value], into: &extra, path: "\(path)/extra")
+            }
+        }
+        var xmux = extra["xmux"]?.objectValue ?? [:]
+        try require(extra["xmux"] == nil || extra["xmux"]?.objectValue != nil, path: "\(path)/extra/xmux", "XHTTP xmux must be a JSON object.")
+        fillIfMissing("maxConnections", value: .number(Double(limits.maxXHTTPConnections)), into: &xmux)
+        extra["xmux"] = .object(xmux)
+        fillIfMissing("scMaxBufferedPosts", value: .number(Double(limits.maxXHTTPBufferedPosts)), into: &extra)
+        fillIfMissing("scMaxEachPostBytes", value: .number(Double(limits.maxXHTTPPostBytes)), into: &extra)
+        result["extra"] = .object(extra)
+        return result
     }
 
     func kcpDictionary(_ options: XrayKCPOptions?) -> JSONObject {
@@ -1282,12 +1362,26 @@ private extension XrayConfigBuilder {
     func finalizeMergedStreamSettings(in outbound: inout JSONObject, profile: ProxyProfile) throws {
         guard var stream = outbound["streamSettings"]?.objectValue else { return }
         let path = "/profiles/\(profile.id.uuidString.lowercased())/streamSettings"
+        if let xhttp = stream["xhttpSettings"]?.objectValue {
+            stream["xhttpSettings"] = try .object(finalizedXHTTPSettings(xhttp, path: "\(path)/xhttpSettings"))
+        }
+        if var grpc = stream["grpcSettings"]?.objectValue {
+            fillIfMissing("initial_windows_size", value: .number(Double(limits.maxGRPCInitialWindowBytes)), into: &grpc)
+            stream["grpcSettings"] = .object(grpc)
+        }
         let finalMaskKeys = stream.keys.filter { jsonKeyEquals($0, "finalmask") }
         try require(finalMaskKeys.count <= 1, path: "\(path)/finalmask", "JSON object contains duplicate protected keys that differ only by case.")
         if let key = finalMaskKeys.first,
            let finalMask = stream.removeValue(forKey: key)
         {
             stream["finalmask"] = try finalMaskWithSafeDefaults(finalMask)
+        }
+        if isXHTTPH3(stream) {
+            var finalMask = stream["finalmask"]?.objectValue ?? [:]
+            var quic = finalMask["quicParams"]?.objectValue ?? [:]
+            fillSafeQUICDefaults(into: &quic)
+            finalMask["quicParams"] = .object(quic)
+            stream["finalmask"] = .object(finalMask)
         }
         let kcpKeys = stream.keys.filter { jsonKeyEquals($0, "kcpSettings") }
         try require(kcpKeys.count <= 1, path: "\(path)/kcpSettings", "JSON object contains duplicate protected keys that differ only by case.")
@@ -1340,7 +1434,7 @@ private extension XrayConfigBuilder {
         selected: XrayResolvedTarget,
         ruleDestinations: [XrayResolvedTarget],
         resolver: XrayReachabilityResolver,
-        sniff: Bool,
+        settings: AppSettings,
     ) throws -> JSONObject {
         var resultRules: [JSONValue] = [
             .object([
@@ -1350,9 +1444,17 @@ private extension XrayConfigBuilder {
                 "outboundTag": .string("dns-out"),
             ]),
         ]
+        if settings.dnsPreset != .system {
+            var dnsRoute: JSONObject = [
+                "type": .string("field"),
+                "inboundTag": .array([.string("dns-query")]),
+            ]
+            setRouteTarget(settings.proxyDNS && mode != .direct ? selected : .outbound("direct"), in: &dnsRoute)
+            resultRules.append(.object(dnsRoute))
+        }
         if mode == .rule {
             for (index, rule) in rules.enumerated() {
-                try resultRules.append(.object(routingRuleDictionary(rule, index: index, destination: ruleDestinations[index], sniff: sniff)))
+                try resultRules.append(.object(routingRuleDictionary(rule, index: index, destination: ruleDestinations[index], sniff: settings.sniffTraffic)))
             }
         }
 
@@ -1491,14 +1593,47 @@ private extension XrayConfigBuilder {
         group.importedType == nil ? group.testOptions.url : ProxyGroupTestOptions.defaultURL
     }
 
-    func validateHeavyOutboundCount(_ profiles: [ProxyProfile]) throws {
-        let count = profiles.filter { profile in
-            if profile.proto == .wireGuard || profile.proto == .hysteria2 {
+    func validateHeavyOutboundCount(_ outbounds: [JSONObject]) throws {
+        let count = outbounds.filter { outbound in
+            if outbound["protocol"] == .string("wireguard") || outbound["protocol"] == .string("hysteria") {
                 return true
             }
-            return profile.transport.type == .xhttp && profile.security.tls?.alpn.contains(where: { $0.lowercased() == "h3" }) == true
+            return isXHTTPH3(outbound["streamSettings"]?.objectValue)
         }.count
         try require(count <= limits.maxConcurrentHeavyOutbounds, path: "/outbounds", "Only one WireGuard, Hysteria2, or XHTTP-H3 outbound may be reachable on iOS.")
+    }
+
+    func isXHTTPH3(_ stream: JSONObject?) -> Bool {
+        let alpn = stream?["tlsSettings"]?.objectValue?["alpn"]
+        return stream?["network"] == .string("xhttp") && stream?["security"] == .string("tls")
+            && (alpn == .array([.string("h3")]) || alpn == .string("h3"))
+    }
+
+    func validateOutboundReferences(_ outbounds: [JSONObject]) throws {
+        let tags = Set(outbounds.compactMap { $0["tag"]?.stringValue })
+        var nextByTag: [String: String] = [:]
+        for (index, outbound) in outbounds.enumerated() {
+            guard let tag = outbound["tag"]?.stringValue else { continue }
+            let references = [
+                outbound["proxySettings"]?.objectValue?["tag"]?.stringValue,
+                outbound["streamSettings"]?.objectValue?["sockopt"]?.objectValue?["dialerProxy"]?.stringValue,
+            ].compactMap(\.self).filter { !$0.isEmpty }
+            let path = "/outbounds/\(index)"
+            try require(references.count <= 1, path: path, "proxySettings.tag conflicts with sockopt.dialerProxy.")
+            if let reference = references.first {
+                try require(tags.contains(reference), path: path, "Outbound chain references an unavailable outbound: \(reference).")
+                nextByTag[tag] = reference
+            }
+        }
+        // ponytail: at most 32 outbounds; use a shared DFS if that cap grows.
+        for tag in nextByTag.keys.sorted() {
+            var visited: Set<String> = []
+            var current: String? = tag
+            while let target = current {
+                try require(visited.insert(target).inserted, path: "/outbounds", "Outbound chain contains a dependency cycle.")
+                current = nextByTag[target]
+            }
+        }
     }
 
     func validateRenderedLimits(_ root: JSONObject) throws {
@@ -1712,6 +1847,12 @@ private extension XrayConfigBuilder {
             try require(false, path: path, "Realm settings must be a JSON object.")
             return
         }
+        let tlsConfig = try uniqueCaseInsensitiveValue("tlsConfig", in: settings, path: path)
+        try require(
+            tlsConfig == nil,
+            path: "\(path)/tlsConfig",
+            "Realm TLS overrides require typed trust validation and are not supported.",
+        )
         guard let urlValue = try uniqueCaseInsensitiveValue("url", in: settings, path: path),
               let rawURL = urlValue.stringValue
         else {
@@ -2121,20 +2262,34 @@ private final class XrayReachabilityResolver {
         }
         defer { activeGroups.remove(group.id) }
 
+        let originalProfileIDs = profileIDs
+        let originalURLGroups = urlGroups
+        var succeeded = false
+        defer {
+            if !succeeded {
+                profileIDs = originalProfileIDs
+                urlGroups = originalURLGroups
+            }
+        }
+
         switch group.type {
         case .select:
             var attempted: Set<OutboundTarget> = []
             if let selected = group.defaultTarget {
                 attempted.insert(deduplicationKey(for: selected))
                 do {
-                    return try resolve(selected, activeGroups: &activeGroups, groupDepth: groupDepth)
+                    let destination = try resolve(selected, activeGroups: &activeGroups, groupDepth: groupDepth)
+                    succeeded = true
+                    return destination
                 } catch {
                     try rethrowFatalViolation()
                 }
             }
             for member in group.members where attempted.insert(deduplicationKey(for: member)).inserted {
                 do {
-                    return try resolve(member, activeGroups: &activeGroups, groupDepth: groupDepth)
+                    let destination = try resolve(member, activeGroups: &activeGroups, groupDepth: groupDepth)
+                    succeeded = true
+                    return destination
                 } catch {
                     try rethrowFatalViolation()
                 }
@@ -2159,6 +2314,7 @@ private final class XrayReachabilityResolver {
                 return try fail("/groups/\(group.id)/members", "URL-test group has no runnable profile.")
             }
             urlGroups[group.id] = XrayResolvedURLGroup(group: group, memberTags: tags)
+            succeeded = true
             return .balancer(XrayConfigBuilder.tag(for: group))
         case .unsupported:
             return try fail("/groups/\(group.id)/type", "Unsupported proxy group cannot be represented by Xray.")

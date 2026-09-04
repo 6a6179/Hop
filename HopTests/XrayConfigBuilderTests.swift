@@ -143,6 +143,72 @@ final class XrayConfigBuilderTests: XCTestCase {
         try await XrayCoreClient.validate(configJSON: json)
     }
 
+    func testDNSRoutingHonorsProxySettingInEveryMode() async throws {
+        let profile = basicVLESS()
+        for mode in RoutingMode.allCases {
+            for preset in DNSPreset.allCases {
+                for proxyDNS in [false, true] {
+                    var settings = AppSettings.defaults
+                    settings.dnsPreset = preset
+                    settings.proxyDNS = proxyDNS
+                    let json = try builder.build(
+                        profile: profile, routingMode: mode,
+                        rules: [RoutingRule(kind: .final, value: "", target: .reject)],
+                        settings: settings,
+                    )
+                    let root = try parse(json)
+                    let dns = try XCTUnwrap(root["dns"] as? [String: Any])
+                    let routing = try XCTUnwrap(root["routing"] as? [String: Any])
+                    let rules = try XCTUnwrap(routing["rules"] as? [[String: Any]])
+                    let dnsIndex = rules.firstIndex { ($0["inboundTag"] as? [String]) == ["dns-query"] }
+                    if preset == .system {
+                        XCTAssertEqual(dns["servers"] as? [String], ["localhost"])
+                        XCTAssertNil(dnsIndex)
+                    } else {
+                        let index = try XCTUnwrap(dnsIndex)
+                        XCTAssertEqual(index, 1, "DNS routing must precede user rules.")
+                        let expected = proxyDNS && mode != .direct ? "proxy-\(profile.id.uuidString.lowercased())" : "direct"
+                        XCTAssertEqual(rules[index]["outboundTag"] as? String, expected)
+                    }
+                    try await XrayCoreClient.validate(configJSON: json)
+                }
+            }
+        }
+    }
+
+    func testDNSProxyRouteUsesSelectedBalancer() throws {
+        let profile = basicVLESS()
+        let group = ProxyGroup(name: "Best", type: .urlTest, members: [.profile(profile.id)])
+        let root = try parse(builder.build(
+            profiles: [profile], groups: [group], selectedTarget: .group(group.id),
+            routingMode: .global, rules: [],
+        ))
+        let routing = try XCTUnwrap(root["routing"] as? [String: Any])
+        let rules = try XCTUnwrap(routing["rules"] as? [[String: Any]])
+        let dnsRule = try XCTUnwrap(rules.first { ($0["inboundTag"] as? [String]) == ["dns-query"] })
+        XCTAssertEqual(dnsRule["balancerTag"] as? String, "group-\(group.id.uuidString.lowercased())")
+        XCTAssertNil(dnsRule["outboundTag"])
+    }
+
+    func testDNSStrategiesPreserveBothFamiliesUnlessExplicitlyRestricted() async throws {
+        XCTAssertEqual(DNSStrategy.allCases, [.automatic, .ipv4Only, .ipv6Only])
+        XCTAssertEqual(AppSettings.defaults.dnsStrategy, .automatic)
+        for (strategy, query) in [
+            (DNSStrategy.automatic, "UseIP"), (.preferIPv4, "UseIP"), (.preferIPv6, "UseIP"),
+            (.ipv4Only, "UseIPv4"), (.ipv6Only, "UseIPv6"),
+        ] {
+            var settings = AppSettings.defaults
+            settings.dnsStrategy = strategy
+            let json = try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings)
+            let dns = try XCTUnwrap(try parse(json)["dns"] as? [String: Any])
+            XCTAssertEqual(dns["queryStrategy"] as? String, query)
+            try await XrayCoreClient.validate(configJSON: json)
+
+            let decoded = try JSONDecoder().decode(AppSettings.self, from: JSONEncoder().encode(settings))
+            XCTAssertEqual(decoded.dnsStrategy, query == "UseIP" ? .automatic : strategy)
+        }
+    }
+
     func testBuildsTLSXHTTPAndEnforcesSafeDefaults() async throws {
         let profile = ProxyProfile(
             name: "XHTTP TLS",
@@ -165,7 +231,7 @@ final class XrayConfigBuilderTests: XCTestCase {
                 path: "/hop",
                 host: "cdn.example.com",
                 xhttpMode: "stream-up",
-                xhttpExtra: .object(["noSSEHeader": .bool(true)]),
+                xhttpExtra: .object(["noGRPCHeader": .bool(true)]),
             ),
         )
 
@@ -184,14 +250,45 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual((extra["scMaxBufferedPosts"] as? NSNumber)?.intValue, 1)
         XCTAssertEqual((extra["scMaxEachPostBytes"] as? NSNumber)?.intValue, 128 * 1024)
         XCTAssertEqual((xmux["maxConnections"] as? NSNumber)?.intValue, 1)
-        XCTAssertEqual(extra["noSSEHeader"] as? Bool, true)
+        XCTAssertEqual(extra["noGRPCHeader"] as? Bool, true)
 
         try await XrayCoreClient.validate(configJSON: json)
     }
 
+    func testXHTTPH3LimitsApplyAfterTypedAndAdvancedTLSMerge() async throws {
+        let advancedForms: [JSONValue?] = [nil, .array([.string("h3")]), .string("h3")]
+        for advancedALPN in advancedForms {
+            var profile = basicVLESS()
+            profile.transport = TransportOptions(type: .xhttp, xhttpMode: "stream-one")
+            profile.security = .tls(TLSOptions(alpn: advancedALPN == nil ? ["h3"] : []))
+            if let advancedALPN {
+                profile.xrayAdvanced = XrayAdvancedDocument([
+                    "streamSettings": .object(["tlsSettings": .object(["alpn": advancedALPN])]),
+                ])
+            }
+            let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+            let outbound = try profileOutbound(parse(json))
+            let stream = try XCTUnwrap(outbound["streamSettings"] as? [String: Any])
+            let finalMask = try XCTUnwrap(stream["finalmask"] as? [String: Any])
+            let quic = try XCTUnwrap(finalMask["quicParams"] as? [String: Any])
+            XCTAssertEqual(quic["maxStreamReceiveWindow"] as? Int, IOSRuntimeLimits.default.maxQUICStreamWindowBytes)
+            XCTAssertEqual(quic["maxConnectionReceiveWindow"] as? Int, IOSRuntimeLimits.default.maxQUICConnectionWindowBytes)
+            try await XrayCoreClient.validate(configJSON: json)
+
+            var second = profile
+            second.id = UUID()
+            let group = ProxyGroup(name: "Too heavy", type: .urlTest, members: [.profile(profile.id), .profile(second.id)])
+            XCTAssertThrowsError(try builder.build(
+                profiles: [profile, second], groups: [group], selectedTarget: .group(group.id),
+                routingMode: .global, rules: [],
+            )) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Only one"), "\(error)")
+            }
+        }
+    }
+
     func testXHTTPRejectsUnsafeZeroesAndBoundsPaddingAndSessionIDs() async throws {
         for unsafeExtra: JSONValue in [
-            .object(["scMaxBufferedPosts": .number(0)]),
             .object(["scMaxEachPostBytes": .number(0)]),
             .object(["xmux": .object(["maxConnections": .number(0)])]),
         ] {
@@ -220,7 +317,6 @@ final class XrayConfigBuilderTests: XCTestCase {
 
     func testMemorySensitiveFieldsRejectNullBooleanAndMalformedValues() {
         for unsafeExtra: JSONValue in [
-            .object(["scMaxBufferedPosts": .null]),
             .object(["scMaxEachPostBytes": .bool(true)]),
             .object(["xmux": .object(["maxConnections": .null])]),
             .object(["xPaddingBytes": .object(["from": .number(1), "to": .null])]),
@@ -378,6 +474,197 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual((quic["maxIncomingStreams"] as? NSNumber)?.intValue, 0)
         XCTAssertEqual(udp.first?["type"] as? String, "salamander")
 
+        try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testHysteriaUDPIdleTimeoutMatchesPinnedCoreBounds() async throws {
+        for timeout in [2, 600] {
+            let profile = ProxyProfile(
+                name: "Hysteria2",
+                endpoint: Endpoint(host: "hy.example.com", port: 443),
+                options: .hysteria2(Hysteria2Options(password: "auth", udpIdleTimeoutSeconds: timeout)),
+                security: .tls(TLSOptions(serverName: "hy.example.com")),
+                transport: TransportOptions(type: .hysteria),
+            )
+            try await XrayCoreClient.validate(configJSON: builder.build(profile: profile, routingMode: .global, rules: []))
+        }
+        for timeout in [0, 1, 601, 3600] {
+            let profile = ProxyProfile(
+                name: "Hysteria2",
+                endpoint: Endpoint(host: "hy.example.com", port: 443),
+                options: .hysteria2(Hysteria2Options(password: "auth", udpIdleTimeoutSeconds: timeout)),
+                security: .tls(TLSOptions(serverName: "hy.example.com")),
+                transport: TransportOptions(type: .hysteria),
+            )
+            assertRejected(profile, contains: "between 2 and 600")
+        }
+    }
+
+    func testHysteriaPreservesTypedMuxOptions() async throws {
+        let profile = ProxyProfile(
+            name: "Hysteria2 Mux",
+            endpoint: Endpoint(host: "hy.example.com", port: 443),
+            options: .hysteria2(Hysteria2Options(password: "auth")),
+            security: .tls(TLSOptions(serverName: "hy.example.com")),
+            transport: TransportOptions(type: .hysteria, mux: XrayMuxOptions(enabled: true, concurrency: 2, xudpConcurrency: 4, xudpProxyUDP443: "reject")),
+        )
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let outbound = try profileOutbound(parse(json))
+        let mux = try XCTUnwrap(outbound["mux"] as? [String: Any])
+        XCTAssertEqual(mux["enabled"] as? Bool, true)
+        XCTAssertEqual(mux["concurrency"] as? Int, 2)
+        XCTAssertEqual(mux["xudpConcurrency"] as? Int, 4)
+        XCTAssertEqual(mux["xudpProxyUDP443"] as? String, "reject")
+        try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testVLESSAdvancedControlsReachPinnedCoreWithinSafeBounds() async throws {
+        var profile = basicVLESS()
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "settings": .object([
+                "email": .string("node@example.com"),
+                "testpre": .number(Double(IOSRuntimeLimits.default.maxVLESSPreconnections)),
+                "testseed": .array([900, 500, 900, 256].map { .number(Double($0)) }),
+            ]),
+        ])
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let settings = try XCTUnwrap(profileOutbound(parse(json))["settings"] as? [String: Any])
+        XCTAssertEqual(settings["testpre"] as? Int, 8)
+        XCTAssertEqual(settings["testseed"] as? [Int], [900, 500, 900, 256])
+        try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testRejectsUnsafeVLESSPreconnectionsAndPadding() {
+        let invalid: [[String: JSONValue]] = [
+            ["testpre": .number(-1)],
+            ["testpre": .number(9)],
+            ["testpre": .number(1.5)],
+            ["testpre": .string("1")],
+            ["testseed": .array([])],
+            ["testseed": .array([900, 0, 900, 256].map { .number(Double($0)) })],
+            ["testseed": .array([900, 500, 900, 0].map { .number(Double($0)) })],
+            ["testseed": .array([900, 500, 1, 256].map { .number(Double($0)) })],
+            ["testseed": .array([900, 500, 900, 8193].map { .number(Double($0)) })],
+            ["testseed": .array([.number(900), .number(500), .number(900), .string("256")])],
+        ]
+        for settings in invalid {
+            var profile = basicVLESS()
+            profile.xrayAdvanced = XrayAdvancedDocument(["settings": .object(settings)])
+            assertRejected(profile, contains: settings["testpre"] == nil ? "Vision padding" : "VLESS preconnections")
+        }
+    }
+
+    func testRejectsIgnoredVLESSSeedAndPolicyLevelOverrides() {
+        for key in ["seed", "Seed"] {
+            var profile = basicVLESS()
+            profile.xrayAdvanced = XrayAdvancedDocument(["settings": .object([key: .string("ignored")])])
+            assertRejected(profile, contains: "ignores VLESS seed")
+        }
+        for key in ["level", "Level"] {
+            var profile = basicVLESS()
+            profile.xrayAdvanced = XrayAdvancedDocument(["settings": .object([key: .number(1)])])
+            assertRejected(profile, contains: "policy level 0")
+        }
+    }
+
+    func testRejectsAdvancedSettingsForUnselectedSecurityLayer() {
+        let securities: [ProxySecurity] = [
+            .none,
+            .tls(TLSOptions(serverName: "example.com")),
+            .reality(RealityOptions(publicKey: base64URL(bytes: 32), serverName: "example.com")),
+        ]
+        for security in securities {
+            for (key, layer) in [("tlsSettings", SecurityLayer.tls), ("realitySettings", .reality)] where security.layer != layer {
+                var profile = basicVLESS()
+                profile.security = security
+                profile.xrayAdvanced = XrayAdvancedDocument(["streamSettings": .object([key: .object([:])])])
+                assertRejected(profile, contains: "unselected security layer")
+            }
+        }
+    }
+
+    func testRejectsAdvancedFinalMaskUDPCollidingWithTypedSalamander() {
+        var profile = ProxyProfile(
+            name: "Hysteria2 Collision",
+            endpoint: Endpoint(host: "hy.example.com", port: 443),
+            options: .hysteria2(Hysteria2Options(
+                password: "auth",
+                obfs: "salamander",
+                obfsPassword: "obfs-secret",
+            )),
+            security: .tls(TLSOptions(serverName: "hy.example.com", alpn: ["h3"])),
+            transport: TransportOptions(type: .hysteria),
+        )
+        // A fully valid advanced layer: without the collision rejection it
+        // passed validation and was silently replaced by the Salamander layer.
+        profile.transport.finalMask = .object([
+            "udp": .array([.object([
+                "type": .string("xdns"),
+                "settings": .object(["resolvers": .array([.string("dns.example+udp://8.8.8.8:53")])]),
+            ])]),
+        ])
+
+        assertRejected(profile, contains: "/transport/finalMask/udp")
+    }
+
+    func testRejectsAdvancedQUICCollisionsWithTypedHysteriaOptions() {
+        var profile = ProxyProfile(
+            name: "Hysteria2 Collision",
+            endpoint: Endpoint(host: "hy.example.com", port: 443),
+            options: .hysteria2(Hysteria2Options(password: "auth", up: "100 mbps", down: "200 mbps", ports: "20000-20100")),
+            security: .tls(TLSOptions(serverName: "hy.example.com", alpn: ["h3"])),
+            transport: TransportOptions(type: .hysteria),
+        )
+        let collisions: [String: JSONValue] = [
+            "brutalUp": .string("10 mbps"),
+            "brutalDown": .string("20 mbps"),
+            "congestion": .string("reno"),
+            "udpHop": .object(["ports": .string("30000"), "interval": .number(30)]),
+        ]
+        for (key, value) in collisions {
+            for spelling in [key, key.uppercased()] {
+                profile.transport.finalMask = .object(["quicParams": .object([spelling: value])])
+                assertRejected(profile, contains: "/transport/finalMask/quicParams/\(key)")
+            }
+        }
+        for value in [JSONValue.null, .string("not an object")] {
+            profile.transport.finalMask = .object(["quicParams": value])
+            assertRejected(profile, contains: "QUIC parameters must be a JSON object")
+        }
+    }
+
+    func testHysteriaPreservesNoncollidingFinalMaskFields() async throws {
+        var profile = ProxyProfile(
+            name: "Hysteria2 Advanced",
+            endpoint: Endpoint(host: "hy.example.com", port: 443),
+            options: .hysteria2(Hysteria2Options(password: "auth", up: "100 mbps")),
+            security: .tls(TLSOptions(serverName: "hy.example.com", alpn: ["h3"])),
+            transport: TransportOptions(type: .hysteria),
+        )
+        profile.transport.finalMask = .object([
+            "udp": .array([.object([
+                "type": .string("salamander"),
+                "settings": .object(["password": .string("advanced-obfs")]),
+            ])]),
+            "quicParams": .object([
+                "brutalDown": .string("200 mbps"),
+                "udpHop": .object(["ports": .string("30000"), "interval": .number(30)]),
+                "initStreamReceiveWindow": .number(262_144),
+            ]),
+        ])
+
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let outbound = try profileOutbound(parse(json))
+        let stream = try XCTUnwrap(outbound["streamSettings"] as? [String: Any])
+        let finalMask = try XCTUnwrap(stream["finalmask"] as? [String: Any])
+        let quic = try XCTUnwrap(finalMask["quicParams"] as? [String: Any])
+        let udp = try XCTUnwrap(finalMask["udp"] as? [[String: Any]])
+        XCTAssertEqual(udp.first?["type"] as? String, "salamander")
+        XCTAssertEqual((udp.first?["settings"] as? [String: Any])?["password"] as? String, "advanced-obfs")
+        XCTAssertEqual(quic["brutalUp"] as? String, "100 mbps")
+        XCTAssertEqual(quic["brutalDown"] as? String, "200 mbps")
+        XCTAssertEqual((quic["udpHop"] as? [String: Any])?["ports"] as? String, "30000")
+        XCTAssertEqual((quic["initStreamReceiveWindow"] as? NSNumber)?.intValue, 262_144)
         try await XrayCoreClient.validate(configJSON: json)
     }
 
@@ -560,7 +847,7 @@ final class XrayConfigBuilderTests: XCTestCase {
         profile.xrayAdvanced = XrayAdvancedDocument([
             "settings": .object(["ſeed": .string("must-not-persist")]),
         ])
-        assertRejected(profile, contains: "cannot be supplied")
+        assertRejected(profile, contains: "ignores VLESS seed")
     }
 
     func testFinalMaskRequiresSecureRealmControlAndAllowedDestinations() async throws {
@@ -656,6 +943,27 @@ final class XrayConfigBuilderTests: XCTestCase {
         let json = try builder.build(profile: tokenized, routingMode: .global, rules: [])
         XCTAssertTrue(json.contains("##HOP_SECRET:realm-test-nonce:"))
         XCTAssertFalse(json.contains("realm://token@"))
+    }
+
+    func testRealmRejectsUnreviewedTLSOverridesInTypedAndAdvancedFinalMask() {
+        for key in ["tlsConfig", "TLSConfig"] {
+            for tls in [JSONValue.object(["minVersion": .string("1.0")]), .null] {
+                let mask: JSONValue = .object(["udp": .array([.object([
+                    "type": .string("realm"),
+                    "settings": .object([
+                        "url": .string("realm://token@1.1.1.1/realm-id"),
+                        "stunServers": .array([.string("1.1.1.1:3478")]),
+                        key: tls,
+                    ]),
+                ])])])
+                var profile = basicVLESS()
+                profile.transport.finalMask = mask
+                assertRejected(profile, contains: "Realm TLS overrides")
+                profile.transport.finalMask = nil
+                profile.xrayAdvanced = XrayAdvancedDocument(["streamSettings": .object(["finalmask": mask])])
+                assertRejected(profile, contains: "Realm TLS overrides")
+            }
+        }
     }
 
     func testBuildsWireGuardWithNoKernelTun() async throws {
@@ -1019,7 +1327,7 @@ final class XrayConfigBuilderTests: XCTestCase {
             ]),
         ])
 
-        assertRejected(profile, contains: "Unknown or server-only")
+        assertRejected(profile, contains: "policy level 0")
     }
 
     func testBurstObservatoryIsUnavailableOnIOS() {
@@ -1183,6 +1491,71 @@ final class XrayConfigBuilderTests: XCTestCase {
             rules: [],
         )) { error in
             XCTAssertTrue(error.localizedDescription.contains("dependency cycle"), "Unexpected error: \(error)")
+        }
+    }
+
+    func testFailedGroupFallbackDoesNotRetainUnreachableOutbounds() throws {
+        let fallback = basicVLESS()
+        var unreachable = basicVLESS()
+        unreachable.id = UUID()
+        unreachable.security = .tls(TLSOptions(allowInsecure: true))
+        let nested = ProxyGroup(name: "Nested", type: .urlTest, members: [.profile(unreachable.id)])
+        let failing = ProxyGroup(name: "Failing", type: .urlTest, members: [.group(nested.id)])
+        let selected = ProxyGroup(
+            name: "Fallback", type: .select,
+            members: [.group(failing.id), .profile(fallback.id)],
+            defaultTarget: .group(failing.id),
+        )
+
+        let root = try parse(builder.build(
+            profiles: [unreachable, fallback], groups: [nested, failing, selected],
+            selectedTarget: .group(selected.id), routingMode: .global, rules: [],
+        ))
+        let outbounds = try XCTUnwrap(root["outbounds"] as? [[String: Any]])
+        XCTAssertEqual(outbounds.count, 4)
+        XCTAssertEqual(outbounds.first?["tag"] as? String, "proxy-\(fallback.id.uuidString.lowercased())")
+        XCTAssertNil(root["observatory"])
+        XCTAssertNil((root["routing"] as? [String: Any])?["balancers"])
+    }
+
+    func testOutboundChainsRejectMissingSelfAndCyclicReferences() async throws {
+        for socketChain in [false, true] {
+            func chained(_ profile: ProxyProfile, to tag: String) -> ProxyProfile {
+                var result = profile
+                if socketChain {
+                    result.transport.socketOptions = .object(["dialerProxy": .string(tag)])
+                } else {
+                    result.xrayAdvanced = XrayAdvancedDocument([
+                        "proxySettings": .object(["tag": .string(tag), "transportLayer": .bool(true)]),
+                    ])
+                }
+                return result
+            }
+            let first = basicVLESS()
+            var second = basicVLESS()
+            second.id = UUID()
+            let firstTag = "proxy-\(first.id.uuidString.lowercased())"
+            let secondTag = "proxy-\(second.id.uuidString.lowercased())"
+            assertRejected(chained(first, to: "missing"), contains: "unavailable outbound")
+            assertRejected(chained(first, to: secondTag), contains: "unavailable outbound")
+            assertRejected(chained(first, to: firstTag), contains: "dependency cycle")
+
+            let group = ProxyGroup(name: "Chain", type: .urlTest, members: [.profile(first.id), .profile(second.id)])
+            XCTAssertThrowsError(try builder.build(
+                profiles: [chained(first, to: secondTag), chained(second, to: firstTag)],
+                groups: [group], selectedTarget: .group(group.id), routingMode: .global, rules: [],
+            )) { error in
+                XCTAssertTrue(error.localizedDescription.contains("dependency cycle"), "\(error)")
+            }
+            let valid = try builder.build(
+                profiles: [chained(first, to: secondTag), chained(second, to: "direct")],
+                groups: [group], selectedTarget: .group(group.id), routingMode: .global, rules: [],
+            )
+            try await XrayCoreClient.validate(configJSON: valid)
+            for tag in socketChain ? ["direct", "reject", ""] : ["direct", "reject"] {
+                let json = try builder.build(profile: chained(first, to: tag), routingMode: .global, rules: [])
+                try await XrayCoreClient.validate(configJSON: json)
+            }
         }
     }
 

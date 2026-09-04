@@ -39,3 +39,5 @@ memory, and rejection annotations.
 - The manifest records upstream-parsed values even when Hop policy is narrower;
   applicability, notes, and `annotations.rejectedPaths` describe those policy
   restrictions. `XrayConfigBuilder` remains the enforcement point.
+- Realm uses default TLS; custom `tlsConfig` is blocked until its trust settings
+  participate in typed validation and subscription security review.

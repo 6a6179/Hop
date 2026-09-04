@@ -108,6 +108,16 @@ final class ProxyLinkParserTests: XCTestCase {
         }
     }
 
+    func testParsesPlainShadowsocksUserInfoAndLegacyIPv6WithAtInPassword() throws {
+        let plain = try parse("ss://2022-blake3-aes-128-gcm:p%3Aa%40s%2Fs@ss.example.net:8388")
+        XCTAssertEqual(plain.options, .shadowsocks(ShadowsocksOptions(method: "2022-blake3-aes-128-gcm", password: "p:a@s/s")))
+
+        let legacy = try parse("ss://\("aes-128-gcm:p@ss@[2001:4860:4860::8888]:8388".base64Encoded())")
+        XCTAssertEqual(legacy.endpoint.host, "[2001:4860:4860::8888]")
+        XCTAssertEqual(legacy.endpoint.port, 8388)
+        XCTAssertEqual(legacy.options, .shadowsocks(ShadowsocksOptions(method: "aes-128-gcm", password: "p@ss")))
+    }
+
     func testParsesClassicVMessBase64JSON() throws {
         let vmessJSON = """
         {

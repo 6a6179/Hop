@@ -7,6 +7,59 @@ import XCTest
 final class ImportSecurityTests: XCTestCase {
     private let importService = ProxyImportService()
 
+    func testConfigurationBoundsAggregateExpandedGroupMembers() throws {
+        let nodeCount = 100
+        let groupCount = ImportPolicy.maxImportedGroupMembers / nodeCount + 1
+        let nodes = (0 ..< nodeCount).map { "Match\($0) = trojan, edge.example.net, 443, password=secret" }
+        let groups = (0 ..< groupCount).map { "Group\($0) = url-test, policy-regex-filter=Match" }
+        let result = try importService.importText((["[Proxy]"] + nodes + ["[Proxy Group]"] + groups).joined(separator: "\n"))
+
+        XCTAssertEqual(result.profiles.count, nodeCount)
+        XCTAssertEqual(result.groups.reduce(0) { $0 + $1.members.count }, ImportPolicy.maxImportedGroupMembers)
+        XCTAssertTrue(result.groups.allSatisfy { $0.members.count == nodeCount }, "Reject whole groups rather than silently changing their routing")
+        XCTAssertEqual(result.groups.count, groupCount - 1)
+        XCTAssertTrue(result.warnings.contains { $0.message.contains("group member limit exceeded") })
+    }
+
+    func testReservedIPv4RangesDoNotBlockAdjacentPublicSubnets() {
+        for address in ["192.0.0.1", "192.0.2.1", "198.51.100.1", "203.0.113.1"] {
+            XCTAssertTrue(ImportPolicy.isDisallowedRemoteHost(address), address)
+        }
+        for address in ["192.0.1.1", "192.0.3.1", "198.51.99.1", "198.51.101.1", "203.0.112.1", "203.0.114.1"] {
+            XCTAssertFalse(ImportPolicy.isDisallowedRemoteHost(address), address)
+            XCTAssertTrue(ImportPolicy.isPublicIPAddressLiteral(address), address)
+        }
+    }
+
+    func testImplicitTLSLinksPreserveVerificationOptionsAndInsecureGate() throws {
+        for scheme in ["trojan", "hysteria2", "hy2", "https", "socks5+tls"] {
+            let result = try importService.importText(
+                "\(scheme)://secret@edge.example.net:443?pcs=PIN&vcn=verify.example.net&minver=1.3&insecure=1",
+            )
+            let tls = try XCTUnwrap(result.profiles.first?.security.tls, scheme)
+            XCTAssertEqual(tls.pinnedPeerCertSHA256, "PIN", scheme)
+            XCTAssertEqual(tls.verifyPeerCertByName, "verify.example.net", scheme)
+            XCTAssertEqual(tls.minVersion, "1.3", scheme)
+            XCTAssertTrue(tls.allowInsecure, scheme)
+            XCTAssertFalse(result.insecureTLSProfileNames.isEmpty, scheme)
+        }
+    }
+
+    func testImplicitTLSConfigurationPreservesVerificationOptionsAndInsecureGate() throws {
+        for type in ["trojan", "hysteria", "hysteria2", "https", "socks5-tls"] {
+            let result = try importService.importText("""
+            [Proxy]
+            Node = \(type), edge.example.net, 443, password=secret, pcs=PIN, vcn=verify.example.net, minver=1.3, skip-cert-verify=true
+            """)
+            let tls = try XCTUnwrap(result.profiles.first?.security.tls, type)
+            XCTAssertEqual(tls.pinnedPeerCertSHA256, "PIN", type)
+            XCTAssertEqual(tls.verifyPeerCertByName, "verify.example.net", type)
+            XCTAssertEqual(tls.minVersion, "1.3", type)
+            XCTAssertTrue(tls.allowInsecure, type)
+            XCTAssertFalse(result.insecureTLSProfileNames.isEmpty, type)
+        }
+    }
+
     // MARK: - Subscription URL policy (findings 1, 10)
 
     func testRejectsCleartextSubscriptionURL() async throws {
@@ -304,6 +357,23 @@ final class ImportSecurityTests: XCTestCase {
         XCTAssertFalse(conf.contains("super-secret-pass"))
         XCTAssertFalse(conf.contains("de.example.net"))
         XCTAssertTrue(conf.contains("Frankfurt"))
+    }
+
+    func testRedactionFullyRedactsLinesWithoutASeparator() {
+        // A malformed line with no "=" has no safe name prefix — keeping any of
+        // it could log the entire credential.
+        XCTAssertEqual(
+            ImportPolicy.redactForLog("PrivateKey wOBz9beONhFZ0EMYVzXRnCg1vLWSXpx0"),
+            "[redacted]",
+        )
+        let colonSeparated = ImportPolicy.redactForLog("PrivateKey:wOBz9beONhFZ0EMYVzXRnCg1vLWSXpx0")
+        XCTAssertFalse(colonSeparated.contains("wOBz9beONhFZ0EMYVzXRnCg1vLWSXpx0"))
+    }
+
+    func testRedactionDoesNotUseCredentialsAfterAnEmptyName() {
+        for line in ["= secret-token", "==secret-token", " \t= secret-token"] {
+            XCTAssertEqual(ImportPolicy.redactForLog(line), "[redacted]")
+        }
     }
 
     func testFailedLinkParseWarningIsRedacted() throws {

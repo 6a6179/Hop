@@ -15,10 +15,12 @@ final class TunnelController {
 
     private let sharedConfigStore = SharedTunnelConfigurationStore()
     private let sharedLogStore: SharedTunnelLogStore
-    private let secretStore = SecretStore.shared
+    private let secretStore = SecretStore.runtime
     @ObservationIgnored private var diagnosticsTask: Task<Void, Never>?
     private var manager: NETunnelProviderManager?
     private var statusObserver: NSObjectProtocol?
+    private var statusObservationID = UUID()
+    private var statusRefreshID = UUID()
     private var importedExtensionLogLines: Set<String> = []
     private var lastObservedStatus: NEVPNStatus?
     private var startInProgress = false
@@ -35,6 +37,28 @@ final class TunnelController {
         self.requiresLegacyExtensionLogPurge = requiresLegacyExtensionLogPurge
     }
 
+    /// Inspect the installed VPN without creating or saving a configuration.
+    func refreshStatus(
+        loadManagers: @MainActor () async throws -> [NETunnelProviderManager] = {
+            try await NETunnelProviderManager.loadAllFromPreferences()
+        },
+    ) async {
+        guard !startInProgress, state != .disconnecting else { return }
+        let refreshID = UUID()
+        statusRefreshID = refreshID
+        do {
+            let managers = try await loadManagers()
+            // A newer refresh or manual connection action wins this round-trip.
+            guard statusRefreshID == refreshID, !Task.isCancelled else { return }
+            manager = Self.existingManager(in: managers)
+            observeStatus(for: manager?.connection)
+            updateState(from: manager?.connection.status ?? .disconnected, source: "saved VPN")
+        } catch {
+            guard statusRefreshID == refreshID, !Task.isCancelled else { return }
+            appendLog("Unable to read VPN status: \(error.diagnosticDescription)")
+        }
+    }
+
     func connect(
         target: OutboundTarget,
         profiles: [ProxyProfile],
@@ -46,6 +70,18 @@ final class TunnelController {
         guard !startInProgress else {
             appendLog("Connect ignored: a tunnel start is already in progress")
             return
+        }
+        let actionID = UUID()
+        statusRefreshID = actionID
+        // The saved connection can still emit old status changes while the
+        // new configuration is being validated. Observe again at launch.
+        observeStatus(for: nil)
+        defer {
+            // Preflight can fail before launch installs the new observer.
+            // Do not leave an existing VPN unobserved, or rebind over a newer action.
+            if statusRefreshID == actionID, statusObserver == nil {
+                observeStatus(for: manager?.connection)
+            }
         }
         diagnosticsTask?.cancel()
         importedExtensionLogLines.removeAll()
@@ -60,12 +96,15 @@ final class TunnelController {
         appendLog("Shared container: \(RuntimeEnvironment.sharedContainerURL.path)")
         appendLog("Tunnel extension bundle ID: \(RuntimeEnvironment.tunnelProviderBundleIdentifier)")
         if !RuntimeEnvironment.tunnelExtensionIsEmbedded {
-            appendLog("No .appex bundle exists inside Hop.app/PlugIns — the installer or signer stripped the tunnel extension, so iOS has nothing to launch. Reinstall with app extensions included.")
+            appendLog("Missing tunnel extension in Hop.app/PlugIns. Reinstall with app extensions included.")
         }
 
         let useInlineResolvedConfig = RuntimeEnvironment.usesInlineResolvedTunnelConfiguration
         if useInlineResolvedConfig {
-            appendLog("Shared App Group with HopTunnel.appex is not confirmed; using one-shot inline tunnel config. If startup still disconnects immediately, re-sign Hop.app and HopTunnel.appex with the Packet Tunnel entitlement.")
+            appendLog("Shared App Group unconfirmed; using one-shot config. If startup fails, re-sign Hop.app and HopTunnel.appex with Packet Tunnel enabled.")
+            if settings.connectOnDemand {
+                appendLog("On-demand disabled: automatic restarts cannot reuse one-shot config.")
+            }
         } else {
             do {
                 try RuntimeEnvironment.requireAppGroupAccess()
@@ -115,13 +154,23 @@ final class TunnelController {
                 return
             }
 
+            // A failed/ambiguous save can leave the cached manager mutated.
+            // Only persisted preferences may decide which snapshots are live.
+            let existingManager = try await loadManager(reload: true)
+            guard startInProgress, statusRefreshID == actionID else { return }
+            let existingConfiguration = (existingManager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+            let previousNonce = existingConfiguration?["secretNonce"] as? String
+            let retainedNonces = Set([previousNonce, existingConfiguration?["previousSecretNonce"] as? String].compactMap(\.self))
             let secretNonce = UUID().uuidString
+            let configURL = sharedConfigStore.snapshotURL(nonce: secretNonce)
             let inlineConfigContent: String?
+            let preparation: SharedTunnelConfigPreparation?
             if useInlineResolvedConfig {
                 // This fallback is intentionally one-shot: the extension cannot
                 // read the app-only config container on a later OS restart, so
                 // avoid generating and persisting an unusable tokenized copy.
                 inlineConfigContent = resolvedConfig
+                preparation = nil
             } else {
                 let configContent = try await Task.detached(priority: .userInitiated) {
                     try buildSnapshot.build(tokenizingSecretsWith: secretNonce)
@@ -131,7 +180,7 @@ final class TunnelController {
                     return
                 }
 
-                let preparation = SharedTunnelConfigPreparation(
+                let snapshot = SharedTunnelConfigPreparation(
                     config: configContent,
                     nonce: secretNonce,
                     profiles: profiles,
@@ -139,19 +188,33 @@ final class TunnelController {
                     configStore: sharedConfigStore,
                 )
                 try await Task.detached(priority: .userInitiated) {
-                    try preparation.write()
+                    try snapshot.write(keeping: retainedNonces)
                 }.value
                 guard startInProgress else {
                     // No manager or tunnel is launched for this nonce. The file
                     // contains references rather than plaintext credentials,
-                    // and a later connect atomically replaces it.
+                    // and the next connect prunes this abandoned snapshot.
                     appendLog("Tunnel start cancelled during shared config preparation")
                     return
                 }
                 inlineConfigContent = nil
+                preparation = snapshot
             }
 
-            let manager = try await configuredManager(secretNonce: secretNonce, onDemand: settings.connectOnDemand, killSwitch: settings.killSwitch)
+            let manager = try await configuredManager(
+                secretNonce: secretNonce,
+                onDemand: settings.connectOnDemand,
+                killSwitch: settings.killSwitch,
+                usesInlineResolvedConfig: useInlineResolvedConfig,
+                configURL: configURL,
+                previousNonce: previousNonce,
+            )
+            if let preparation {
+                let installedNonces = Set([secretNonce, previousNonce].compactMap(\.self))
+                try await Task.detached(priority: .utility) {
+                    try preparation.pruneSnapshots(keeping: installedNonces)
+                }.value
+            }
             // The manager round-trip suspends; a disconnect() issued meanwhile
             // cleared `startInProgress`, and starting anyway would override the
             // user's explicit stop with a stale connect.
@@ -173,7 +236,7 @@ final class TunnelController {
                 startOptions["configContent"] = inlineConfigContent as NSString
                 startOptions["configSecrets"] = "resolved" as NSString
             } else {
-                startOptions["configPath"] = RuntimeEnvironment.configFileURL.path as NSString
+                startOptions["configPath"] = configURL.path as NSString
             }
             try manager.connection.startVPNTunnel(options: startOptions)
             appendLog("startVPNTunnel returned; current status is \(manager.connection.status.displayName)")
@@ -217,6 +280,7 @@ final class TunnelController {
     }
 
     func disconnect() async {
+        statusRefreshID = UUID()
         guard state.isConnected || state == .connecting else {
             state = .disconnected
             // A failed session can leave the on-demand rule armed (the start
@@ -239,6 +303,7 @@ final class TunnelController {
                 try await save(manager)
                 appendLog("On-demand connect disabled until the next manual connect")
             }
+            observeStatus(for: manager.connection)
             manager.connection.stopVPNTunnel()
             await syncExtensionLogs()
             updateState(from: manager.connection.status, source: "disconnect")
@@ -385,7 +450,7 @@ final class TunnelController {
         }
     }
 
-    private func configuredManager(secretNonce: String, onDemand: Bool, killSwitch: Bool) async throws -> NETunnelProviderManager {
+    private func configuredManager(secretNonce: String, onDemand: Bool, killSwitch: Bool, usesInlineResolvedConfig: Bool, configURL: URL, previousNonce: String?) async throws -> NETunnelProviderManager {
         let manager = try await loadManager()
         let tunnelProtocol = NETunnelProviderProtocol()
         tunnelProtocol.providerBundleIdentifier = RuntimeEnvironment.tunnelProviderBundleIdentifier
@@ -397,13 +462,16 @@ final class TunnelController {
         // kill-switch flag is mirrored here so an OS-initiated restart preserves
         // it without the app's start options.
         tunnelProtocol.providerConfiguration = [
-            "configPath": RuntimeEnvironment.configFileURL.path,
+            "configPath": configURL.path,
             "appGroup": RuntimeEnvironment.appGroupIdentifier,
             "secretNonce": secretNonce,
             "includeAllNetworks": killSwitch ? "true" : "false",
             "dnsServers": XrayTunnelNetworkDefaults.dnsServers.joined(separator: ","),
             "tunnelMTU": String(XrayTunnelNetworkDefaults.mtu),
         ]
+        // Keep the previous installed snapshot while an in-flight OS restart
+        // can still be resolving it. Older/abandoned snapshots are pruned.
+        tunnelProtocol.providerConfiguration?["previousSecretNonce"] = previousNonce
         // Kill switch: when on, iOS forces every flow through the tunnel and
         // drops traffic if the extension dies (fail-closed) instead of leaking
         // to the default interface. Only diverge from system defaults when it's
@@ -421,8 +489,7 @@ final class TunnelController {
         // and restarts it if the extension stops. A manual disconnect clears
         // the flag first (see `disconnect`), so the user's explicit stop is
         // never fought by the system.
-        manager.isOnDemandEnabled = onDemand
-        manager.onDemandRules = onDemand ? [NEOnDemandRuleConnect()] : nil
+        Self.configureOnDemand(manager, requested: onDemand, usesInlineResolvedConfig: usesInlineResolvedConfig)
         try await save(manager)
         try await manager.loadFromPreferences()
         self.manager = manager
@@ -431,14 +498,32 @@ final class TunnelController {
         return manager
     }
 
-    private func loadManager() async throws -> NETunnelProviderManager {
-        if let manager {
+    static func configureOnDemand(_ manager: NETunnelProviderManager, requested: Bool, usesInlineResolvedConfig: Bool) {
+        let enabled = requested && !usesInlineResolvedConfig
+        manager.isOnDemandEnabled = enabled
+        manager.onDemandRules = enabled ? [NEOnDemandRuleConnect()] : nil
+    }
+
+    private static func existingManager(in managers: [NETunnelProviderManager]) -> NETunnelProviderManager? {
+        managers.first {
+            ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier
+                == RuntimeEnvironment.tunnelProviderBundleIdentifier
+        }
+    }
+
+    func loadManager(
+        reload: Bool = false,
+        loadManagers: @MainActor () async throws -> [NETunnelProviderManager] = {
+            try await NETunnelProviderManager.loadAllFromPreferences()
+        },
+    ) async throws -> NETunnelProviderManager {
+        if !reload, let manager {
             return manager
         }
 
-        let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+        let managers = try await loadManagers()
         appendLog("Loaded \(managers.count) tunnel manager(s) from preferences")
-        let manager = managers.first { $0.localizedDescription == "Hop" } ?? NETunnelProviderManager()
+        let manager = Self.existingManager(in: managers) ?? NETunnelProviderManager()
         self.manager = manager
         return manager
     }
@@ -455,10 +540,14 @@ final class TunnelController {
         }
     }
 
-    private func observeStatus(for connection: NEVPNConnection) {
+    private func observeStatus(for connection: NEVPNConnection?) {
         if let statusObserver {
             NotificationCenter.default.removeObserver(statusObserver)
+            self.statusObserver = nil
         }
+        let observationID = UUID()
+        statusObservationID = observationID
+        guard let connection else { return }
         statusObserver = NotificationCenter.default.addObserver(
             forName: .NEVPNStatusDidChange,
             object: connection,
@@ -468,8 +557,9 @@ final class TunnelController {
                 return
             }
             Task { @MainActor in
-                await self?.syncExtensionLogs()
-                self?.updateState(from: connection.status, source: "status notification")
+                guard let controller = self, controller.statusObservationID == observationID else { return }
+                controller.updateState(from: connection.status, source: "status notification")
+                await controller.syncExtensionLogs()
             }
         }
     }
@@ -527,8 +617,8 @@ final class TunnelController {
                 startInProgress = false
                 if !loggedStartupStop {
                     loggedStartupStop = true
-                    appendLog("Tunnel stopped before connecting. If this happened immediately, the packet tunnel extension failed during startup.")
-                    appendLog("If no Extension lines appear here, HopTunnel.appex may not have reached shared-log setup. Check the installed-bundle and App Group diagnostics above, then remove the saved Hop VPN and reinstall the latest build. If it persists, inspect the final re-signed .appex and its own provisioning profile.")
+                    appendLog("Tunnel stopped before connecting; an immediate stop suggests extension startup failure.")
+                    appendLog("No Extension logs? Check bundle/App Group diagnostics, remove the saved VPN, and reinstall. If it persists, check HopTunnel.appex signing and provisioning.")
                     logLastDisconnectError()
                     // A startup failure repeats identically on every on-demand
                     // relaunch; disarm so iOS doesn't loop a broken config.
@@ -601,21 +691,37 @@ private struct SharedTunnelConfigPreparation: @unchecked Sendable {
     let secretStore: SecretStore
     let configStore: SharedTunnelConfigurationStore
 
-    func write() throws {
-        var missingKeys = SecretResolver.referencedKeys(in: config, nonce: nonce)
-        for profile in profiles where !missingKeys.isEmpty {
-            for item in profile.keychainSecretItems where missingKeys.remove(item.key) != nil {
-                // Do not skip equal values: writing also repairs legacy items
-                // whose Keychain accessibility class is weaker than required.
-                guard secretStore.setValue(item.value, forKey: item.key) else {
-                    throw TunnelSecretPreparationError.writeFailed
+    func write(keeping existingNonces: Set<String>) throws {
+        // Clean abandoned attempts before staging; a failed cleanup aborts
+        // without accumulating another generation of credentials or files.
+        try pruneSnapshots(keeping: existingNonces)
+        do {
+            var missingKeys = SecretResolver.referencedKeys(in: config, nonce: nonce)
+            let keyPrefix = HopSecret.runtimeKeyPrefix(nonce: nonce)
+            for profile in profiles where !missingKeys.isEmpty {
+                for item in profile.keychainSecretItems where missingKeys.remove(item.key) != nil {
+                    guard secretStore.setValue(item.value, forKey: keyPrefix + item.key) else {
+                        throw TunnelSecretPreparationError.writeFailed
+                    }
                 }
             }
+            guard missingKeys.isEmpty else {
+                throw TunnelSecretPreparationError.missingReference
+            }
+            // A fresh path keeps the installed config/signature usable even
+            // if this write or the following manager save fails.
+            try configStore.writeConfig(config, to: configStore.snapshotURL(nonce: nonce))
+        } catch {
+            try? pruneSnapshots(keeping: existingNonces)
+            throw error
         }
-        guard missingKeys.isEmpty else {
-            throw TunnelSecretPreparationError.missingReference
+    }
+
+    func pruneSnapshots(keeping nonces: Set<String>) throws {
+        try configStore.pruneSnapshots(keeping: nonces)
+        guard secretStore.pruneTunnelSnapshots(keeping: nonces) else {
+            throw TunnelSecretPreparationError.writeFailed
         }
-        try configStore.writeConfig(config)
     }
 }
 
@@ -654,16 +760,16 @@ private extension Error {
     var networkExtensionDiagnosticHint: String? {
         let nsError = self as NSError
         if nsError.domain == "Hop.RuntimeEnvironmentError" || self is RuntimeEnvironmentError {
-            return "Hop.app and HopTunnel.appex must share the selected App Group and keychain access group, and HopTunnel.appex must keep the Packet Tunnel entitlement. Re-sign both bundles with the same groups, then reinstall."
+            return "Re-sign both bundles with matching App Group/keychain groups and Packet Tunnel enabled, then reinstall."
         }
         if nsError.domain == NEVPNConnectionErrorDomain {
             return switch NEVPNConnectionError(rawValue: nsError.code) {
             case .pluginFailed:
-                "iOS launched HopTunnel.appex but it exited during startup — usually a thrown provider error or a crash. Any Extension lines above carry the provider's own reason."
+                "HopTunnel.appex exited during startup. Check Extension logs for the cause."
             case .pluginDisabled:
-                "iOS reports HopTunnel.appex is unavailable or needs an update. Remove the saved Hop VPN, uninstall the old app, then install this newer build and reconnect. If it persists, verify that the final re-signed .appex bundle ID matches the logged provider ID and that its own provisioning profile authorizes Packet Tunnel, the shared App Group, and keychain group."
+                "Tunnel extension unavailable or outdated. Remove the saved Hop VPN and reinstall. If it persists, check the extension's bundle ID and provisioning profile for Packet Tunnel, App Group, and keychain access."
             case .configurationFailed, .configurationNotFound:
-                "The saved VPN configuration is invalid or gone. Toggle the Hop VPN profile in Settings > VPN, or reconnect to rebuild it."
+                "Saved VPN configuration is invalid or missing. Reconnect to rebuild it."
             default:
                 nil
             }
@@ -674,9 +780,9 @@ private extension Error {
 
         return switch nsError.code {
         case 5:
-            "NetworkExtension IPC failed, so iOS could not talk to the tunnel extension. Check that the signer preserved Packet Tunnel + App Group entitlements and embedded HopTunnel.appex."
+            "NetworkExtension IPC failed. Check HopTunnel.appex embedding and Packet Tunnel/App Group entitlements."
         default:
-            "NetworkExtension rejected the tunnel start. Check VPN permission, signing entitlements, App Group access, and the embedded HopTunnel.appex bundle ID."
+            "Tunnel start rejected. Check VPN permission, signing, App Group, and HopTunnel.appex bundle ID."
         }
     }
 }

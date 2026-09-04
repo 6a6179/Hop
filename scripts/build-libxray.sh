@@ -68,7 +68,8 @@ mkdir -p "$bin_dir"
 # Keep the upstream module immutable and pinned, but patch a temporary copy
 # while compiling. Xray's generic gVisor defaults permit multi-megabyte buffers
 # per flow and its current UDP path retains much larger queues than an iOS
-# packet-tunnel process can afford. A fixed private work path plus a relative
+# packet-tunnel process can afford. The patch also gives Go its own TUN
+# descriptor and synchronizes packet-reader shutdown. A fixed path and relative
 # module replacement keeps Go's embedded source/build metadata deterministic.
 module_dir="$(printf '%s\n' "$module_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Dir"])')"
 patch_digest="$(shasum -a 256 "$repo_root/$XRAY_IOS_PATCH" | awk '{print $1}')"
@@ -82,6 +83,7 @@ chmod -R u+w "$patched_module"
 (
   cd "$patched_module"
   git apply --unidiff-zero "$repo_root/$XRAY_IOS_PATCH"
+  GOWORK=off go test -race ./proxy/tun -run '^TestHop' -count=1
 )
 build_bridge="$work_dir/XrayBridge"
 cp -R "$bridge_dir" "$build_bridge"

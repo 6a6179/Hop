@@ -11,6 +11,7 @@ extension ProxyImportService {
         var sawRuleSection = false
         var attemptedInventoryItem = false
         var wasTruncated = false
+        var remainingGroupMembers = ImportPolicy.maxImportedGroupMembers
 
         func parseLine(_ rawLine: Substring) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -34,7 +35,7 @@ extension ProxyImportService {
                 parseProxyLine(line, into: &result)
             case "proxy group":
                 attemptedInventoryItem = true
-                parseProxyGroupLine(line, into: &result)
+                parseProxyGroupLine(line, into: &result, remainingMembers: &remainingGroupMembers)
             case "rule":
                 parseProxyRuleLine(line, into: &result)
             default:
@@ -181,7 +182,7 @@ extension ProxyImportService {
         }
     }
 
-    private func parseProxyGroupLine(_ line: String, into result: inout ImportResult) {
+    private func parseProxyGroupLine(_ line: String, into result: inout ImportResult, remainingMembers: inout Int) {
         let parts = csvParts(line)
         guard let first = parts.first?.split(separator: "=", maxSplits: 1).map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }),
               first.count == 2
@@ -195,7 +196,12 @@ extension ProxyImportService {
         let values = Array(parts.dropFirst())
         let keyed = keyedOptions(values)
         let memberNames = values.filter { !$0.contains("=") }
+        guard memberNames.count <= remainingMembers else {
+            result.warnings.append(ImportWarning(message: "Skipped group \(ImportPolicy.sanitizeImportedName(name)): group member limit exceeded."))
+            return
+        }
         let members = memberNames.map { configurationTarget($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        remainingMembers -= members.count
 
         switch importedType {
         case "select":
@@ -219,9 +225,15 @@ extension ProxyImportService {
                         // even conservative pattern checks miss ambiguous
                         // alternations such as `(a|aa)+$`. Treat the imported
                         // filter as a bounded literal substring instead.
-                        resolvedMembers = result.profiles
+                        resolvedMembers = Array(result.profiles.lazy
                             .filter { $0.name.count <= 256 && $0.name.localizedCaseInsensitiveContains(literalFilter) }
-                            .map { .profile($0.id) }
+                            .prefix(remainingMembers + 1)
+                            .map { .profile($0.id) })
+                        guard resolvedMembers.count <= remainingMembers else {
+                            result.warnings.append(ImportWarning(message: "Skipped group \(ImportPolicy.sanitizeImportedName(name)): group member limit exceeded."))
+                            return
+                        }
+                        remainingMembers -= resolvedMembers.count
                     }
                     groupWarning = "Members matched by literal filter: \(literalFilter)"
                 } else {
@@ -333,7 +345,8 @@ extension ProxyImportService {
             )
         }
 
-        let isTLS = security == "tls" || boolOption(keyedValue(keyed, "tls")) || type == "https" || type == "socks5-tls"
+        let isTLS = security == "tls" || boolOption(keyedValue(keyed, "tls"))
+            || ["https", "socks5-tls", "trojan", "hysteria", "hysteria2"].contains(type)
         guard isTLS else {
             return .none
         }

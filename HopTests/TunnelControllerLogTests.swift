@@ -1,8 +1,126 @@
 @testable import Hop
+import NetworkExtension
 import XCTest
 
 @MainActor
 final class TunnelControllerLogTests: XCTestCase {
+    func testRefreshRestoresSavedVPNWithoutRelyingOnItsDisplayName() async {
+        let controller = TunnelController()
+        let unrelated = StatusTestTunnelManager(status: .disconnected, provider: "other.tunnel")
+        unrelated.localizedDescription = "Hop"
+        let saved = StatusTestTunnelManager(status: .connected)
+        saved.localizedDescription = "Renamed VPN"
+
+        await controller.refreshStatus { [unrelated, saved] }
+        XCTAssertEqual(controller.state, .connected)
+
+        saved.testConnection.currentStatus = .disconnected
+        await controller.refreshStatus { [saved] }
+        XCTAssertEqual(controller.state, .disconnected)
+
+        await controller.refreshStatus { [] }
+        XCTAssertEqual(controller.state, .disconnected)
+    }
+
+    func testPendingStatusRefreshCannotUndoManualDisconnect() async {
+        let controller = TunnelController()
+        let saved = StatusTestTunnelManager(status: .connected)
+
+        await controller.refreshStatus {
+            await controller.disconnect()
+            return [saved]
+        }
+
+        XCTAssertEqual(controller.state, .disconnected)
+    }
+
+    func testFailedPreflightRestoresSavedStatusObserver() async {
+        let logURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: logURL) }
+        let controller = TunnelController(sharedLogStore: SharedTunnelLogStore(url: logURL))
+        let saved = StatusTestTunnelManager(status: .disconnected)
+        await controller.refreshStatus { [saved] }
+        await controller.connect(
+            target: .profile(UUID()),
+            profiles: [],
+            groups: [],
+            routingMode: .rule,
+            rules: [],
+            settings: .defaults,
+        )
+        XCTAssertEqual(controller.state, .failed)
+
+        let changed = expectation(description: "Saved VPN status is still observed after failed validation")
+        controller.onLogsChanged = {
+            if controller.logs.first?.contains("NetworkExtension status: connected") == true {
+                changed.fulfill()
+            }
+        }
+        saved.testConnection.currentStatus = .connected
+        NotificationCenter.default.post(name: .NEVPNStatusDidChange, object: saved.testConnection)
+        let result = await XCTWaiter.fulfillment(of: [changed], timeout: 2)
+        controller.onLogsChanged = nil
+        XCTAssertEqual(result, .completed)
+        XCTAssertEqual(controller.state, .connected)
+    }
+
+    func testNewerStatusRefreshWinsAndDisconnectingSkipsRefresh() async {
+        let controller = TunnelController()
+        let stale = StatusTestTunnelManager(status: .connected)
+        await controller.refreshStatus {
+            await controller.refreshStatus { [] }
+            return [stale]
+        }
+        XCTAssertEqual(controller.state, .disconnected)
+
+        controller.state = .disconnecting
+        await controller.refreshStatus {
+            XCTFail("A foreground refresh must not interfere with a pending disconnect")
+            return [stale]
+        }
+        XCTAssertEqual(controller.state, .disconnecting)
+    }
+
+    func testSnapshotManagerReloadIgnoresUnsavedCachedNoncesAndPropagatesFailure() async throws {
+        let controller = TunnelController()
+        let cached = StatusTestTunnelManager(status: .disconnected)
+        await controller.refreshStatus { [cached] }
+        // Two failed saves can replace both cached retention slots even while
+        // the system still points at the original, working snapshot.
+        cached.protocolConfiguration = NETunnelProviderProtocol()
+        (cached.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration = [
+            "secretNonce": "unsaved-second",
+            "previousSecretNonce": "unsaved-first",
+        ]
+        let readError = NSError(domain: "test.preferences", code: 1)
+        do {
+            _ = try await controller.loadManager(reload: true) { throw readError }
+            XCTFail("A failed authoritative read must abort rather than use cached retention slots")
+        } catch {
+            XCTAssertEqual(error as NSError, readError)
+        }
+
+        let persisted = StatusTestTunnelManager(status: .disconnected)
+        (persisted.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration = ["secretNonce": "installed"]
+        let reloaded = try await controller.loadManager(reload: true) { [persisted] }
+        XCTAssertTrue(reloaded === persisted)
+        XCTAssertEqual((reloaded.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["secretNonce"] as? String, "installed")
+    }
+
+    func testInlineConfigurationDisablesOnDemandWithoutChangingKillSwitch() {
+        let manager = NETunnelProviderManager()
+        let tunnelProtocol = NETunnelProviderProtocol()
+        tunnelProtocol.includeAllNetworks = true
+        manager.protocolConfiguration = tunnelProtocol
+
+        for (requested, inline, enabled) in [(true, false, true), (true, true, false), (false, false, false), (false, true, false)] {
+            TunnelController.configureOnDemand(manager, requested: requested, usesInlineResolvedConfig: inline)
+            XCTAssertEqual(manager.isOnDemandEnabled, enabled)
+            XCTAssertEqual(manager.onDemandRules?.count ?? 0, enabled ? 1 : 0)
+            XCTAssertTrue(manager.protocolConfiguration?.includeAllNetworks == true)
+        }
+    }
+
     // MARK: - appendLog newline collapse
 
     func testAppendLogCollapsesNewlinesToSpaces() {
@@ -39,7 +157,7 @@ final class TunnelControllerLogTests: XCTestCase {
 
         XCTAssertFalse(error.localizedDescription.contains(marker))
         XCTAssertTrue(error.localizedDescription.contains("invalid_config"))
-        XCTAssertTrue(error.localizedDescription.contains("Review the selected profile's settings"))
+        XCTAssertTrue(error.localizedDescription.contains("Review node settings"))
         XCTAssertFalse(controller.logs.joined().contains(marker))
         XCTAssertTrue(controller.logs.joined().contains("invalid_config"))
 
@@ -101,9 +219,9 @@ final class TunnelControllerLogTests: XCTestCase {
         controller.appendLastDisconnectError(error)
 
         let entries = controller.logs.joined(separator: "\n")
-        XCTAssertTrue(entries.contains("unavailable or needs an update"))
+        XCTAssertTrue(entries.contains("unavailable or outdated"))
         XCTAssertTrue(entries.contains("Remove the saved Hop VPN"))
-        XCTAssertTrue(entries.contains("own provisioning profile"))
+        XCTAssertTrue(entries.contains("extension's bundle ID and provisioning profile"))
         XCTAssertFalse(entries.contains("missing the Packet Tunnel entitlement"))
     }
 
@@ -219,5 +337,29 @@ final class TunnelControllerLogTests: XCTestCase {
         XCTAssertTrue(controller.logs[0].contains("batch2"))
         XCTAssertTrue(controller.logs[1].contains("batch1"))
         XCTAssertTrue(controller.logs[2].contains("existing"))
+    }
+}
+
+private final class StatusTestConnection: NEVPNConnection, @unchecked Sendable {
+    var currentStatus: NEVPNStatus = .disconnected
+
+    override var status: NEVPNStatus {
+        currentStatus
+    }
+}
+
+private final class StatusTestTunnelManager: NETunnelProviderManager, @unchecked Sendable {
+    let testConnection = StatusTestConnection()
+
+    override var connection: NEVPNConnection {
+        testConnection
+    }
+
+    init(status: NEVPNStatus, provider: String = RuntimeEnvironment.tunnelProviderBundleIdentifier) {
+        super.init()
+        testConnection.currentStatus = status
+        let tunnelProtocol = NETunnelProviderProtocol()
+        tunnelProtocol.providerBundleIdentifier = provider
+        protocolConfiguration = tunnelProtocol
     }
 }

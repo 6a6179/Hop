@@ -45,16 +45,8 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         }
     }
 
-    var vlessOptions: VLESSOptions? {
-        guard case let .vless(options) = options else {
-            return nil
-        }
-        return options
-    }
-
-    /// The config builder only emits Hysteria2 obfuscation when both the type
-    /// and password are present; an obfs type without a password is silently
-    /// unusable at runtime, so it surfaces as a warning instead.
+    /// Import can preserve an incomplete node for editing; the builder rejects
+    /// missing obfuscation credentials rather than silently dropping the layer.
     var hysteria2ObfsRuntimeWarning: String? {
         guard case let .hysteria2(options) = options,
               let obfs = options.obfs, !obfs.isEmpty,
@@ -62,7 +54,7 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         else {
             return nil
         }
-        return "Hysteria2 \(obfs) obfuscation has no obfs password, so it is left out of the generated config."
+        return "Hysteria2 \(obfs) needs an obfuscation password before connecting."
     }
 
     var importRuntimeWarnings: [String] {

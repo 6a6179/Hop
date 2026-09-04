@@ -16,9 +16,8 @@ import Foundation
 /// - Non-2xx responses fail with `subscriptionUnavailable`.
 ///
 /// One instance serves one fetch. State is guarded by a lock: delegate
-/// callbacks arrive on the session's serial delegate queue while the
-/// continuation is installed from the calling task — that handoff is the only
-/// concurrency in this type, which is why `@unchecked Sendable` is sound here.
+/// callbacks, continuation registration, and task cancellation may run on
+/// different queues. All shared state stays behind the lock.
 final class SubscriptionFetcher: NSObject, @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Data, Error>?
@@ -26,14 +25,28 @@ final class SubscriptionFetcher: NSObject, @unchecked Sendable {
     private var failure: Error?
 
     static func fetch(_ request: URLRequest, configuration: URLSessionConfiguration = .ephemeral) async throws -> Data {
+        try Task.checkCancellation()
         let fetcher = SubscriptionFetcher()
         let session = URLSession(configuration: configuration, delegate: fetcher, delegateQueue: nil)
+        let task = session.dataTask(with: request)
         defer { session.finishTasksAndInvalidate() }
-        return try await withCheckedThrowingContinuation { continuation in
-            fetcher.lock.lock()
-            fetcher.continuation = continuation
-            fetcher.lock.unlock()
-            session.dataTask(with: request).resume()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                fetcher.lock.lock()
+                // Cancellation may complete the URLSession task before this
+                // continuation is installed. Keep that outcome instead of waiting forever.
+                if let failure = fetcher.failure {
+                    fetcher.lock.unlock()
+                    continuation.resume(throwing: failure)
+                    return
+                }
+                fetcher.continuation = continuation
+                fetcher.lock.unlock()
+                task.resume()
+            }
+        } onCancel: {
+            fetcher.fail(CancellationError())
+            task.cancel()
         }
     }
 

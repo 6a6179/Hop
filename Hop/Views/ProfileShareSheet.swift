@@ -30,13 +30,13 @@ struct ProfileShareQRSheet: View {
                         .accessibilityLabel("QR code for \(profileName)")
                 } else {
                     ContentUnavailableView(
-                        "Could Not Generate Code",
+                        "QR Code Unavailable",
                         systemImage: "qrcode",
-                        description: Text("The share link is too long to encode as a QR code."),
+                        description: Text("Link too long. Share the link instead."),
                     )
                 }
 
-                Label("This code contains the node's credentials. Anyone who scans it can use — and inspect — this node.", systemImage: "exclamationmark.triangle")
+                Label("Contains credentials. Anyone scanning this code can use and inspect the node.", systemImage: "exclamationmark.triangle")
                     .font(.footnote)
                     .foregroundStyle(.orange)
                     .padding(12)

@@ -26,14 +26,69 @@ index 8584616..a0dc207 100644
 +	// Keep receive auto-tuning disabled in addition to the fixed range below.
 +	mOpt := tcpip.TCPModerateReceiveBufferOption(false)
 diff --git a/proxy/tun/tun_darwin.go b/proxy/tun/tun_darwin.go
-index fdaafd3..375701b 100644
 --- a/proxy/tun/tun_darwin.go
 +++ b/proxy/tun/tun_darwin.go
-@@ -227,0 +228,3 @@ func (t *DarwinTun) ReadPacket() (byte, *stack.PacketBuffer, error) {
+@@ -45,4 +45,4 @@
+-	tunFile *os.File
+-	options *Config
+-	tunFd   int
+-	ownsFd  bool // true for macOS (we created the fd), false for iOS (fd from system)
++	tunFile       *os.File
++	options       *Config
++	tunFd         int
++	ownsInterface bool // true for macOS route setup; tunFile is always owned
+@@ -69,0 +70,7 @@
++		// os.File owns its descriptor, including closing it from its finalizer.
++		// Duplicate the system descriptor so Close can also wake blocked reads
++		// without closing NetworkExtension's descriptor.
++		fd, err = unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 3)
++		if err != nil {
++			return nil, err
++		}
+@@ -70,0 +78 @@
++			_ = unix.Close(fd)
+@@ -75,4 +83,4 @@
+-			tunFile: os.NewFile(uintptr(fd), "utun"),
+-			options: options,
+-			tunFd:   fd,
+-			ownsFd:  false,
++			tunFile:       os.NewFile(uintptr(fd), "utun"),
++			options:       options,
++			tunFd:         fd,
++			ownsInterface: false,
+@@ -95,4 +103,4 @@
+-		tunFile: tunFile,
+-		options: options,
+-		tunFd:   int(tunFile.Fd()),
+-		ownsFd:  true,
++		tunFile:       tunFile,
++		options:       options,
++		tunFd:         int(tunFile.Fd()),
++		ownsInterface: true,
+@@ -103 +111 @@
+-	if !t.ownsFd {
++	if !t.ownsInterface {
+@@ -129,6 +137,9 @@
+-	routeErr := t.unsetSystemRoutes()
+-	if t.ownsFd {
+-		return xerrors.Combine(routeErr, t.tunFile.Close())
+-	}
+-	// iOS: don't close the fd, it's owned by NetworkExtension
+-	return routeErr
++	var routeErr error
++	if t.ownsInterface {
++		routeErr = t.unsetSystemRoutes()
++	}
++	closeErr := t.tunFile.Close()
++	if errors.Is(closeErr, os.ErrClosed) {
++		closeErr = nil
++	}
++	return xerrors.Combine(routeErr, closeErr)
+@@ -227,0 +239,3 @@
 +	// MakeWithData owns a copy, so retaining the Xray buffer doubles every
 +	// queued packet's storage until gVisor releases it.
 +	b.Release()
-@@ -231,3 +233,0 @@ func (t *DarwinTun) ReadPacket() (byte, *stack.PacketBuffer, error) {
+@@ -231,3 +244,0 @@
 -		OnRelease: func() {
 -			b.Release()
 -		},
@@ -183,3 +238,237 @@ index 175998e..b93285a 100644
 @@ -23 +23 @@ func fetchInput(_ context.Context, input io.Reader, reader PacketReader, conn *C
 -	cache := make(chan *buf.Buffer, 1024)
 +	cache := make(chan *buf.Buffer, 64)
+diff --git a/proxy/tun/stack_gvisor_endpoint.go b/proxy/tun/stack_gvisor_endpoint.go
+--- a/proxy/tun/stack_gvisor_endpoint.go
++++ b/proxy/tun/stack_gvisor_endpoint.go
+@@ -5,0 +6 @@
++	"sync"
+@@ -25,0 +27 @@
++	dispatcherMu     sync.Mutex
+@@ -53,0 +56,2 @@
++	e.dispatcherMu.Lock()
++	defer e.dispatcherMu.Unlock()
+@@ -60,0 +65 @@
++		e.dispatcherCancel = cancel
+@@ -62 +66,0 @@
+-		e.dispatcherCancel = cancel
+@@ -66,0 +71,2 @@
++	e.dispatcherMu.Lock()
++	defer e.dispatcherMu.Unlock()
+@@ -86,4 +92 @@
+-	if e.dispatcherCancel != nil {
+-		e.dispatcherCancel()
+-		e.dispatcherCancel = nil
+-	}
++	e.Attach(nil)
+@@ -129 +132,7 @@
+-				e.Attach(nil)
++				e.dispatcherMu.Lock()
++				// A canceled reader must not detach its replacement.
++				if ctx.Err() == nil {
++					e.dispatcherCancel()
++					e.dispatcherCancel = nil
++				}
++				e.dispatcherMu.Unlock()
+diff --git a/proxy/tun/tun_darwin_hop_test.go b/proxy/tun/tun_darwin_hop_test.go
+new file mode 100644
+--- /dev/null
++++ b/proxy/tun/tun_darwin_hop_test.go
+@@ -0,0 +1,109 @@
++//go:build darwin
++
++package tun
++
++import (
++	"errors"
++	"os"
++	"runtime"
++	"strconv"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/platform"
++	"golang.org/x/sys/unix"
++)
++
++func TestHopBorrowedTunLifetime(t *testing.T) {
++	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer unix.Close(fds[0])
++	defer unix.Close(fds[1])
++	t.Setenv(platform.TunFdKey, strconv.Itoa(fds[0]))
++
++	// Reuse the same system-owned descriptor across core restarts.
++	for i := 0; i < 3; i++ {
++		device, err := NewTun(&Config{MTU: 1280})
++		if err != nil {
++			t.Fatal(err)
++		}
++		tun := device.(*DarwinTun)
++		ownedFD := tun.tunFd
++		if ownedFD == fds[0] {
++			_ = tun.Close()
++			runtime.KeepAlive(tun)
++			t.Fatal("wrapped the borrowed descriptor instead of an owned duplicate")
++		}
++		flags, err := unix.FcntlInt(uintptr(ownedFD), unix.F_GETFD, 0)
++		if err != nil || flags&unix.FD_CLOEXEC == 0 {
++			t.Fatalf("duplicate is not close-on-exec: flags=%d err=%v", flags, err)
++		}
++		if err := tun.Start(); err != nil {
++			t.Fatalf("borrowed interface must not configure system routes: %v", err)
++		}
++		if _, err := unix.Write(fds[1], []byte{0, 0, 0, unix.AF_INET, 0x45, 0, 0, 0}); err != nil {
++			t.Fatal(err)
++		}
++		version, packet, err := tun.ReadPacket()
++		if err != nil || packet == nil || version != 4 {
++			t.Fatalf("restarted TUN cannot read: version=%d err=%v", version, err)
++		}
++		packet.DecRef()
++
++		readDone := make(chan error, 1)
++		go func() {
++			_, packet, err := tun.ReadPacket()
++			if packet != nil {
++				packet.DecRef()
++			}
++			readDone <- err
++		}()
++		select {
++		case err := <-readDone:
++			t.Fatalf("empty socket read returned before close: %v", err)
++		case <-time.After(20 * time.Millisecond):
++		}
++		if err := tun.Close(); err != nil {
++			t.Fatal(err)
++		}
++		select {
++		case err := <-readDone:
++			if !errors.Is(err, os.ErrClosed) {
++				t.Fatalf("read after close: %v", err)
++			}
++		case <-time.After(2 * time.Second):
++			t.Fatal("Close did not wake the pending packet read")
++		}
++		if _, err := unix.FcntlInt(uintptr(ownedFD), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
++			t.Fatalf("owned descriptor leaked: %v", err)
++		}
++
++		// Reuse the closed number: neither repeated Close nor GC may close it.
++		if err := unix.Dup2(fds[0], ownedFD); err != nil {
++			t.Fatal(err)
++		}
++		if err := tun.Close(); err != nil {
++			t.Fatal(err)
++		}
++		tun, device = nil, nil
++		for j := 0; j < 3; j++ {
++			runtime.GC()
++		}
++		_, originalErr := unix.FcntlInt(uintptr(fds[0]), unix.F_GETFD, 0)
++		_, reusedErr := unix.FcntlInt(uintptr(ownedFD), unix.F_GETFD, 0)
++		_ = unix.Close(ownedFD)
++		if originalErr != nil || reusedErr != nil {
++			t.Fatalf("closed an unowned descriptor: original=%v reused=%v", originalErr, reusedErr)
++		}
++	}
++}
++
++func TestHopBorrowedTunRejectsInvalidDescriptor(t *testing.T) {
++	t.Setenv(platform.TunFdKey, "-1")
++	if device, err := NewTun(&Config{MTU: 1280}); err == nil {
++		_ = device.Close()
++		t.Fatal("accepted an invalid borrowed descriptor")
++	}
++}
+diff --git a/proxy/tun/stack_gvisor_endpoint_hop_test.go b/proxy/tun/stack_gvisor_endpoint_hop_test.go
+new file mode 100644
+--- /dev/null
++++ b/proxy/tun/stack_gvisor_endpoint_hop_test.go
+@@ -0,0 +1,83 @@
++package tun
++
++import (
++	"errors"
++	"sync"
++	"testing"
++	"time"
++
++	"gvisor.dev/gvisor/pkg/tcpip"
++	"gvisor.dev/gvisor/pkg/tcpip/stack"
++)
++
++type hopReadDevice struct{ reads chan chan error }
++
++func (d *hopReadDevice) ReadPacket() (byte, *stack.PacketBuffer, error) {
++	result := make(chan error, 1)
++	d.reads <- result
++	return 0, nil, <-result
++}
++func (*hopReadDevice) WritePacket(*stack.PacketBuffer) tcpip.Error { return nil }
++func (*hopReadDevice) Wait()                                       {}
++
++type hopDispatcher struct{}
++
++func (hopDispatcher) DeliverNetworkPacket(tcpip.NetworkProtocolNumber, *stack.PacketBuffer) {}
++func (hopDispatcher) DeliverLinkPacket(tcpip.NetworkProtocolNumber, *stack.PacketBuffer)    {}
++
++func hopRead(t *testing.T, d *hopReadDevice) chan error {
++	t.Helper()
++	select {
++	case result := <-d.reads:
++		return result
++	case <-time.After(time.Second):
++		t.Fatal("dispatcher did not start reading")
++		return nil
++	}
++}
++
++func TestHopLinkEndpointConcurrentCloseAndReadError(t *testing.T) {
++	for i := 0; i < 64; i++ {
++		d := &hopReadDevice{reads: make(chan chan error, 2)}
++		e := &LinkEndpoint{deviceMTU: 1280, device: d}
++		e.Attach(hopDispatcher{})
++		read := hopRead(t, d)
++		var wg sync.WaitGroup
++		wg.Add(3)
++		gate := make(chan struct{})
++		go func() { defer wg.Done(); <-gate; e.Close() }()
++		go func() { defer wg.Done(); <-gate; read <- errors.New("read closed") }()
++		go func() { defer wg.Done(); <-gate; _ = e.IsAttached() }()
++		close(gate)
++		wg.Wait()
++		e.Close()
++		if e.IsAttached() {
++			t.Fatal("closed endpoint is still attached")
++		}
++	}
++	// The fake device can signal its read returning, not the enclosing worker
++	// returning. Let its final error cleanup run under the race detector too.
++	time.Sleep(10 * time.Millisecond)
++}
++
++func TestHopLinkEndpointOldReadErrorDoesNotDetachReplacement(t *testing.T) {
++	d := &hopReadDevice{reads: make(chan chan error, 2)}
++	e := &LinkEndpoint{deviceMTU: 1280, device: d}
++	e.Attach(hopDispatcher{})
++	oldRead := hopRead(t, d)
++	e.Attach(hopDispatcher{})
++	newRead := hopRead(t, d)
++	oldRead <- errors.New("old reader closed")
++	// Observe for long enough to let the deliberately delayed old error run;
++	// a stale detach can otherwise silently stop a newly attached worker.
++	until := time.Now().Add(25 * time.Millisecond)
++	for time.Now().Before(until) {
++		if !e.IsAttached() {
++			t.Error("old reader detached replacement")
++			break
++		}
++		time.Sleep(time.Millisecond)
++	}
++	e.Close()
++	newRead <- errors.New("new reader closed")
++}

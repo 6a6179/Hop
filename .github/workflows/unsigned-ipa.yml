@@ -8,6 +8,7 @@ on:
       - "Frameworks/LibXray.xcframework.sha256"
       - "Geodata/**"
       - "Hop/**"
+      - "HopTests/**"
       - "Hop.xcodeproj/**"
       - "HopTunnel/**"
       - "Shared/**"
@@ -74,7 +75,7 @@ jobs:
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
         with:
           path: |
-            ~/.cache/go-build
+            ~/Library/Caches/go-build
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-libxray-${{ hashFiles('scripts/build-libxray.sh', 'XrayBridge/go.mod', 'XrayBridge/go.sum') }}
           restore-keys: |

@@ -88,7 +88,7 @@ struct DashboardView: View {
                         LabeledContent("Type", value: group.type.displayName)
                         LabeledContent("Members", value: "\(group.members.count)")
                     } else if selectedTarget == nil {
-                        Label("Select an outbound before connecting.", systemImage: "server.rack")
+                        Label("Select an outbound to connect.", systemImage: "server.rack")
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -212,6 +212,12 @@ private struct ConnectWidget: View {
             .disabled(isDisabled)
             .accessibilityLabel(actionAccessibilityLabel)
             .accessibilityHint(isDisabled && !state.isInFlight ? "Select an outbound before connecting." : "")
+
+            if state == .failed {
+                NavigationLink("View Error Logs") {
+                    LogsView()
+                }
+            }
         }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: state)
     }

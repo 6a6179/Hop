@@ -26,6 +26,9 @@ enum ImportPolicy {
     /// from one import. Anything beyond this is dropped with a warning.
     static let maxImportedItems = 5000
 
+    /// Aggregate group references, including members expanded from filters.
+    static let maxImportedGroupMembers = 20000
+
     /// Maximum encoded size retained across all subscription-owned profiles,
     /// groups, and source records. Manual objects are outside this remote-data
     /// budget and are never deleted to make room for a subscription.
@@ -391,9 +394,11 @@ enum ImportPolicy {
         }
 
         // Configuration "Name = type, host, port, secrets..." lines: keep the
-        // user-facing name only.
-        if let name = trimmed.split(separator: "=", maxSplits: 1).first {
-            let cleaned = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        // user-facing name only. A line without "=" has no safe prefix — its
+        // entire text may be a credential — so it is redacted whole, and the
+        // kept name is sanitized and capped like every other imported name.
+        if let separator = trimmed.firstIndex(of: "=") {
+            let cleaned = sanitizeImportedName(String(trimmed[..<separator]), fallback: "")
             if !cleaned.isEmpty {
                 return "\(cleaned) = [redacted]"
             }
@@ -460,15 +465,15 @@ enum ImportPolicy {
             return true
         case 192 where b == 168: // 192.168.0.0/16 private
             return true
-        case 192 where b == 0: // 192.0.0.0/24 + 192.0.2.0/24 test net
+        case 192 where b == 0 && (c == 0 || c == 2): // 192.0.0.0/24 + 192.0.2.0/24 test net
             return true
         case 192 where b == 88 && c == 99: // deprecated 6to4 relay anycast
             return true
         case 198 where (18 ... 19).contains(b): // 198.18.0.0/15 benchmark
             return true
-        case 198 where b == 51: // 198.51.100.0/24 test net
+        case 198 where b == 51 && c == 100: // 198.51.100.0/24 test net
             return true
-        case 203 where b == 0: // 203.0.113.0/24 test net
+        case 203 where b == 0 && c == 113: // 203.0.113.0/24 test net
             return true
         case 224 ... 255: // multicast + reserved + broadcast
             return true

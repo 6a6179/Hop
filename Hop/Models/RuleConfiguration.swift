@@ -13,6 +13,16 @@ struct RuleConfiguration: Identifiable, Hashable, Codable {
         self.name = name
         self.rules = rules
     }
+
+    mutating func saveRule(_ rule: RoutingRule) {
+        if let index = rules.firstIndex(where: { $0.id == rule.id }) {
+            rules[index] = rule
+        } else {
+            let index = rule.kind == .final ? rules.endIndex :
+                rules.firstIndex { $0.kind == .final } ?? rules.endIndex
+            rules.insert(rule, at: index)
+        }
+    }
 }
 
 extension RuleConfiguration {

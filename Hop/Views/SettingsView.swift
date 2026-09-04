@@ -19,12 +19,26 @@ struct SettingsView: View {
             Section {
                 Toggle("Protocol Sniffing", isOn: $store.settings.sniffTraffic)
                 Toggle("Strict Route", isOn: $store.settings.strictRoute)
-                Toggle("Kill Switch", isOn: $store.settings.killSwitch)
-                Toggle("Connect On Demand", isOn: $store.settings.connectOnDemand)
+                Toggle(isOn: $store.settings.killSwitch) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Kill Switch")
+                        Text("Blocks traffic on VPN drops. May block Wi-Fi sign-in.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $store.settings.connectOnDemand) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Connect On Demand")
+                        Text("Manual disconnect pauses this until next connect.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             } header: {
                 Text("Tunnel")
             } footer: {
-                Text("Applied the next time you connect. Sniffing enables protocol and SNI based rules; strict route reduces traffic falling outside the tunnel route. Kill switch forces all traffic through the tunnel and blocks it if the tunnel drops — this can interrupt connectivity on captive-portal networks. Connect on demand lets iOS start and keep the tunnel up automatically; disconnecting manually pauses it until your next connect.")
+                Text("Applies on next connect.")
             }
 
             Section {
@@ -32,7 +46,7 @@ struct SettingsView: View {
             } header: {
                 Text("Subscriptions")
             } footer: {
-                Text("Refreshes subscriptions older than 24 hours when the app returns to the foreground. Each refresh contacts the subscription server, which can observe your current network address. Refreshes that would add nodes with TLS verification disabled are skipped and need a manual refresh to review.")
+                Text("Refreshes after 24h on app open. Providers see your IP; new insecure nodes need manual review.")
             }
 
             Section {
@@ -53,10 +67,14 @@ struct SettingsView: View {
             } header: {
                 Text("DNS")
             } footer: {
-                Text("System uses the device resolver. Other resolvers use DNS-over-HTTPS for tunnel DNS.")
+                Text("Custom resolvers use DNS-over-HTTPS.")
             }
 
             Section {
+                NavigationLink("View Logs") {
+                    LogsView()
+                }
+
                 Picker("Level", selection: $store.settings.logLevel) {
                     ForEach(ConfigLogLevel.allCases, id: \.self) { level in
                         Text(level.displayName).tag(level)
@@ -77,7 +95,7 @@ struct SettingsView: View {
             } header: {
                 Text("Logs")
             } footer: {
-                Text("The log level applies the next time you connect.")
+                Text("Level applies on next connect.")
             }
 
             Section {
@@ -93,7 +111,7 @@ struct SettingsView: View {
             }
 
             Section("Data") {
-                NavigationLink("Advanced Xray Configuration") {
+                NavigationLink("Advanced Xray") {
                     XrayAdvancedSettingsView()
                 }
 
@@ -107,19 +125,14 @@ struct SettingsView: View {
             Section("About") {
                 LabeledContent("Mode", value: "Packet tunnel")
                 LabeledContent("Engine", value: "Xray-core v26.6.27")
-                Text("Hop is independently developed software.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog("Reset settings?", isPresented: $showingSettingsReset, titleVisibility: .visible) {
+        .confirmationDialog("Reset settings to defaults?", isPresented: $showingSettingsReset, titleVisibility: .visible) {
             Button("Reset Settings", role: .destructive) {
                 store.resetSettings()
             }
-        } message: {
-            Text("This returns Settings to the default values.")
         }
     }
 }
@@ -141,7 +154,7 @@ private struct XrayAdvancedSettingsView: View {
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
             } footer: {
-                Text("Accepts client-side DNS, FakeDNS, routing, policy, balancing, observatory, and verified local-geodata overrides. Hop owns the TUN inbound, logging, and all listeners.")
+                Text("Client overrides only. Hop manages listeners and logging.")
             }
 
             if let errorMessage = validation.errorMessage {
