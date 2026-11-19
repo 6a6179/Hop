@@ -1,10 +1,12 @@
 import Darwin
 import Foundation
+import Network
 import NetworkExtension
 
 struct TunnelDescriptor: Sendable {
     let fileDescriptor: Int32
     let interfaceName: String
+    let selectionSummary: String
 }
 
 /// Applies the deterministic NetworkExtension configuration and locates the
@@ -22,7 +24,7 @@ final class HopPlatformInterface {
             throw HopTunnelError("tunnel provider was deallocated")
         }
 
-        let settings = Self.makeNetworkSettings(
+        let settings = XrayTunnelNetworkDefaults.makeNetworkSettings(
             dnsServers: dnsServers,
             mtu: mtu,
         )
@@ -33,55 +35,12 @@ final class HopPlatformInterface {
         _ = includeAllNetworks
         try Self.applyNetworkSettings(settings, to: provider)
 
-        if let descriptor = Self.networkExtensionTunnelDescriptor() {
-            return descriptor
-        }
-        throw HopTunnelError("could not find the NetworkExtension utun file descriptor after scanning descriptors 3...1024")
+        return try Self.networkExtensionTunnelDescriptor(providerName: provider.virtualInterface?.name)
     }
 
     func reset() {
         // NetworkExtension tears down the borrowed descriptor and settings.
         // Keeping reset explicit makes the service lifecycle intention clear.
-    }
-
-    private static func makeNetworkSettings(
-        dnsServers: [String],
-        mtu: Int,
-    ) -> NEPacketTunnelNetworkSettings {
-        let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: XrayTunnelNetworkDefaults.xrayIPv4Address)
-        settings.mtu = NSNumber(value: clampedMTU(mtu))
-
-        let ipv4 = NEIPv4Settings(
-            addresses: [XrayTunnelNetworkDefaults.providerIPv4Address],
-            subnetMasks: [XrayTunnelNetworkDefaults.ipv4Mask],
-        )
-        ipv4.includedRoutes = [NEIPv4Route.default()]
-        settings.ipv4Settings = ipv4
-
-        let ipv6 = NEIPv6Settings(
-            addresses: [XrayTunnelNetworkDefaults.providerIPv6Address],
-            networkPrefixLengths: [NSNumber(value: XrayTunnelNetworkDefaults.ipv6PrefixLength)],
-        )
-        ipv6.includedRoutes = [NEIPv6Route.default()]
-        settings.ipv6Settings = ipv6
-
-        let requestedDNS = dnsServers.filter(Self.isIPAddress)
-        let dns = NEDNSSettings(servers: requestedDNS.isEmpty ? XrayTunnelNetworkDefaults.dnsServers : requestedDNS)
-        dns.matchDomains = [""]
-        settings.dnsSettings = dns
-        return settings
-    }
-
-    private static func isIPAddress(_ value: String) -> Bool {
-        var ipv4 = in_addr()
-        var ipv6 = in6_addr()
-        return value.withCString {
-            inet_pton(AF_INET, $0, &ipv4) == 1 || inet_pton(AF_INET6, $0, &ipv6) == 1
-        }
-    }
-
-    static func clampedMTU(_ value: Int) -> Int {
-        min(max(value, 1280), XrayTunnelNetworkDefaults.mtu)
     }
 
     private static func applyNetworkSettings(
@@ -101,18 +60,68 @@ final class HopPlatformInterface {
         try result.get()
     }
 
-    /// NetworkExtension does not expose its utun descriptor as public API, and
-    /// the old `packetFlow.socket.fileDescriptor` KVC path returns nil on
-    /// modern iOS. Xray v26.6.27's own iOS integration guide specifies this
-    /// bounded getsockopt lookup after `setTunnelNetworkSettings` completes.
-    private static func networkExtensionTunnelDescriptor() -> TunnelDescriptor? {
+    /// NetworkExtension exposes the interface name, while Xray needs its borrowed file descriptor.
+    private static func networkExtensionTunnelDescriptor(providerName: String?) throws -> TunnelDescriptor {
         var nameBuffer = [CChar](repeating: 0, count: Int(IFNAMSIZ))
+        var descriptors: [String: Int32] = [:]
         for fd in Int32(3) ... Int32(1024) {
-            if let name = utunName(for: fd, buffer: &nameBuffer) {
-                return TunnelDescriptor(fileDescriptor: fd, interfaceName: name)
+            guard let name = utunName(for: fd, buffer: &nameBuffer) else { continue }
+            if name == providerName {
+                return TunnelDescriptor(fileDescriptor: fd, interfaceName: name, selectionSummary: "provider interface")
+            }
+            if descriptors[name] == nil {
+                descriptors[name] = fd
             }
         }
-        return nil
+        let open = descriptors.keys.sorted().prefix(6).joined(separator: ",")
+        if let providerName {
+            let expected = isUTunName(providerName) ? providerName : "non-utun"
+            throw HopTunnelError("No descriptor for provider interface \(expected) in 3...1024 (open utuns=\(descriptors.count) [\(open)])")
+        }
+
+        let addresses = utunAddressOwners()
+        if addresses.matching.count == 1, let name = addresses.matching.first, let fd = descriptors[name] {
+            return TunnelDescriptor(fileDescriptor: fd, interfaceName: name, selectionSummary: "provider address")
+        }
+        // Some iOS environments hide interface metadata. A single distinct utun is
+        // usable only when there is no visible address evidence identifying another one.
+        if descriptors.count == 1, let (name, fd) = descriptors.first, addresses.matching.isEmpty, !addresses.visible.contains(name) {
+            return TunnelDescriptor(fileDescriptor: fd, interfaceName: name, selectionSummary: "sole utun, addresses unavailable")
+        }
+        let owners = addresses.matching.sorted().prefix(6).joined(separator: ",")
+        throw HopTunnelError("Provider interface unavailable, open utuns=\(descriptors.count) [\(open)], configured address owners=\(addresses.matching.count) [\(owners)]")
+    }
+
+    private static func utunAddressOwners() -> (matching: Set<String>, visible: Set<String>) {
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let head else { return ([], []) }
+        defer { freeifaddrs(head) }
+
+        var matching = Set<String>()
+        var visible = Set<String>()
+        var buffer = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        var next: UnsafeMutablePointer<ifaddrs>? = head
+        while let entry = next?.pointee {
+            next = entry.ifa_next
+            guard let address = entry.ifa_addr, let rawName = entry.ifa_name else { continue }
+            let family = Int32(address.pointee.sa_family)
+            guard family == AF_INET || family == AF_INET6 else { continue }
+            let name = String(cString: rawName)
+            guard isUTunName(name) else { continue }
+            visible.insert(name)
+            let status = getnameinfo(address, socklen_t(address.pointee.sa_len), &buffer, socklen_t(buffer.count), nil, 0, NI_NUMERICHOST)
+            guard status == 0 else { continue }
+            let ip = buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+            if ip == XrayTunnelNetworkDefaults.providerIPv4Address || ip == XrayTunnelNetworkDefaults.providerIPv6Address {
+                matching.insert(name)
+            }
+        }
+        return (matching, visible)
+    }
+
+    private static func isUTunName(_ name: String) -> Bool {
+        let suffix = name.utf8.dropFirst(4)
+        return name.hasPrefix("utun") && !suffix.isEmpty && name.utf8.count < Int(IFNAMSIZ) && suffix.allSatisfy { (48 ... 57).contains($0) }
     }
 
     private static func utunName(for fd: Int32, buffer: inout [CChar]) -> String? {
@@ -130,7 +139,7 @@ final class HopPlatformInterface {
             let end = bytes.firstIndex(of: 0) ?? bytes.endIndex
             return String(decoding: bytes[..<end], as: UTF8.self)
         }
-        return name.hasPrefix("utun") ? name : nil
+        return isUTunName(name) ? name : nil
     }
 }
 

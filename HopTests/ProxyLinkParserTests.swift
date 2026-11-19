@@ -6,6 +6,39 @@ final class ProxyLinkParserTests: XCTestCase {
     private let x25519Encryption = "mlkem768x25519plus.native.0rtt..AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     private let mlkem768Encryption = "mlkem768x25519plus.native.0rtt..\(String(repeating: "A", count: 1579))"
 
+    func testMarkdownEscapedVLESSPreviewPreservesCredentialsPathsAndEncoding() throws {
+        let link = #"vless\://demo%2540\.id@edge\.example.test:443?security=tls&sni=tls\.example%2Etest&type=ws&path=%2Fws\.v1%3Fnext%3D%252F&host=cdn%5C.example.test#Node\.One"#
+        guard case let .importText(text) = ProfileImportPayloadDetector.detect(link) else {
+            return XCTFail("Expected a local preview")
+        }
+        let result = try importService.importText(text)
+        let profile = try XCTUnwrap(result.profiles.first)
+        guard case let .vless(options) = profile.options else { return XCTFail("Expected VLESS options") }
+        XCTAssertEqual(options.uuid, #"demo%40\.id"#)
+        XCTAssertEqual(profile.endpoint.host, "edge.example.test")
+        XCTAssertEqual(profile.security.tls?.serverName, "tls.example.test")
+        XCTAssertEqual(profile.transport.path, #"/ws\.v1?next=%2F"#)
+        XCTAssertEqual(profile.transport.host, #"cdn\.example.test"#)
+        XCTAssertEqual(profile.name, #"Node\.One"#)
+        XCTAssertNotEqual(result.incompleteSubscriptionInventory, true)
+    }
+
+    func testMarkdownEscapedVLESSBatchPreservesEachLink() throws {
+        let links = #"""
+        vless\://sample@192.0.2.1:443?sni=tls\.example.test&type=ws&path=%2Fone#First
+        vless\://sample@192.0.2.2:443?sni=other.example.test&type=ws&path=%2Ftwo#Second
+        vless://sample@edge.example.test:443?sni=encoded%5C.example.test&type=ws&path=%2Fthree#Third
+        """#
+        guard case let .importText(text) = ProfileImportPayloadDetector.detect(links) else {
+            return XCTFail("Expected a local preview")
+        }
+        let result = try importService.importText(text)
+        XCTAssertEqual(result.profiles.map(\.name), ["First", "Second", "Third"])
+        XCTAssertEqual(result.profiles.map(\.security.tls?.serverName), ["tls.example.test", "other.example.test", #"encoded\.example.test"#])
+        XCTAssertEqual(result.profiles.map(\.transport.path), ["/one", "/two", "/three"])
+        XCTAssertNotEqual(result.incompleteSubscriptionInventory, true)
+    }
+
     func testParsesVLESSRealityLink() throws {
         let profile = try parse("vless://11111111-1111-4111-8111-111111111111@edge.example.net:443?security=reality&sni=www.cloudflare.com&fp=chrome&pbk=PUBLICKEY&sid=abcd&spx=%2F&type=tcp&flow=xtls-rprx-vision#Tokyo")
 

@@ -42,6 +42,8 @@ enum ProxyLinkParseError: LocalizedError {
 }
 
 struct ProxyImportService {
+    private static let serverNameKeys = ["sni", "servername", "server_name", "server-name", "peer"]
+
     /// Session configuration for subscription fetches; tests substitute one
     /// with a stub `URLProtocol` to exercise the transfer policy offline.
     var subscriptionSessionConfiguration: URLSessionConfiguration = .ephemeral
@@ -481,7 +483,7 @@ struct ProxyImportService {
 
     private func parseSecurity(query: Query, fallbackServerName: String, defaultTLS: Bool = false) -> ProxySecurity {
         let security = (query.first("security", "tls") ?? "").lowercased()
-        let serverName = query.first("sni", "serverName", "server_name", "server-name", "peer") ?? fallbackServerName
+        let serverName = Self.serverNameKeys.lazy.compactMap { query[$0] }.first ?? fallbackServerName
         let alpn = alpnValues(from: query.first("alpn"))
         let fingerprint = query.first("fp", "fingerprint", "utlsFingerprint", "utls_fingerprint", "utls-fingerprint", "clientFingerprint", "client_fingerprint", "client-fingerprint") ?? "chrome"
         let allowInsecure = boolOption(query.first("allowInsecure", "allow_insecure", "allow-insecure", "insecure", "skipCertVerify", "skip_cert_verify", "skip-cert-verify"))
@@ -668,6 +670,47 @@ struct ProxyImportService {
         throw ProxyLinkParseError.missingCredentials
     }
 
+    /// Some Markdown sources escape the scheme colon and dots in DNS names.
+    /// Only the escaped scheme opts in; format-sensitive link data is kept verbatim.
+    private func repairingMarkdownVLESSLink(_ token: String) -> String {
+        let marker = #"vless\://"#
+        guard token.prefix(marker.count).lowercased() == marker else { return token }
+
+        let payload = token.dropFirst(marker.count)
+        let authority = payload.prefix { !"/?#".contains($0) }
+        guard let at = authority.lastIndex(of: "@") else { return token }
+        let host = authority[authority.index(after: at)...].prefix { $0 != ":" }
+
+        func repairDots(_ name: Substring) -> String {
+            let repaired = name.replacingOccurrences(of: #"\."#, with: ".")
+            return repaired.contains("\\") ? String(name) : repaired
+        }
+
+        var link = "vless://" + payload[..<host.startIndex] + repairDots(host)
+        let suffix = payload[host.endIndex...]
+        let beforeFragment = suffix.prefix { $0 != "#" }
+        if let questionMark = beforeFragment.firstIndex(of: "?") {
+            link += beforeFragment[..<questionMark]
+            var query = beforeFragment[questionMark...]
+            while !query.isEmpty {
+                link.append(query.removeFirst()) // '?' or '&'
+                let field = query.prefix { $0 != "&" }
+                if let equals = field.firstIndex(of: "="), Self.serverNameKeys.contains(field[..<equals].lowercased()) {
+                    link += field[...equals] + repairDots(field[field.index(after: equals)...])
+                } else {
+                    link += field
+                }
+                query = query[field.endIndex...]
+            }
+        } else {
+            link += beforeFragment
+        }
+        link += suffix[beforeFragment.endIndex...]
+        // Preserve literal backslashes in credentials, paths and other opaque values.
+        // Letting URLComponents fix them can double-encode existing percent escapes.
+        return link.replacingOccurrences(of: "\\", with: "%5C")
+    }
+
     private func importLines(from text: String) -> (links: [String], truncated: Bool, skippedTokens: Bool) {
         // `components(...).prefix(...)` is still eager: a 5 MiB payload made
         // only of newlines or spaces can allocate millions of tiny Strings
@@ -691,8 +734,9 @@ struct ProxyImportService {
             if token.hasPrefix("#") || token.hasPrefix(";") || token.hasPrefix("//") {
                 inComment = true
             } else if !inComment, !token.isEmpty {
-                if URLComponents(string: token)?.scheme != nil {
-                    imported.append(token)
+                let link = repairingMarkdownVLESSLink(token)
+                if URLComponents(string: link)?.scheme != nil {
+                    imported.append(link)
                 } else {
                     skippedTokens = true
                 }

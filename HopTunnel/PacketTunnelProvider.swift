@@ -130,7 +130,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                 includeAllNetworks: request.includeAllNetworks,
             )
             writeTunnelLog(
-                "Applied NetworkExtension settings mtu=\(HopPlatformInterface.clampedMTU(request.tunnelMTU)) interface=\(descriptor.interfaceName)",
+                "Applied NetworkExtension settings mtu=\(request.tunnelMTU) interface=\(descriptor.interfaceName) selection=\(descriptor.selectionSummary)",
             )
 
             // A provider process should never retain an earlier instance, but
@@ -471,7 +471,7 @@ private struct TunnelStartRequest {
         includeAllNetworks = ((options?["includeAllNetworks"] as? String) ?? (providerConfiguration?["includeAllNetworks"] as? String)) == "true"
         dnsServers = Self.csv((options?["dnsServers"] as? String) ?? (providerConfiguration?["dnsServers"] as? String) ?? "")
         let mtu = Int((options?["tunnelMTU"] as? String) ?? (providerConfiguration?["tunnelMTU"] as? String) ?? "")
-        tunnelMTU = HopPlatformInterface.clampedMTU(mtu ?? XrayTunnelNetworkDefaults.mtu)
+        tunnelMTU = XrayTunnelNetworkDefaults.clampedMTU(mtu ?? XrayTunnelNetworkDefaults.mtu)
 
         let hiddenKeys: Set = ["configContent", "configPath"]
         let keys = options?.keys.filter { !hiddenKeys.contains($0) }.sorted() ?? []

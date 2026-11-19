@@ -153,6 +153,23 @@ final class XrayConfigBuilderTests: XCTestCase {
         try await XrayCoreClient.validate(configJSON: json)
     }
 
+    func testTunnelServerExclusionKeepsXrayDNSReachable() throws {
+        let root = try parse(builder.build(profile: basicVLESS(), routingMode: .global, rules: []))
+        let inbound = try XCTUnwrap((root["inbounds"] as? [[String: Any]])?.first)
+        let tun = try XCTUnwrap(inbound["settings"] as? [String: Any])
+        let gateways = try XCTUnwrap(tun["dns"] as? [String])
+
+        // Check both an app-initiated start and the extension's empty-option fallback.
+        for servers in [gateways, []] {
+            let network = XrayTunnelNetworkDefaults.makeNetworkSettings(dnsServers: servers, mtu: 1500)
+            let dns = try XCTUnwrap(network.dnsSettings)
+            XCTAssertEqual(dns.servers, gateways)
+            XCTAssertEqual(dns.matchDomains, [""])
+            XCTAssertEqual(network.tunnelRemoteAddress, "127.0.0.1")
+            XCTAssertFalse(dns.servers.contains(network.tunnelRemoteAddress))
+        }
+    }
+
     func testDNSRoutingHonorsProxySettingInEveryMode() async throws {
         let profile = basicVLESS()
         for mode in RoutingMode.allCases {
