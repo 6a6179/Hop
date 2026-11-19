@@ -24,7 +24,8 @@ Hop limits the November TCP stack to a 128 KiB window and 64 flows per stack.
 UDP receive queues share a 2 MiB budget per stack. Both the packet-tunnel
 inbound and the WireGuard userspace stack use these limits.
 
-`scripts/build-libxray.sh` runs the TUN lifetime, destination-IP routing, XDNS
-socket cleanup, and bridge tests with the race detector before building the framework.
+`scripts/build-libxray.sh` runs the TUN lifetime, DNS flow and response handling,
+destination-IP routing, XDNS socket cleanup, and bridge tests with the race
+detector before building the framework.
 The bridge releases the core’s DNS and outbound manager references after
 validation, failed start, or shutdown.

@@ -1,0 +1,156 @@
+diff --git a/proxy/dns/dns.go b/proxy/dns/dns.go
+index 712197b..1b15b0c 100644
+--- a/proxy/dns/dns.go
++++ b/proxy/dns/dns.go
+@@ -271,7 +271,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
+ 						return err
+ 					}
+ 				} else {
+-					go h.handleIPQuery(id, qType, domain, writer, timer)
++					go h.handleIPQuery(ctx, id, qType, domain, writer, timer)
+ 				}
+ 			case RuleAction_Direct:
+ 				if err := connWriter.WriteMessage(b); err != nil {
+@@ -310,7 +310,10 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
+ 	return nil
+ }
+ 
+-func (h *Handler) handleIPQuery(id uint16, qType dnsmessage.Type, domain string, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) {
++func (h *Handler) handleIPQuery(ctx context.Context, id uint16, qType dnsmessage.Type, domain string, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) {
++	if ctx.Err() != nil {
++		return
++	}
+ 	var ips []net.IP
+ 	var ttl uint32
+ 	var err error
+@@ -330,11 +333,16 @@ func (h *Handler) handleIPQuery(id uint16, qType dnsmessage.Type, domain string,
+ 		})
+ 	}
+ 
+-	rCode := dns.RCodeFromError(err)
+-	if rCode == 0 && len(ips) == 0 && !go_errors.Is(err, dns.ErrEmptyResponse) {
+-		errors.LogInfoInner(context.Background(), err, "ip query")
++	if ctx.Err() != nil || go_errors.Is(err, context.Canceled) {
+ 		return
+ 	}
++	rCode := dns.RCodeFromError(err)
++	if err != nil && rCode == 0 && len(ips) == 0 && !go_errors.Is(err, dns.ErrEmptyResponse) {
++		// A terminal lookup failure is a DNS response too. A silent drop makes
++		// clients retry on their own timers and leaves the UDP transaction open.
++		errors.LogInfoInner(ctx, err, "ip query")
++		rCode = uint16(dnsmessage.RCodeServerFailure)
++	}
+ 
+ 	b := buf.New()
+ 	rawBytes := b.Extend(buf.Size)
+diff --git a/proxy/dns/hop_terminal_test.go b/proxy/dns/hop_terminal_test.go
+new file mode 100644
+index 0000000..149e12b
+--- /dev/null
++++ b/proxy/dns/hop_terminal_test.go
+@@ -0,0 +1,105 @@
++package dns
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/xtls/xray-core/common/buf"
++	xerrors "github.com/xtls/xray-core/common/errors"
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/features/dns"
++	"golang.org/x/net/dns/dnsmessage"
++)
++
++type hopDNSLookup struct {
++	dns.Client
++	lookup func(string, dns.IPOption) ([]net.IP, uint32, error)
++}
++
++func (c hopDNSLookup) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, error) {
++	return c.lookup(domain, option)
++}
++
++type hopDNSReply struct {
++	packets [][]byte
++}
++
++func (r *hopDNSReply) WriteMessage(b *buf.Buffer) error {
++	r.packets = append(r.packets, append([]byte(nil), b.Bytes()...))
++	b.Release()
++	return nil
++}
++
++func TestHopDNSLookupReplies(t *testing.T) {
++	const domain = "resolver.example.test."
++	for _, tc := range []struct {
++		name    string
++		qtype   dnsmessage.Type
++		address net.IP
++		err     error
++		rcode   dnsmessage.RCode
++	}{
++		{"A", dnsmessage.TypeA, net.ParseIP("192.0.2.1"), nil, dnsmessage.RCodeSuccess},
++		{"AAAA", dnsmessage.TypeAAAA, net.ParseIP("2001:db8::1"), nil, dnsmessage.RCodeSuccess},
++		{"no-data", dnsmessage.TypeAAAA, nil, dns.ErrEmptyResponse, dnsmessage.RCodeSuccess},
++		{"NXDOMAIN", dnsmessage.TypeA, nil, xerrors.New("lookup").Base(dns.RCodeError(3)), dnsmessage.RCodeNameError},
++		{"refused", dnsmessage.TypeA, nil, dns.RCodeError(5), dnsmessage.RCodeRefused},
++		{"transport-error", dnsmessage.TypeA, nil, errors.New("DoH server returned code 503"), dnsmessage.RCodeServerFailure},
++		{"query-timeout", dnsmessage.TypeAAAA, nil, context.DeadlineExceeded, dnsmessage.RCodeServerFailure},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			var ips []net.IP
++			if tc.address != nil {
++				ips = []net.IP{tc.address}
++			}
++			h := Handler{client: hopDNSLookup{lookup: func(name string, option dns.IPOption) ([]net.IP, uint32, error) {
++				if name != domain || option.IPv4Enable != (tc.qtype == dnsmessage.TypeA) || option.IPv6Enable != (tc.qtype == dnsmessage.TypeAAAA) {
++					t.Fatalf("unexpected lookup %q %+v", name, option)
++				}
++				return ips, 60, tc.err
++			}}}
++			var replies hopDNSReply
++			h.handleIPQuery(context.Background(), 1234, tc.qtype, domain, &replies, nil)
++			if len(replies.packets) != 1 {
++				t.Fatalf("expected one reply, got %d", len(replies.packets))
++			}
++			var msg dnsmessage.Message
++			if err := msg.Unpack(replies.packets[0]); err != nil {
++				t.Fatal(err)
++			}
++			wantQuestion := dnsmessage.Question{Name: dnsmessage.MustNewName(domain), Type: tc.qtype, Class: dnsmessage.ClassINET}
++			if !msg.Response || msg.ID != 1234 || msg.RCode != tc.rcode ||
++				len(msg.Questions) != 1 || msg.Questions[0] != wantQuestion || len(msg.Answers) != len(ips) {
++				t.Fatalf("unexpected reply %+v", msg)
++			}
++		})
++	}
++}
++
++func TestHopDNSLookupCancellation(t *testing.T) {
++	for _, tc := range []string{"already-closed", "closed-during-lookup", "lookup-cancelled"} {
++		t.Run(tc, func(t *testing.T) {
++			ctx, cancel := context.WithCancel(context.Background())
++			defer cancel()
++			if tc == "already-closed" {
++				cancel()
++			}
++			h := Handler{client: hopDNSLookup{lookup: func(string, dns.IPOption) ([]net.IP, uint32, error) {
++				switch tc {
++				case "already-closed":
++					t.Fatal("started a lookup after cancellation")
++				case "closed-during-lookup":
++					cancel()
++					return nil, 0, context.DeadlineExceeded
++				}
++				return nil, 0, xerrors.New("stopped").Base(context.Canceled)
++			}}}
++			var replies hopDNSReply
++			h.handleIPQuery(ctx, 1234, dnsmessage.TypeA, "resolver.example.test.", &replies, nil)
++			if len(replies.packets) != 0 {
++				t.Fatal("sent DNS reply after cancellation")
++			}
++		})
++	}
++}

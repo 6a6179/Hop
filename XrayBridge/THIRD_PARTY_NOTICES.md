@@ -13,6 +13,8 @@ Hop builds the following changes to the upstream source.
 - `0003-prefer-packet-destination.patch` preserves the packet destination for IP rules when route-only sniffing supplies a hostname.
 - `0004-bound-client-queues.patch` limits the WireGuard, Hysteria, and mKCP client queues.
 - `0005-xdns-resolver-dial.patch` makes the XDNS client dial its configured resolvers directly.
+- `0006-reclaim-completed-dns-flows.patch` reclaims completed DNS exchanges on the tunnel's virtual resolvers so their UDP flows do not exhaust the iOS flow limit.
+- `0007-dns-terminal-errors.patch` returns SERVFAIL to the client when an upstream DNS lookup fails, allowing the client to retry.
 
 These patches are distributed in `patches/` alongside the bridge source.
 

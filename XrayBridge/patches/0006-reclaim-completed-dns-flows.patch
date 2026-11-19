@@ -1,0 +1,722 @@
+diff --git a/proxy/tun/handler.go b/proxy/tun/handler.go
+index 6b92aa4..6d301e1 100644
+--- a/proxy/tun/handler.go
++++ b/proxy/tun/handler.go
+@@ -167,6 +167,7 @@ func (t *Handler) Start() error {
+ 
+ 	tunStackOptions := StackOptions{
+ 		Tun:         tunInterface,
++		DNSGateways: virtualDNSGateways(t.config),
+ 		MTU:         t.config.MTU,
+ 		IdleTimeout: t.policyManager.ForLevel(t.config.UserLevel).Timeouts.ConnectionIdle,
+ 	}
+diff --git a/proxy/tun/hop_dns.go b/proxy/tun/hop_dns.go
+new file mode 100644
+index 0000000..817e552
+--- /dev/null
++++ b/proxy/tun/hop_dns.go
+@@ -0,0 +1,130 @@
++package tun
++
++import (
++	"encoding/binary"
++	"io"
++	"net/netip"
++	"slices"
++	"sync"
++
++	"github.com/miekg/dns"
++	"github.com/xtls/xray-core/common/net"
++)
++
++func virtualDNSGateways(c *Config) []netip.Addr {
++	var gateways []netip.Addr
++	for _, raw := range c.Gateway {
++		p, err := netip.ParsePrefix(raw)
++		if err != nil {
++			continue
++		}
++		for _, resolver := range c.DNS {
++			ip, err := netip.ParseAddr(resolver)
++			if err == nil && ip.Unmap() == p.Addr().Unmap() {
++				gateways = append(gateways, ip.Unmap())
++				break
++			}
++		}
++	}
++	return gateways
++}
++
++type dnsKey struct {
++	id, qtype uint16
++	name      string
++}
++
++const trackedDNSQuestions = 8
++
++// Only inspect bounded, complete standard IN queries/replies. Use the existing DNS
++// decoder for compressed names and typed records; retain just the question, never RDATA.
++func questionKey(packet []byte, reply bool) (dnsKey, bool) {
++	if len(packet) < 12 || len(packet) > 4096 || binary.BigEndian.Uint16(packet[4:6]) != 1 {
++		return dnsKey{}, false
++	}
++	flags := binary.BigEndian.Uint16(packet[2:4])
++	if (flags&0x8000 != 0) != reply || flags&0x7a40 != 0 {
++		return dnsKey{}, false
++	} // opcode, truncation or reserved Z bit
++	an, ns, ar := int(binary.BigEndian.Uint16(packet[6:8])), int(binary.BigEndian.Uint16(packet[8:10])), int(binary.BigEndian.Uint16(packet[10:12]))
++	if an+ns+ar > 32 || (!reply && (an != 0 || ns != 0 || flags&15 != 0)) {
++		return dnsKey{}, false
++	}
++	name, off, err := dns.UnpackDomainName(packet, 12)
++	if err != nil || len(packet)-off < 4 || binary.BigEndian.Uint16(packet[off+2:]) != dns.ClassINET {
++		return dnsKey{}, false
++	}
++	key := dnsKey{binary.BigEndian.Uint16(packet), binary.BigEndian.Uint16(packet[off:]), dns.CanonicalName(name)}
++	off += 4
++	for range an + ns + ar {
++		rr, end, err := dns.UnpackRR(packet, off)
++		if err != nil || (rr.Header().Rdlength == 0 && rr.Header().Rrtype != dns.TypeOPT) {
++			return dnsKey{}, false
++		}
++		off = end
++	}
++	return key, off == len(packet)
++}
++
++type udpDNSExchange struct {
++	// The handler mutex protects keys, pending and opaque. Keep completed keys so
++	// a delayed duplicate response cannot satisfy a later reuse of the same query.
++	keys    []dnsKey
++	pending uint8
++	opaque  bool
++	// This mutex serializes delivery against retiring/replacing this particular source.
++	writeMu sync.Mutex
++	retired bool
++}
++
++func (d *udpDNSExchange) wouldReuse(key dnsKey) bool {
++	return len(d.keys) >= trackedDNSQuestions || slices.Contains(d.keys, key)
++}
++
++func (d *udpDNSExchange) request(key dnsKey, valid bool) {
++	if d.opaque {
++		return
++	}
++	if !valid || d.wouldReuse(key) {
++		d.opaque = true
++		d.keys = nil
++		return
++	}
++	d.pending |= 1 << len(d.keys)
++	d.keys = append(d.keys, key)
++}
++
++func (d *udpDNSExchange) retire() {
++	d.writeMu.Lock()
++	d.retired = true
++	d.writeMu.Unlock()
++}
++
++func (c *udpConn) writePacket(packet []byte, from net.Destination, sameGateway bool) error {
++	d := c.dns
++	if d == nil {
++		return c.handler.writePacket(packet, from, c.src)
++	}
++	d.writeMu.Lock()
++
++	if d.retired {
++		d.writeMu.Unlock()
++		return io.ErrClosedPipe
++	}
++	err := c.handler.writePacket(packet, from, c.src)
++	if err != nil || !sameGateway {
++		d.writeMu.Unlock()
++		return err
++	}
++	key, ok := questionKey(packet, true)
++	c.handler.Lock()
++	if ok {
++		if i := slices.Index(d.keys, key); i >= 0 {
++			d.pending &^= 1 << i
++		}
++	}
++	// Publish completion and release the writer together before a new question checks for rollover.
++	d.writeMu.Unlock()
++	c.handler.Unlock()
++	return nil
++}
+diff --git a/proxy/tun/hop_dns_test.go b/proxy/tun/hop_dns_test.go
+new file mode 100644
+index 0000000..375b708
+--- /dev/null
++++ b/proxy/tun/hop_dns_test.go
+@@ -0,0 +1,333 @@
++package tun
++
++import (
++	"errors"
++	"io"
++	"net/netip"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/common/net"
++	"golang.org/x/net/dns/dnsmessage"
++)
++
++var testDNSGateway = net.UDPDestination(net.ParseAddress("172.19.0.1"), 53)
++
++func testDNSPacket(t *testing.T, id uint16, typ dnsmessage.Type, reply bool) []byte {
++	t.Helper()
++	m := dnsmessage.Message{Header: dnsmessage.Header{ID: id, Response: reply}, Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName("example.test."), Type: typ, Class: dnsmessage.ClassINET}}}
++	if reply {
++		m.RCode = dnsmessage.RCodeNameError
++	}
++	b, e := m.Pack()
++	if e != nil {
++		t.Fatal(e)
++	}
++	return b
++}
++func testDNSHandler(t *testing.T) *udpConnectionHandler {
++	u := newUdpConnectionHandler(func(net.Conn, net.Destination) {}, func([]byte, net.Destination, net.Destination) error { return nil })
++	u.dnsGateways = map[net.Destination]bool{testDNSGateway: true}
++	t.Cleanup(u.close)
++	return u
++}
++func testUDPSrc(port int) net.Destination {
++	return net.UDPDestination(net.ParseAddress("172.19.0.2"), net.Port(port))
++}
++func sendTestUDP(u *udpConnectionHandler, port int, dst net.Destination, p []byte) *udpConn {
++	b := buf.New()
++	b.Write(p)
++	src := testUDPSrc(port)
++	u.HandlePacket(src, dst, b)
++	u.RLock()
++	defer u.RUnlock()
++	return u.udpConns[src]
++}
++func answerTestDNS(t *testing.T, c *udpConn, b []byte) {
++	t.Helper()
++	if _, e := c.Write(b); e != nil {
++		t.Fatal(e)
++	}
++}
++func occupyOtherSources(u *udpConnectionHandler) {
++	for i := 1; i < udpFlowLimit; i++ {
++		sendTestUDP(u, 4000+i, net.UDPDestination(testDNSGateway.Address, 443), []byte{0x31})
++	}
++}
++
++func TestHopDNSReclaimsCompletedPipelinedSources(t *testing.T) {
++	u := testDNSHandler(t)
++	a := testDNSPacket(t, 7, dnsmessage.TypeA, false)
++	aaaa := testDNSPacket(t, 7, dnsmessage.TypeAAAA, false)
++	ra := testDNSPacket(t, 7, dnsmessage.TypeA, true)
++	raaaa := testDNSPacket(t, 7, dnsmessage.TypeAAAA, true)
++	for i := 0; i < 512; i++ {
++		c := sendTestUDP(u, 10000+i, testDNSGateway, a)
++		if c == nil || sendTestUDP(u, 10000+i, testDNSGateway, aaaa) != c {
++			t.Fatalf("source %d lost", i+1)
++		}
++		// Consume both requests just as the DNS outbound does before concurrent lookups complete.
++		for range 2 {
++			mb, e := c.ReadMultiBuffer()
++			if e != nil {
++				t.Fatal(e)
++			}
++			buf.ReleaseMulti(mb)
++		}
++		answerTestDNS(t, c, raaaa)
++		answerTestDNS(t, c, ra)
++	}
++	if n := len(u.udpConns); n != udpFlowLimit {
++		t.Fatalf("flow count %d", n)
++	}
++}
++
++func TestHopDNSPreservesPendingAndStaleOwnership(t *testing.T) {
++	u := testDNSHandler(t)
++	occupyOtherSources(u)
++	const source = 18001
++	a := testDNSPacket(t, 1, dnsmessage.TypeA, false)
++	aaaa := testDNSPacket(t, 2, dnsmessage.TypeAAAA, false)
++	ra := testDNSPacket(t, 1, dnsmessage.TypeA, true)
++	raaaa := testDNSPacket(t, 2, dnsmessage.TypeAAAA, true)
++	c := sendTestUDP(u, source, testDNSGateway, a)
++	sendTestUDP(u, source, testDNSGateway, aaaa)
++	blocked := func() {
++		t.Helper()
++		if sendTestUDP(u, source+1, testDNSGateway, a) != nil {
++			t.Fatal("evicted an unresolved or non-DNS source")
++		}
++	}
++	answerTestDNS(t, c, ra)
++	answerTestDNS(t, c, ra)
++	blocked()
++	answerTestDNS(t, c, testDNSPacket(t, 2, dnsmessage.TypeA, true))
++	blocked()
++	bad := append([]byte{}, raaaa...)
++	bad[7] = 1 // missing declared answer
++	answerTestDNS(t, c, bad)
++	blocked()
++	b := buf.New()
++	b.Write(raaaa)
++	other := net.UDPDestination(net.ParseAddress("192.0.2.53"), 53)
++	b.UDP = &other
++	if err := c.WriteMultiBuffer(buf.MultiBuffer{b}); err != nil {
++		t.Fatal(err)
++	}
++	blocked()
++	send := u.writePacket
++	u.writePacket = func([]byte, net.Destination, net.Destination) error { return io.ErrShortWrite }
++	if _, err := c.Write(raaaa); !errors.Is(err, io.ErrShortWrite) {
++		t.Fatal(err)
++	}
++	blocked()
++	u.writePacket = send
++	answerTestDNS(t, c, raaaa)
++	// A new query before eviction puts the same source back into the pending set.
++	q3 := testDNSPacket(t, 3, dnsmessage.TypeA, false)
++	sendTestUDP(u, source, testDNSGateway, q3)
++	blocked()
++	answerTestDNS(t, c, testDNSPacket(t, 3, dnsmessage.TypeA, true))
++	next := sendTestUDP(u, source+1, testDNSGateway, a)
++	if next == nil {
++		t.Fatal("complete source occupied the last slot")
++	}
++	answerTestDNS(t, next, ra)
++	reused := sendTestUDP(u, source, testDNSGateway, a)
++	if reused == nil || reused == c {
++		t.Fatal("source reuse failed")
++	}
++	if _, err := c.Write(ra); !errors.Is(err, io.ErrClosedPipe) {
++		t.Fatalf("retired source wrote: %v", err)
++	}
++	if err := c.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if u.udpConns[c.src] != reused {
++		t.Fatal("old Close removed the new owner")
++	}
++	blocked() // old reply did not satisfy the new request
++}
++
++func TestHopDNSGatewayScopeAndAmbiguity(t *testing.T) {
++	gateways := virtualDNSGateways(&Config{Gateway: []string{"172.19.0.1/30", "fdfe:dcba:9876::1/126", "192.0.2.53/24"}, DNS: []string{"fdfe:dcba:9876:0:0:0:0:1", "172.19.0.1", "192.0.2.54"}})
++	if len(gateways) != 2 || gateways[0] != netip.MustParseAddr("172.19.0.1") || gateways[1] != netip.MustParseAddr("fdfe:dcba:9876::1") {
++		t.Fatal(gateways)
++	}
++	other := net.UDPDestination(net.ParseAddress("192.0.2.53"), 53)
++	for _, kind := range []string{"mixed", "duplicate", "malformed", "overflow", "external DNS", "other port"} {
++		t.Run(kind, func(t *testing.T) {
++			u := testDNSHandler(t)
++			occupyOtherSources(u)
++			dst := testDNSGateway
++			if kind == "external DNS" {
++				dst = other
++			}
++			if kind == "other port" {
++				dst.Port = 443
++			}
++			q := testDNSPacket(t, 0, dnsmessage.TypeA, false)
++			r := testDNSPacket(t, 0, dnsmessage.TypeA, true)
++			c := sendTestUDP(u, 12000, dst, q)
++			switch kind {
++			case "mixed":
++				sendTestUDP(u, 12000, other, q)
++			case "duplicate":
++				sendTestUDP(u, 12000, dst, q)
++			case "malformed":
++				sendTestUDP(u, 12000, dst, []byte{2})
++			case "overflow":
++				for i := 1; i <= 8; i++ {
++					sendTestUDP(u, 12000, dst, testDNSPacket(t, uint16(i), dnsmessage.TypeA, false))
++					answerTestDNS(t, c, testDNSPacket(t, uint16(i), dnsmessage.TypeA, true))
++				}
++			}
++			answerTestDNS(t, c, r)
++			if sendTestUDP(u, 12001, testDNSGateway, q) != nil {
++				t.Fatal("reclaimed ambiguous or ordinary UDP")
++			}
++		})
++	}
++}
++func TestHopDNSBoundsDispatchDuringEviction(t *testing.T) {
++	started := make(chan *udpConn, 2*udpFlowLimit)
++	release := make(chan struct{})
++	var once sync.Once
++	unblock := func() { once.Do(func() { close(release) }) }
++	defer unblock()
++	u := newUdpConnectionHandler(func(c net.Conn, _ net.Destination) { started <- c.(*udpConn); <-release }, func([]byte, net.Destination, net.Destination) error { return nil })
++	u.dnsGateways = map[net.Destination]bool{testDNSGateway: true}
++	defer u.close()
++	q := testDNSPacket(t, 1, dnsmessage.TypeA, false)
++	r := testDNSPacket(t, 1, dnsmessage.TypeA, true)
++	for i := range udpFlowLimit {
++		sendTestUDP(u, 3000+i, testDNSGateway, q)
++	}
++	for range udpFlowLimit {
++		select {
++		case c := <-started:
++			answerTestDNS(t, c, r)
++		case <-time.After(2 * time.Second):
++			t.Fatal("initial handler not admitted")
++		}
++	}
++	for i := range udpFlowLimit {
++		if sendTestUDP(u, 6000+i, testDNSGateway, q) == nil {
++			t.Fatal("replacement rejected", i)
++		}
++	}
++	if sendTestUDP(u, 7000, testDNSGateway, q) != nil {
++		t.Fatal("pending table exceeded bound")
++	}
++	select {
++	case <-started:
++		t.Fatal("more than 64 dispatchers")
++	default:
++	}
++	unblock()
++	for range udpFlowLimit {
++		select {
++		case <-started:
++		case <-time.After(2 * time.Second):
++			t.Fatal("queued handler stalled")
++		}
++	}
++}
++
++func TestHopDNSRejectedQueriesDoNotRetainMappings(t *testing.T) {
++	u := testDNSHandler(t)
++	u.budget = &atomic.Int32{}
++	q := testDNSPacket(t, 1, dnsmessage.TypeA, false)
++	u.budget.Store(udpStackBytes)
++	if sendTestUDP(u, 17000, testDNSGateway, q) != nil {
++		t.Fatal("empty mapping for dropped packet")
++	}
++	u.budget.Store(0)
++	occupyOtherSources(u)
++	c := sendTestUDP(u, 17000, testDNSGateway, q)
++	mb, e := c.ReadMultiBuffer()
++	if e != nil {
++		t.Fatal(e)
++	}
++	buf.ReleaseMulti(mb)
++	answerTestDNS(t, c, testDNSPacket(t, 1, dnsmessage.TypeA, true))
++	baseline := u.budget.Load()
++	u.budget.Store(udpStackBytes)
++	sendTestUDP(u, 17000, testDNSGateway, testDNSPacket(t, 2, dnsmessage.TypeA, false))
++	u.budget.Store(baseline)
++	if sendTestUDP(u, 17001, testDNSGateway, q) == nil {
++		t.Fatal("unadmitted question prevented reclamation")
++	}
++}
++
++func TestHopDNSRetirementWaitsForDelivery(t *testing.T) {
++	u := testDNSHandler(t)
++	occupyOtherSources(u)
++	q := testDNSPacket(t, 7, dnsmessage.TypeAAAA, false)
++	r := testDNSPacket(t, 7, dnsmessage.TypeAAAA, true)
++	c := sendTestUDP(u, 15000, testDNSGateway, q)
++	answerTestDNS(t, c, r)
++	entered, release := make(chan struct{}), make(chan struct{})
++	u.writePacket = func([]byte, net.Destination, net.Destination) error { close(entered); <-release; return nil }
++	done := make(chan error, 1)
++	go func() { _, e := c.Write(r); done <- e }()
++	<-entered
++	if sendTestUDP(u, 15001, testDNSGateway, q) != nil {
++		t.Error("reclaimed with a write in flight")
++	}
++	closed := make(chan struct{})
++	go func() { u.close(); close(closed) }()
++	close(release)
++	if err := <-done; err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case <-closed:
++	case <-time.After(2 * time.Second):
++		t.Fatal("close deadlocked with pending write")
++	}
++	if _, err := c.Write(r); !errors.Is(err, io.ErrClosedPipe) {
++		t.Fatalf("write after close: %v", err)
++	}
++}
++
++func TestHopDNSQuiescentSourceRenewsHistory(t *testing.T) {
++	u := testDNSHandler(t)
++	occupyOtherSources(u)
++	const port = 20000
++	var old *udpConn
++	for i := 0; i < 24; i++ {
++		// Overflow the history once, then issue the very same question sequentially.
++		id := uint16(min(i, 12))
++		q := testDNSPacket(t, id, dnsmessage.TypeA, false)
++		r := testDNSPacket(t, id, dnsmessage.TypeA, true)
++		c := sendTestUDP(u, port, testDNSGateway, q)
++		if c == nil {
++			t.Fatal("failed to renew source", i)
++		}
++		if (i == trackedDNSQuestions || i > 12) && c == old {
++			t.Fatal("retained ambiguous history", i)
++		}
++		if old != nil && c != old {
++			if _, e := old.Write(r); !errors.Is(e, io.ErrClosedPipe) {
++				t.Fatal("stale writer survived rollover", i)
++			}
++		}
++		if sendTestUDP(u, port+1, testDNSGateway, q) != nil {
++			t.Fatal("reclaimed pending query", i)
++		}
++		mb, e := c.ReadMultiBuffer()
++		if e != nil {
++			t.Fatal(e)
++		}
++		buf.ReleaseMulti(mb)
++		answerTestDNS(t, c, r)
++		old = c
++	}
++	if sendTestUDP(u, port+1, testDNSGateway, testDNSPacket(t, 77, dnsmessage.TypeA, false)) == nil {
++		t.Fatal("completed busy source retained a slot")
++	}
++}
+diff --git a/proxy/tun/stack.go b/proxy/tun/stack.go
+index 447fde7..5d02021 100644
+--- a/proxy/tun/stack.go
++++ b/proxy/tun/stack.go
+@@ -37,6 +37,8 @@ type StackOptions struct {
+ 	Tun         Tun
+ 	MTU         uint32
+ 	IdleTimeout time.Duration
++	// DNSGateways are the virtual gateway addresses also configured as system DNS servers.
++	DNSGateways []netip.Addr
+ 	// Addresses are what the stack opens connections from
+ 	Addresses []netip.Addr
+ 	// Remote is set if the tun is a tunnel to another system and not the tun of this one: what comes through it
+@@ -120,6 +122,14 @@ func NewStack(ctx context.Context, options StackOptions, handler ConnectionHandl
+ 	if handler != nil {
+ 		s.handle = handler.HandleConnection
+ 		s.udp = newUdpConnectionHandler(s.handle, s.writeUDP)
++		for _, addr := range options.DNSGateways {
++			if addr.IsValid() {
++				if s.udp.dnsGateways == nil {
++					s.udp.dnsGateways = make(map[net.Destination]bool)
++				}
++				s.udp.dnsGateways[net.UDPDestination(net.IPAddress(addr.AsSlice()), 53)] = true
++			}
++		}
+ 		s.udp.budget = &s.udpBytes
+ 	}
+ 	return s, nil
+diff --git a/proxy/tun/udp_fullcone.go b/proxy/tun/udp_fullcone.go
+index eff0e5b..dcf9b99 100644
+--- a/proxy/tun/udp_fullcone.go
++++ b/proxy/tun/udp_fullcone.go
+@@ -16,8 +16,11 @@ import (
+ type udpConnectionHandler struct {
+ 	sync.RWMutex
+ 
+-	udpConns map[net.Destination]*udpConn
+-	budget   *atomic.Int32
++	udpConns      map[net.Destination]*udpConn
++	budget        *atomic.Int32
++	dnsGateways   map[net.Destination]bool
++	dispatchSlots chan struct{}
++	stopped       chan struct{}
+ 
+ 	handleConnection func(conn net.Conn, dest net.Destination)
+ 	writePacket      func(data []byte, src net.Destination, dst net.Destination) error
+@@ -26,6 +29,8 @@ type udpConnectionHandler struct {
+ func newUdpConnectionHandler(handleConnection func(conn net.Conn, dest net.Destination), writePacket func(data []byte, src net.Destination, dst net.Destination) error) *udpConnectionHandler {
+ 	handler := &udpConnectionHandler{
+ 		udpConns:         make(map[net.Destination]*udpConn),
++		dispatchSlots:    make(chan struct{}, udpFlowLimit),
++		stopped:          make(chan struct{}),
+ 		handleConnection: handleConnection,
+ 		writePacket:      writePacket,
+ 	}
+@@ -39,10 +44,9 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+ 	data.UDP = &dst
+ 
+ 	u.RLock()
+-	conn, found := u.udpConns[src]
+-	if found {
+-		if !conn.queue.push(data) {
+-			errors.LogDebug(context.Background(), "drop udp with size ", data.Len(), " to ", dst.NetAddr(), " original ", conn.dst.NetAddr(), " > queue full")
++	if c := u.udpConns[src]; c != nil && c.dns == nil {
++		if !c.queue.push(data) {
++			errors.LogDebug(context.Background(), "drop udp with size ", data.Len(), " to ", dst.NetAddr(), " original ", c.dst.NetAddr(), " > queue full")
+ 			data.Release()
+ 		}
+ 		u.RUnlock()
+@@ -52,30 +56,104 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+ 
+ 	u.Lock()
+ 	defer u.Unlock()
+-
+-	conn, found = u.udpConns[src]
++	if u.udpConns == nil {
++		data.Release()
++		return
++	}
++	conn, found := u.udpConns[src]
++	// The reader owns the buffer once queued. Parse before handing it off, but
++	// record only questions actually admitted; u.Lock serializes the matching reply.
++	var key dnsKey
++	var valid bool
++	if u.dnsGateways[dst] && (!found || conn.dns != nil && !conn.dns.opaque && conn.dst == dst) {
++		key, valid = questionKey(data.Bytes(), false)
++	}
++	// Once every response has been delivered, move to a new dispatcher before
++	// reusing a key or replacing its bounded history. Late writes from the old
++	// dispatcher cannot acknowledge a query on the new mapping.
++	if found && valid && conn.dns.wouldReuse(key) && u.retireCompleted(conn) {
++		found = false
++	}
+ 	if !found {
+-		if u.udpConns == nil || len(u.udpConns) >= udpFlowLimit {
++		if len(u.udpConns) >= udpFlowLimit && (len(u.dnsGateways) == 0 || !u.reclaimDNS()) {
+ 			data.Release()
+ 			return
+ 		}
+ 		conn = &udpConn{handler: u, queue: newPacketQueue(udpQueueLimit), src: src, dst: dst}
+ 		conn.queue.budget = u.budget
++		if u.dnsGateways[dst] {
++			conn.dns = &udpDNSExchange{}
++		}
++	}
++	d := conn.dns
++	if conn.queue.push(data) {
++		if d != nil {
++			d.request(key, valid)
++		}
++	} else {
++		errors.LogDebug(context.Background(), "drop udp with size ", data.Len(), " to ", dst.NetAddr(), " original ", conn.dst.NetAddr(), " > queue full")
++		data.Release()
++		if !found && d != nil {
++			return
++		}
++	}
++	if !found {
+ 		u.udpConns[src] = conn
++		if len(u.dnsGateways) == 0 {
++			go u.handleConnection(conn, dst)
++		} else {
++			go u.dispatch(conn)
++		}
++	}
++}
+ 
+-		go u.handleConnection(conn, dst)
++// A just-retired DNS handler can still be unwinding. Bound dispatchers independently
++// from the 64 live mappings. A waiting mapping cannot be reclaimed before it is served.
++func (u *udpConnectionHandler) dispatch(c *udpConn) {
++	select {
++	case u.dispatchSlots <- struct{}{}:
++	case <-u.stopped:
++		return
+ 	}
++	defer func() { <-u.dispatchSlots }()
++	u.RLock()
++	current := u.udpConns[c.src] == c
++	u.RUnlock()
++	if current {
++		u.handleConnection(c, c.dst)
++	}
++}
+ 
+-	// queue the packet for the reader of the connection, or discard it
+-	if !conn.queue.push(data) {
+-		errors.LogDebug(context.Background(), "drop udp with size ", data.Len(), " to ", dst.NetAddr(), " original ", conn.dst.NetAddr(), " > queue full 2")
+-		data.Release()
++// Called with u locked. A flow with a write in progress stays with its original owner.
++func (u *udpConnectionHandler) reclaimDNS() bool {
++	for _, c := range u.udpConns {
++		if u.retireCompleted(c) {
++			return true
++		}
++	}
++	return false
++}
++
++// Called with u locked. Never wait for a writer while holding the handler lock.
++func (u *udpConnectionHandler) retireCompleted(c *udpConn) bool {
++	d := c.dns
++	if d == nil || d.opaque || d.pending != 0 || len(d.keys) == 0 || !d.writeMu.TryLock() {
++		return false
+ 	}
++	d.retired = true
++	delete(u.udpConns, c.src)
++	c.queue.close()
++	d.writeMu.Unlock()
++	return true
+ }
+ 
+ func (u *udpConnectionHandler) connectionFinished(conn *udpConn) {
++	if d := conn.dns; d != nil {
++		d.writeMu.Lock()
++		defer d.writeMu.Unlock()
++		d.retired = true
++	}
+ 	u.Lock()
+-	// Close runs twice per flow; a newer conn may already own this src.
+ 	if u.udpConns[conn.src] == conn {
+ 		delete(u.udpConns, conn.src)
+ 		conn.queue.close()
+@@ -83,14 +161,21 @@ func (u *udpConnectionHandler) connectionFinished(conn *udpConn) {
+ 	u.Unlock()
+ }
+ 
+-// Wake the dispatcher for every source and stop admitting new flows during shutdown.
++// Wake readers and dispatchers and stop admitting new flows during shutdown.
+ func (u *udpConnectionHandler) close() {
+ 	u.Lock()
+-	defer u.Unlock()
+-	for _, c := range u.udpConns {
+-		c.queue.close()
++	conns := u.udpConns
++	if conns != nil {
++		close(u.stopped)
+ 	}
+ 	u.udpConns = nil
++	u.Unlock()
++	for _, c := range conns {
++		if c.dns != nil {
++			c.dns.retire()
++		}
++		c.queue.close()
++	}
+ }
+ 
+ // udp connection abstraction
+@@ -98,6 +183,7 @@ type udpConn struct {
+ 	handler *udpConnectionHandler
+ 
+ 	queue *packetQueue
++	dns   *udpDNSExchange
+ 	src   net.Destination
+ 	dst   net.Destination
+ }
+@@ -134,7 +220,7 @@ func (c *udpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
+ 				dst = *b.UDP
+ 			}
+ 		}
+-		err := c.handler.writePacket(b.Bytes(), dst, c.src)
++		err := c.writePacket(b.Bytes(), dst, b.UDP == nil || *b.UDP == c.dst)
+ 		if err != nil {
+ 			buf.ReleaseMulti(mb[i:])
+ 			return err
+@@ -147,7 +233,7 @@ func (c *udpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
+ // Write returning packets back
+ func (c *udpConn) Write(p []byte) (int, error) {
+ 	// sending packets back mean sending payload with source/destination reversed
+-	err := c.handler.writePacket(p, c.dst, c.src)
++	err := c.writePacket(p, c.dst, true)
+ 	if err != nil {
+ 		return 0, err
+ 	}

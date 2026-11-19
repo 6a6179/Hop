@@ -15,6 +15,8 @@ XRAY_PATCHES=(
   XrayBridge/patches/0003-prefer-packet-destination.patch
   XrayBridge/patches/0004-bound-client-queues.patch
   XrayBridge/patches/0005-xdns-resolver-dial.patch
+  XrayBridge/patches/0006-reclaim-completed-dns-flows.patch
+  XrayBridge/patches/0007-dns-terminal-errors.patch
 )
 
 # A FIPS-enabled Go build defaults the runtime to FIPS mode. Its entropy path
@@ -104,6 +106,7 @@ chmod -R u+w "$build_bridge"
   GOWORK=off go mod edit -replace=github.com/xtls/xray-core=../xray-core
   GOWORK=off go test -mod=readonly -race -run '^TestHop' -count=1 \
     github.com/xtls/xray-core/proxy/tun \
+    github.com/xtls/xray-core/proxy/dns \
     github.com/xtls/xray-core/features/routing/dns \
     github.com/xtls/xray-core/transport/internet/finalmask/xdns
   GOWORK=off go test -mod=readonly -race .
