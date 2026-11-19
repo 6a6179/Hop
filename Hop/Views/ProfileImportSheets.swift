@@ -108,6 +108,10 @@ struct ImportTextSheet: View {
                                     .truncationMode(.middle)
                             }
                         }
+                        if draft.subscriptionURL != nil, importResult.incompleteSubscriptionInventory == true {
+                            Label("This is a partial inventory. You can add the available items as a new subscription. Updating an existing subscription requires a complete inventory.", systemImage: "exclamationmark.triangle")
+                                .font(.footnote)
+                        }
                         ImportPreviewView(result: importResult)
                     }
                 }
@@ -177,9 +181,6 @@ struct ImportTextSheet: View {
 
     private func save(_ importResult: ImportResult) {
         if let detectedSubscriptionURL = draft.subscriptionURL {
-            let importResult = importResult
-                .droppingRules()
-                .requiringSubscriptionGroupReview()
             onSave(.subscription(
                 SubscriptionSource(
                     name: detectedSubscriptionURL.host() ?? "Subscription",

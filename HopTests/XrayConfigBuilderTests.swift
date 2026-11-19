@@ -4,6 +4,16 @@ import XCTest
 final class XrayConfigBuilderTests: XCTestCase {
     private let builder = XrayConfigBuilder()
 
+    func testBuilderDisablesEngineLogOutputsBeforeCoreValidation() throws {
+        let json = try builder.build(profile: basicVLESS(), routingMode: .global, rules: [])
+        let config = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let log = try XCTUnwrap(config["log"] as? [String: Any])
+        XCTAssertEqual(log["access"] as? String, "none")
+        XCTAssertEqual(log["error"] as? String, "none")
+        XCTAssertEqual(log["dnsLog"] as? Bool, false)
+        XCTAssertEqual(log["logLevel"] as? String, "info")
+    }
+
     func testRenderedConfigIsCompactAndDeterministic() throws {
         let profile = basicVLESS()
         let first = try builder.build(profile: profile, routingMode: .global, rules: [])
@@ -246,6 +256,7 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual(tls["pinnedPeerCertSha256"] as? String, String(repeating: "ab", count: 32))
         XCTAssertEqual(tls["curvePreferences"] as? [String], ["X25519MLKEM768", "X25519"])
         XCTAssertEqual(tls["enableSessionResumption"] as? Bool, true)
+        XCTAssertEqual(tls["useSystemCA"] as? Bool, true)
         XCTAssertEqual(xhttp["mode"] as? String, "stream-up")
         XCTAssertEqual((extra["scMaxBufferedPosts"] as? NSNumber)?.intValue, 1)
         XCTAssertEqual((extra["scMaxEachPostBytes"] as? NSNumber)?.intValue, 128 * 1024)
@@ -284,6 +295,86 @@ final class XrayConfigBuilderTests: XCTestCase {
             )) { error in
                 XCTAssertTrue(error.localizedDescription.contains("Only one"), "\(error)")
             }
+        }
+    }
+
+    func testAdvancedTLSCannotReplaceAppleTrustStore() {
+        var profile = basicVLESS()
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "streamSettings": .object(["tlsSettings": .object(["useSystemCA": .bool(false)])]),
+        ])
+        assertRejected(profile, contains: "useSystemCA")
+    }
+
+    func testShadowsocks2022ChecksKeysBeforeTokenization() async throws {
+        let key16 = Data(repeating: 0xAB, count: 16).base64EncodedString()
+        let key32 = Data(repeating: 0xCD, count: 32).base64EncodedString()
+        let aes128 = "2022-blake3-aes-128-gcm"
+        let aes256 = "2022-blake3-aes-256-gcm"
+        let chacha = "2022-blake3-chacha20-poly1305"
+        var profile = basicVLESS()
+        profile.security = .none
+        for (method, password) in [(aes128, "\(key16):\(key16)"), (aes256, String(repeating: "!", count: 32)), (chacha, key32)] {
+            profile.options = .shadowsocks(ShadowsocksOptions(method: method, password: password))
+            try await XrayCoreClient.validate(configJSON: builder.build(profile: profile, routingMode: .global, rules: []))
+        }
+        let invalid = [
+            (aes128, String(repeating: "!", count: 17)), (aes256, key16),
+            (aes128, "\(key16):"), (chacha, "\(key32):\(key32)"),
+            (aes128, String(repeating: "A", count: 40) + "===="),
+            (aes128, String(repeating: "A", count: 16)), // Valid base64 decoding to only 12 bytes.
+        ]
+        for (method, password) in invalid {
+            profile.options = .shadowsocks(ShadowsocksOptions(method: method, password: password))
+            XCTAssertThrowsError(try builder.build(
+                profiles: [profile], groups: [], selectedTarget: .profile(profile.id),
+                routingMode: .global, rules: [], tokenizingSecretsWith: "test",
+            )) { error in
+                XCTAssertTrue(error.localizedDescription.contains("/options/password"))
+                XCTAssertFalse(error.localizedDescription.contains(password))
+            }
+        }
+    }
+
+    func testLegacyShadowsocks2022WireKeysSurvivePreflightAndTunnelResolution() async throws {
+        // SHA-256 of bytes 0..<32 (first 16 digest bytes), and 0..<48 (full digest).
+        let legacy32 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+        let effective16 = "Yw3NKWbEM2aRElRIu7JbTw=="
+        let legacy48 = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4v"
+        let effective32 = "Tb3CsrYssAdJeFvIQgIjbbw3d9dGYGEbjliBLwz95sM="
+        let key16 = "AAECAwQFBgcICQoLDA0ODw=="
+        let fixtures = [
+            ("2022-blake3-aes-128-gcm", "\(legacy32):\(key16):\(legacy32)", "\(effective16):\(key16):\(effective16)"),
+            ("2022-blake3-aes-256-gcm", legacy48, effective32),
+            ("2022-blake3-chacha20-poly1305", legacy48 + "\r\n", effective32),
+        ]
+        for (method, password, expected) in fixtures {
+            var profile = basicVLESS()
+            profile.security = .none
+            profile.options = .shadowsocks(ShadowsocksOptions(method: method, password: password))
+            var unreachable = profile
+            unreachable.id = UUID()
+            unreachable.options = .shadowsocks(ShadowsocksOptions(method: method, password: "bad"))
+            let plain = try builder.build(profile: profile, routingMode: .global, rules: [])
+            let outbound = try profileOutbound(parse(plain))
+            XCTAssertEqual((outbound["settings"] as? [String: Any])?["password"] as? String, expected)
+            try await XrayCoreClient.validate(configJSON: plain)
+
+            let nonce = UUID().uuidString
+            let tokenized = try builder.build(profiles: [unreachable, profile], groups: [], selectedTarget: .profile(profile.id), routingMode: .global, rules: [], tokenizingSecretsWith: nonce)
+            let key = HopSecret.key(profileID: profile.id, fieldRaw: ProfileSecretField.password.rawValue)
+            XCTAssertEqual(SecretResolver.referencedKeys(in: tokenized, nonce: nonce), [key])
+            let store = SecretStore.inMemory()
+            try SharedTunnelConfigPreparation(config: tokenized, nonce: nonce, profiles: [unreachable, profile], secretStore: store, configStore: .init()).writeReferencedSecrets()
+            let prefix = HopSecret.runtimeKeyPrefix(nonce: nonce)
+            XCTAssertEqual(store.value(forKey: prefix + key), expected)
+            let resolved = SecretResolver.resolve(tokenized, nonce: nonce, using: store, keyPrefix: prefix)
+            XCTAssertEqual(resolved.unresolved, 0)
+            XCTAssertEqual(try parse(resolved.config) as NSDictionary, try parse(plain) as NSDictionary)
+
+            XCTAssertEqual(profile.keychainSecretItems.first { $0.key == key }?.value, password)
+            let share = try XCTUnwrap(ProxyShareLink.shareLink(for: profile))
+            XCTAssertEqual(try ProxyImportService().importText(share).profiles.first?.options, profile.options)
         }
     }
 
@@ -447,7 +538,7 @@ final class XrayConfigBuilderTests: XCTestCase {
                 obfsPassword: "obfs-secret",
                 up: "100 mbps",
                 down: "200 mbps",
-                ports: "20000-20100",
+                ports: "20000:20063",
                 hopIntervalSeconds: 30,
                 udpIdleTimeoutSeconds: 60,
             )),
@@ -466,15 +557,53 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual(outbound["protocol"] as? String, "hysteria")
         XCTAssertEqual(stream["network"] as? String, "hysteria")
         XCTAssertEqual(hysteria["auth"] as? String, "auth")
+        XCTAssertEqual((stream["tlsSettings"] as? [String: Any])?["useSystemCA"] as? Bool, true)
         XCTAssertEqual(quic["congestion"] as? String, "brutal")
+        XCTAssertNil(quic["udpHop"])
+        XCTAssertEqual(udp.compactMap { $0["type"] as? String }, ["salamander", "udphop"])
+        let hop = try XCTUnwrap(udp.last?["settings"] as? [String: Any])
+        XCTAssertEqual(hop["remotePorts"] as? String, "20000-20063")
+        XCTAssertEqual(hop["interval"] as? Int, 30)
+        XCTAssertEqual(hop["mode"] as? String, "intervalLocal,intervalRemote")
         XCTAssertEqual((quic["initStreamReceiveWindow"] as? NSNumber)?.intValue, 512 * 1024)
         XCTAssertEqual((quic["maxStreamReceiveWindow"] as? NSNumber)?.intValue, 512 * 1024)
         XCTAssertEqual((quic["initConnectionReceiveWindow"] as? NSNumber)?.intValue, 2 * 1024 * 1024)
         XCTAssertEqual((quic["maxConnectionReceiveWindow"] as? NSNumber)?.intValue, 2 * 1024 * 1024)
         XCTAssertEqual((quic["maxIncomingStreams"] as? NSNumber)?.intValue, 0)
-        XCTAssertEqual(udp.first?["type"] as? String, "salamander")
-
         try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testMergedQUICSettingsBoundExpandedHopsAndBandwidth() {
+        var profile = ProxyProfile(
+            name: "Hysteria2",
+            endpoint: Endpoint(host: "hy.example.com", port: 443),
+            options: .hysteria2(Hysteria2Options(password: "auth", ports: "20000-20063,20000")),
+            security: .tls(TLSOptions(serverName: "hy.example.com", alpn: ["h3"])),
+        )
+        assertRejected(profile, contains: "expanded ports")
+        profile.options = .hysteria2(Hysteria2Options(password: "auth"))
+        for quic: [String: JSONValue] in [
+            ["UDPHOP": .object(["PORTS": .string("20000-20064")])],
+            ["udpHop": .object(["ports": .number(65536)])],
+            ["udpHop": .object(["ports": .number(443), "interval": .string("5-3601")])],
+            ["BrutalUp": .string("2 gbps")],
+            ["brutalDown": .string("2 gbps")],
+            ["brutalUp": .string("1000 mbps")], // Xray's mbps uses 1024² bits/s.
+            ["brutalUp": .string("524287 bps")], // Just under Xray's nonzero minimum.
+            ["brutalUp": .string("1 0 mbps")],
+        ] {
+            profile.xrayAdvanced = XrayAdvancedDocument([
+                "streamSettings": .object(["finalmask": .object(["quicParams": .object(quic)])]),
+            ])
+            assertRejected(profile, contains: "quicParams")
+        }
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "streamSettings": .object(["finalmask": .object(["quicParams": .object([
+                "brutalUp": .string("1000000000 bps"), "brutalDown": .string("524288 bps"),
+                "udpHop": .object(["ports": .number(443), "interval": .string("5-3600")]),
+            ])])]),
+        ])
+        XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .global, rules: []))
     }
 
     func testHysteriaUDPIdleTimeoutMatchesPinnedCoreBounds() async throws {
@@ -611,7 +740,7 @@ final class XrayConfigBuilderTests: XCTestCase {
         var profile = ProxyProfile(
             name: "Hysteria2 Collision",
             endpoint: Endpoint(host: "hy.example.com", port: 443),
-            options: .hysteria2(Hysteria2Options(password: "auth", up: "100 mbps", down: "200 mbps", ports: "20000-20100")),
+            options: .hysteria2(Hysteria2Options(password: "auth", up: "100 mbps", down: "200 mbps", ports: "20000-20063")),
             security: .tls(TLSOptions(serverName: "hy.example.com", alpn: ["h3"])),
             transport: TransportOptions(type: .hysteria),
         )
@@ -663,9 +792,31 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual((udp.first?["settings"] as? [String: Any])?["password"] as? String, "advanced-obfs")
         XCTAssertEqual(quic["brutalUp"] as? String, "100 mbps")
         XCTAssertEqual(quic["brutalDown"] as? String, "200 mbps")
-        XCTAssertEqual((quic["udpHop"] as? [String: Any])?["ports"] as? String, "30000")
+        XCTAssertNil(quic["udpHop"])
+        XCTAssertEqual(udp.last?["type"] as? String, "udphop")
+        XCTAssertEqual((udp.last?["settings"] as? [String: Any])?["remotePorts"] as? String, "30000")
         XCTAssertEqual((quic["initStreamReceiveWindow"] as? NSNumber)?.intValue, 262_144)
         try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testHysteriaSafeQUICDefaultsRespectExplicitAdvancedWindows() async throws {
+        var profile = ProxyProfile(
+            name: "Hysteria", endpoint: Endpoint(host: "hy.example.com", port: 443),
+            options: .hysteria2(Hysteria2Options(password: "auth")),
+            security: .tls(TLSOptions(serverName: "hy.example.com")),
+        )
+        profile.xrayAdvanced = XrayAdvancedDocument(["streamSettings": .object(["finalmask": .object([
+            "quicParams": .object(["initStreamReceiveWindow": .number(262_144)]),
+        ])])])
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let stream = try XCTUnwrap(profileOutbound(parse(json))["streamSettings"] as? [String: Any])
+        let mask = try XCTUnwrap(stream["finalmask"] as? [String: Any])
+        let quic = try XCTUnwrap(mask["quicParams"] as? [String: Any])
+        XCTAssertEqual(quic["initStreamReceiveWindow"] as? Int, 262_144)
+        XCTAssertEqual(quic["maxStreamReceiveWindow"] as? Int, IOSRuntimeLimits.default.maxQUICStreamWindowBytes)
+        try await XrayCoreClient.validate(configJSON: json)
+        profile.transport.finalMask = .object(["quicParams": .object(["initStreamReceiveWindow": .number(131_072)])])
+        assertRejected(profile, contains: "collides")
     }
 
     func testAdvancedOnlyFinalMaskReceivesSafeQUICDefaults() async throws {
@@ -759,6 +910,94 @@ final class XrayConfigBuilderTests: XCTestCase {
             profile.transport.finalMask = xdnsFinalMask(resolver)
             assertRejected(profile, contains: "XDNS resolvers")
         }
+    }
+
+    func testXDNSConvertsLegacyResolversWithoutBroadeningTheirDestinations() async throws {
+        var profile = basicVLESS()
+        profile.transport.finalMask = xdnsFinalMask([
+            "observe.invalid.:aaaa+udp://1.1.1.1:53",
+            "observe.invalid.:aaaa+udp://9.9.9.9:53",
+        ])
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let stream = try XCTUnwrap(profileOutbound(parse(json))["streamSettings"] as? [String: Any])
+        let mask = try XCTUnwrap(stream["finalmask"] as? [String: Any])
+        let layer = try XCTUnwrap((mask["udp"] as? [[String: Any]])?.first)
+        let settings = try XCTUnwrap(layer["settings"] as? [String: Any])
+        let domains = try XCTUnwrap(settings["domains"] as? [[String: Any]])
+        XCTAssertEqual(domains.count, 1)
+        XCTAssertEqual(domains.first?["names"] as? [String], ["observe.invalid"])
+        XCTAssertEqual(domains.first?["types"] as? [Int], [28])
+        XCTAssertEqual((settings["resolvers"] as? [[String: [String]]])?.first?["addrs"], ["1.1.1.1:53", "9.9.9.9:53"])
+        try await XrayCoreClient.validate(configJSON: json)
+
+        profile.transport.finalMask = xdnsFinalMask([
+            "first.invalid:txt+udp://1.1.1.1:53", "second.invalid:a+udp://9.9.9.9:53",
+        ])
+        assertRejected(profile, contains: "domain-to-resolver pairings")
+    }
+
+    func testCurrentXDNSBoundsEveryResolverAndRejectsUnsupportedWorkers() async throws {
+        let domains: JSONValue = .array([.object(["names": .array([.string("observe.invalid")])])])
+        func mask(_ resolver: [String: JSONValue]) -> JSONValue {
+            .object(["udp": .array([.object(["type": .string("xdns"), "settings": .object([
+                "domains": domains, "resolvers": .array([.object(resolver)]),
+            ])])])])
+        }
+        var profile = basicVLESS()
+        profile.transport.finalMask = mask(["addrs": .array([.string("udp://[2606:4700:4700::1111]:53")])])
+        try await XrayCoreClient.validate(configJSON: builder.build(profile: profile, routingMode: .global, rules: []))
+        for endpoint in ["https://1.1.1.1:443", "10.0.0.1:53", "dns.example:53"] {
+            profile.transport.finalMask = mask(["addrs": .array([.string("1.1.1.1:53"), .string(endpoint)])])
+            assertRejected(profile, contains: "public UDP IP literals")
+        }
+        profile.transport.finalMask = mask(["addrs": .array(Array(repeating: .string("1.1.1.1:53"), count: IOSRuntimeLimits.default.maxXDNSResolvers + 1))])
+        assertRejected(profile, contains: "public UDP IP literals")
+        profile.transport.finalMask = mask(["addrs": .array([.string("1.1.1.1:53")]), "WORKER": .number(999)])
+        assertRejected(profile, contains: "WORKER")
+    }
+
+    func testNovemberMaskFeaturesRequireClientPolicyOnTypedAndAdvancedPaths() {
+        func layer(_ family: String, _ type: String, _ settings: [String: JSONValue]) -> JSONValue {
+            .object([family: .array([.object(["type": .string(type), "settings": .object(settings)])])])
+        }
+        for (mask, message): (JSONValue, String) in [
+            (layer("tcp", "filter", ["allowedSourceIPs": .array([])]), "filter"),
+            (layer("udp", "filter", ["blockedSourceIPs": .array([])]), "filter"),
+            (layer("tcp", "xmc", [:]), "xmc"),
+            (layer("udp", "noise", ["ſcript": .string("return")]), "cannot be supplied"),
+            (layer("udp", "realm", ["PortMapping": .object([:])]), "PortMapping"),
+            (layer("udp", "realm", ["ipMode": .string("ipv4")]), "ipMode"),
+            (.object(["quicParams": .object(["DEBUG": .bool(true)])]), "debug logging"),
+            (.object(["quicParams": .object(["disableGSO": .bool(true)])]), "disableGSO"),
+            (layer("udp", "udphop", ["mode": .string("intervalLocal"), "remotePorts": .number(53)]), "remote hopping mode"),
+            (layer("udp", "udphop", ["mode": .string("perConnRemote"), "remoteIPs": .array([.string("1.1.1.1")])]), "remoteIPs"),
+        ] {
+            var profile = basicVLESS()
+            profile.transport.finalMask = mask
+            assertRejected(profile, contains: message)
+            profile.transport.finalMask = nil
+            profile.xrayAdvanced = XrayAdvancedDocument(["streamSettings": .object(["finalmask": mask])])
+            assertRejected(profile, contains: message)
+        }
+    }
+
+    func testUDPHoppingPreservesSocketOwnershipAndPreviousTransportScope() async throws {
+        var profile = basicVLESS()
+        profile.transport = TransportOptions(type: .mKCP)
+        profile.transport.finalMask = .object(["quicParams": .object(["udpHop": .object(["ports": .number(53)])])])
+        assertRejected(profile, contains: "requires Hysteria or XHTTP")
+
+        let hop: JSONValue = .object(["type": .string("udphop"), "settings": .object(["mode": .string("intervalLocal")])])
+        profile.transport.finalMask = .object(["udp": .array([hop, .object(["type": .string("noise")])])])
+        assertRejected(profile, contains: "opens its own socket must be last")
+        profile.transport.finalMask = .object(["udp": .array([hop])])
+        try await XrayCoreClient.validate(configJSON: builder.build(profile: profile, routingMode: .global, rules: []))
+        profile.transport.socketOptions = .object(["dialerProxy": .string("direct")])
+        assertRejected(profile, contains: "cannot use a socket dialer proxy")
+        profile.transport.finalMask = .object(["udp": .array([.object([
+            "type": .string("udphop"), "settings": .object(["mode": .string("perConnRemote"), "remotePorts": .number(443)]),
+        ])])])
+        try await XrayCoreClient.validate(configJSON: builder.build(profile: profile, routingMode: .global, rules: []))
     }
 
     func testFinalMaskBoundsXDNSResolversAndRejectsServerDomains() {
@@ -967,7 +1206,7 @@ final class XrayConfigBuilderTests: XCTestCase {
     }
 
     func testBuildsWireGuardWithNoKernelTun() async throws {
-        let profile = ProxyProfile(
+        var profile = ProxyProfile(
             name: "WireGuard",
             endpoint: Endpoint(host: "wg.example.com", port: 5182),
             options: .wireGuard(WireGuardOptions(
@@ -989,18 +1228,27 @@ final class XrayConfigBuilderTests: XCTestCase {
         let peer = try XCTUnwrap((settings["peers"] as? [[String: Any]])?.first)
 
         XCTAssertEqual(settings["noKernelTun"] as? Bool, true)
+        XCTAssertNil(settings["domainStrategy"])
         XCTAssertEqual(settings["reserved"] as? [Int], [1, 2, 3])
         XCTAssertEqual(peer["endpoint"] as? String, "wg.example.com:5182")
 
         try await XrayCoreClient.validate(configJSON: json)
+
+        if case var .wireGuard(options) = profile.options {
+            for strategy in ["ForceIPv4", "ForceIPv6", "ForceIPv4v6", "ForceIPv6v4"] {
+                options.domainStrategy = strategy
+                profile.options = .wireGuard(options)
+                assertRejected(profile, contains: "/options/domainStrategy")
+            }
+        }
     }
 
     func testBuildsFourWireGuardPeersAndRejectsFifth() throws {
         let peers = (0 ..< 4).map { index in
             WireGuardPeer(
-                publicKey: base64URL(bytes: 32, padded: true),
+                publicKey: Data(repeating: UInt8(index + 1), count: 32).base64EncodedString(),
                 endpoint: Endpoint(host: "wg\(index).example.com", port: 51820 + index),
-                preSharedKey: "psk-\(index)",
+                preSharedKey: Data(repeating: UInt8(index + 5), count: 32).base64EncodedString(),
                 allowedIPs: ["10.\(index).0.0/16"],
                 keepAliveSeconds: 20 + index,
             )
@@ -1026,9 +1274,46 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual(rendered.map { $0["endpoint"] as? String }, (0 ..< 4).map { "wg\($0).example.com:\(51820 + $0)" })
         XCTAssertEqual(settings["noKernelTun"] as? Bool, true)
 
+        var duplicate = peers[0]
+        duplicate.id = UUID()
+        duplicate.publicKey = String(repeating: "01", count: 32)
+        assertRejected(profile([peers[0], duplicate]), contains: "public keys must be unique")
+
         XCTAssertThrowsError(try builder.build(profile: profile(peers + [WireGuardPeer(publicKey: "fifth")]), routingMode: .global, rules: [])) { error in
             XCTAssertTrue(error.localizedDescription.contains("at most 4 peers"))
         }
+    }
+
+    func testWireGuardValidatesRealKeysBeforeReplacingSecretsWithTokens() throws {
+        let privateKey = String(repeating: "AB", count: 32)
+        let key = Data(repeating: 255, count: 32).base64EncodedString()
+        let peerKey = key.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+        var options = WireGuardOptions(privateKey: privateKey, peerPublicKey: peerKey, preSharedKey: key, localAddress: ["10.0.0.2/32"])
+        func build() throws -> String {
+            let profile = ProxyProfile(name: "WireGuard", endpoint: Endpoint(host: "wg.example.com", port: 51820), options: .wireGuard(options), security: .none)
+            return try builder.build(profiles: [profile], groups: [], selectedTarget: .profile(profile.id), routingMode: .global, rules: [], tokenizingSecretsWith: "wg-test")
+        }
+        let rendered = try build()
+        XCTAssertFalse(rendered.contains(privateKey))
+        XCTAssertFalse(rendered.contains(key))
+        XCTAssertTrue(rendered.contains(peerKey))
+        XCTAssertEqual(SecretResolver.referencedKeys(in: rendered, nonce: "wg-test").count, 2)
+
+        options.privateKey = "YQ=="
+        XCTAssertThrowsError(try build()) { XCTAssertTrue($0.localizedDescription.contains("/privateKey")) }
+        options.privateKey = privateKey
+        options.peerPublicKey = "YQ=="
+        XCTAssertThrowsError(try build()) { XCTAssertTrue($0.localizedDescription.contains("/publicKey")) }
+        options.peerPublicKey = peerKey
+        options.preSharedKey = String(repeating: "a", count: 64) + "?"
+        XCTAssertThrowsError(try build()) { XCTAssertTrue($0.localizedDescription.contains("/preSharedKey")) }
+        options.preSharedKey = nil
+        for prefix in ["192.0.2.1", "192.0.2.0/33", "2001:db8::/129", "010.0.0.1/8", "192.0.2.0/024", "example.com/24", "::1%lo0/128"] {
+            options.allowedIPs = [prefix]
+            XCTAssertThrowsError(try build(), prefix) { XCTAssertTrue($0.localizedDescription.contains("/allowedIPs/0")) }
+        }
+        options.allowedIPs = ["0.0.0.0/0", "192.0.2.7/24", "::/0", "2001:db8::1/128"]
+        XCTAssertNoThrow(try build())
     }
 
     func testLegacyWireGuardStateDecodesToOneEffectivePeer() throws {
@@ -1072,7 +1357,7 @@ final class XrayConfigBuilderTests: XCTestCase {
                 name: "VLESS mKCP",
                 endpoint: Endpoint(host: "kcp.example.com", port: 443),
                 options: .vless(VLESSOptions(uuid: "33333333-3333-4333-8333-333333333333", encryption: "none")),
-                security: .none,
+                security: .tls(TLSOptions(serverName: "kcp.example.com")),
                 transport: TransportOptions(type: .mKCP, kcp: XrayKCPOptions(mtu: 1350, tti: 20)),
             ),
             ProxyProfile(
@@ -1088,6 +1373,36 @@ final class XrayConfigBuilderTests: XCTestCase {
             let json = try builder.build(profile: profile, routingMode: .global, rules: [])
             try await XrayCoreClient.validate(configJSON: json)
         }
+    }
+
+    func testPinnedCoreExplainsPublicPlaintextRestrictionAndAcceptsPrivatePeers() async throws {
+        for options: ProtocolOptions in [
+            .vless(VLESSOptions(uuid: "33333333-3333-4333-8333-333333333333", encryption: "none")),
+            .trojan(TrojanOptions(password: "private-test-password")),
+        ] {
+            var profile = ProxyProfile(name: "Public", endpoint: Endpoint(host: "proxy.example.com", port: 443), options: options, security: .none)
+            let publicConfig = try builder.build(profile: profile, routingMode: .global, rules: [])
+            do {
+                try await XrayCoreClient.validate(configJSON: publicConfig)
+                XCTFail("Accepted public plaintext \(profile.proto)")
+            } catch let XrayCoreClientError.validationFailed(code) {
+                XCTAssertEqual(code, "\(profile.proto.rawValue)_transport_security_required")
+                let message = XrayCoreClientError.validationFailed(code: code).localizedDescription
+                XCTAssertTrue(message.contains("Public"))
+                XCTAssertFalse(message.contains("private-test-password"))
+            }
+            for host in ["192.168.1.1", "node.internal"] {
+                profile.endpoint.host = host
+                try await XrayCoreClient.validate(configJSON: builder.build(profile: profile, routingMode: .global, rules: []))
+            }
+        }
+        var encrypted = basicVLESS()
+        encrypted.security = .none
+        encrypted.options = .vless(VLESSOptions(
+            uuid: "33333333-3333-4333-8333-333333333333",
+            encryption: "mlkem768x25519plus.native.1rtt.\(base64URL(bytes: 32))",
+        ))
+        try await XrayCoreClient.validate(configJSON: builder.build(profile: encrypted, routingMode: .global, rules: []))
     }
 
     func testAdvancedJSONMergesLongTailAndRejectsCollisions() throws {
@@ -1351,7 +1666,7 @@ final class XrayConfigBuilderTests: XCTestCase {
             (["uplinkCapacity": JSONValue.number(21)], "write-buffer limit"),
             (["downlinkCapacity": JSONValue.number(21)], "read-buffer limit"),
             (["cwndMultiplier": JSONValue.number(17)], "congestion-window multiplier"),
-            (["maxSendingWindow": JSONValue.number(2 * 1024 * 1024)], "collides"),
+            (["maxSendingWindow": JSONValue.number(2 * 1024 * 1024)], "send window"),
         ] {
             var profile = basicVLESS()
             profile.security = .none
@@ -1365,19 +1680,28 @@ final class XrayConfigBuilderTests: XCTestCase {
         }
 
         var profile = basicVLESS()
-        profile.security = .none
-        profile.transport = TransportOptions(type: .mKCP)
+        profile.transport = TransportOptions(type: .mKCP, kcp: XrayKCPOptions(tti: 100))
         profile.xrayAdvanced = XrayAdvancedDocument([
             "streamSettings": .object([
                 "kcpSettings": .object([
-                    "uplinkCapacity": .number(20),
-                    "downlinkCapacity": .number(20),
+                    "mtu": .number(1300),
+                    "maxSendingWindow": .number(128 * 1024),
+                    "uplinkCapacity": .number(10),
+                    "downlinkCapacity": .number(10),
                     "cwndMultiplier": .number(16),
                 ]),
             ]),
         ])
         let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let outbound = try profileOutbound(parse(json))
+        let stream = try XCTUnwrap(outbound["streamSettings"] as? [String: Any])
+        XCTAssertEqual(stream["kcpSettings"] as? [String: Int], [
+            "mtu": 1300, "tti": 100, "maxSendingWindow": 128 * 1024,
+            "uplinkCapacity": 10, "downlinkCapacity": 10, "cwndMultiplier": 16,
+        ])
         try await XrayCoreClient.validate(configJSON: json)
+        profile.transport.kcp?.mtu = 1300
+        assertRejected(profile, contains: "collides")
     }
 
     func testURLTestGroupUsesBoundedObservatoryAndBalancer() async throws {
@@ -1401,6 +1725,7 @@ final class XrayConfigBuilderTests: XCTestCase {
 
         XCTAssertEqual(observatory["probeURL"] as? String, ProxyGroupTestOptions.defaultURL)
         XCTAssertEqual(balancer["strategy"] as? [String: String], ["type": "leastPing"])
+        XCTAssertEqual(balancer["fallbackTag"] as? String, "reject")
         try await XrayCoreClient.validate(configJSON: json)
     }
 
@@ -1516,6 +1841,32 @@ final class XrayConfigBuilderTests: XCTestCase {
         XCTAssertEqual(outbounds.first?["tag"] as? String, "proxy-\(fallback.id.uuidString.lowercased())")
         XCTAssertNil(root["observatory"])
         XCTAssertNil((root["routing"] as? [String: Any])?["balancers"])
+    }
+
+    func testLegacyProxySettingsOnlyMigrateExplicitTransportLayerChains() async throws {
+        var profile = basicVLESS()
+        for legacy in [
+            ["tag": JSONValue.string("direct")],
+            ["tag": .string("direct"), "transportLayer": .bool(false)],
+        ] {
+            profile.xrayAdvanced = XrayAdvancedDocument(["proxySettings": .object(legacy)])
+            assertRejected(profile, contains: "Protocol-layer chaining was removed")
+        }
+        let legacy: JSONValue = .object(["tag": .string("direct"), "transportLayer": .bool(true)])
+        profile.xrayAdvanced = XrayAdvancedDocument(["proxySettings": legacy])
+        let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+        let outbound = try profileOutbound(parse(json))
+        XCTAssertNil(outbound["proxySettings"])
+        let stream = try XCTUnwrap(outbound["streamSettings"] as? [String: Any])
+        XCTAssertEqual((stream["sockopt"] as? [String: Any])?["dialerProxy"] as? String, "direct")
+        try await XrayCoreClient.validate(configJSON: json)
+        profile.transport.socketOptions = .object(["dialerProxy": .string("direct")])
+        assertRejected(profile, contains: "collides")
+        profile.transport.socketOptions = nil
+        profile.xrayAdvanced = XrayAdvancedDocument([
+            "proxySettings": legacy, "streamSettings": .object(["sockopt": .object(["dialerProxy": .string("reject")])]),
+        ])
+        assertRejected(profile, contains: "conflicts")
     }
 
     func testOutboundChainsRejectMissingSelfAndCyclicReferences() async throws {

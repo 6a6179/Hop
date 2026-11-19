@@ -9,7 +9,7 @@ final class ProxyGroupEditorPerformanceTests: XCTestCase {
         let draft = ProxyGroupEditorDraft(group: ProxyGroup(
             name: "Fast Group",
             type: .urlTest,
-            members: [.direct],
+            members: [.profile(UUID())],
             testOptions: ProxyGroupTestOptions(url: candidateURL),
         ))
 
@@ -28,5 +28,16 @@ final class ProxyGroupEditorPerformanceTests: XCTestCase {
         }
         let accepted = try XCTUnwrap(acceptedResult)
         XCTAssertEqual(accepted.testOptions.url, candidateURL)
+    }
+
+    func testURLTestGroupRejectsBuiltInMembersAndClearsManualDefault() throws {
+        let member = OutboundTarget.profile(UUID())
+        var draft = ProxyGroupEditorDraft(group: ProxyGroup(name: "A", type: .select, members: [member, .direct], defaultTarget: member))
+        draft.type = .urlTest
+        XCTAssertFalse(draft.isStructurallyValid)
+        draft.members = [member, .reject]
+        XCTAssertNil(draft.makeGroup(probeURLIsAllowed: true))
+        draft.members = [member]
+        XCTAssertNil(try XCTUnwrap(draft.makeGroup(probeURLIsAllowed: true)).defaultTarget)
     }
 }

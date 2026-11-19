@@ -2,6 +2,8 @@
 import XCTest
 
 final class LatencyTesterTests: XCTestCase {
+    private let probePayload = Array("reply".utf8)
+
     // MARK: - Settings persistence / backward compatibility
 
     func testAppSettingsDecodesLegacyStateWithoutLatencyMethod() throws {
@@ -112,7 +114,7 @@ final class LatencyTesterTests: XCTestCase {
     // MARK: - ICMP packet construction
 
     func testICMPv4EchoRequestHasValidChecksum() {
-        let packet = LatencyTester.icmpEchoRequest(isIPv6: false, identifier: 0xABCD, sequence: 7)
+        let packet = LatencyTester.icmpEchoRequest(isIPv6: false, identifier: 0xABCD, sequence: 7, payload: probePayload)
         XCTAssertEqual(packet[0], 8) // echo request type
         XCTAssertEqual(packet[1], 0) // code
         // Identifier / sequence are stored big-endian.
@@ -123,7 +125,7 @@ final class LatencyTesterTests: XCTestCase {
     }
 
     func testICMPv6EchoRequestLeavesChecksumForKernel() {
-        let packet = LatencyTester.icmpEchoRequest(isIPv6: true, identifier: 1, sequence: 1)
+        let packet = LatencyTester.icmpEchoRequest(isIPv6: true, identifier: 1, sequence: 1, payload: probePayload)
         XCTAssertEqual(packet[0], 128) // ICMPv6 echo request type
         XCTAssertEqual(packet[2], 0)
         XCTAssertEqual(packet[3], 0) // kernel computes ICMPv6 checksum
@@ -139,26 +141,31 @@ final class LatencyTesterTests: XCTestCase {
 
     func testMatchesIPv4ReplyWithLeadingIPHeader() {
         let reply = ipv4Reply(identifier: 0x1234, sequence: 9, type: 0)
-        XCTAssertTrue(LatencyTester.isMatchingReply(reply, isIPv6: false, identifier: 0x1234, sequence: 9))
+        XCTAssertTrue(LatencyTester.isMatchingReply(reply, isIPv6: false, identifier: 0x1234, sequence: 9, payload: probePayload))
     }
 
     func testRejectsIPv4ReplyWithWrongIdentifierOrType() {
         let wrongID = ipv4Reply(identifier: 0x1234, sequence: 9, type: 0)
-        XCTAssertFalse(LatencyTester.isMatchingReply(wrongID, isIPv6: false, identifier: 0x9999, sequence: 9))
+        XCTAssertFalse(LatencyTester.isMatchingReply(wrongID, isIPv6: false, identifier: 0x9999, sequence: 9, payload: probePayload))
 
         let echoRequestType = ipv4Reply(identifier: 0x1234, sequence: 9, type: 8)
-        XCTAssertFalse(LatencyTester.isMatchingReply(echoRequestType, isIPv6: false, identifier: 0x1234, sequence: 9))
+        XCTAssertFalse(LatencyTester.isMatchingReply(echoRequestType, isIPv6: false, identifier: 0x1234, sequence: 9, payload: probePayload))
+    }
+
+    func testConcurrentProbesCannotAcceptEachOthersReply() {
+        let reply = ipv4Reply(identifier: 0x1234, sequence: 9, type: 0)
+        XCTAssertFalse(LatencyTester.isMatchingReply(reply, isIPv6: false, identifier: 0x1234, sequence: 9, payload: [42]))
     }
 
     func testMatchesIPv6ReplyWithoutIPHeader() {
         let reply: [UInt8] = [129, 0, 0, 0, 0x12, 0x34, 0x00, 0x09] + Array("reply".utf8)
-        XCTAssertTrue(LatencyTester.isMatchingReply(reply, isIPv6: true, identifier: 0x1234, sequence: 9))
+        XCTAssertTrue(LatencyTester.isMatchingReply(reply, isIPv6: true, identifier: 0x1234, sequence: 9, payload: probePayload))
     }
 
     func testMatchesBareIPv4ReplyWithoutIPHeader() {
         // Some stacks deliver the ICMP message with no IP header.
         let reply: [UInt8] = [0, 0, 0, 0, 0x12, 0x34, 0x00, 0x09] + Array("reply".utf8)
-        XCTAssertTrue(LatencyTester.isMatchingReply(reply, isIPv6: false, identifier: 0x1234, sequence: 9))
+        XCTAssertTrue(LatencyTester.isMatchingReply(reply, isIPv6: false, identifier: 0x1234, sequence: 9, payload: probePayload))
     }
 
     // MARK: - Helpers

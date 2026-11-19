@@ -16,13 +16,15 @@ import (
 
 	"github.com/xtls/xray-core/common/platform"
 	"github.com/xtls/xray-core/core"
+	"github.com/xtls/xray-core/infra/conf/serial"
+	"github.com/xtls/xray-core/transport/internet"
 )
 
 const (
 	bridgeVersion = 1
 	goMemoryLimit = 30 * 1024 * 1024
-	xrayTag       = "v26.6.27"
-	xrayCommit    = "45cf2898ab12e97a55dd8f1f3d78d903340bdc9e"
+	xrayTag       = "v26.11.9"
+	xrayCommit    = "676eaf66f8f05d4d558ee7a74b4736623d3feeb9"
 )
 
 type request struct {
@@ -98,6 +100,19 @@ func init() {
 	configureMemoryRuntime()
 }
 
+func loadConfig(configJSON string) (*core.Config, error) {
+	// Hop emits JSON programmatically. Use the pinned strict reader directly
+	// and check process-owned settings before Xray's Build applies them.
+	config, err := serial.DecodeJSONConfigStrict(strings.NewReader(configJSON))
+	if err != nil {
+		return nil, err
+	}
+	if len(config.Env) != 0 {
+		return nil, fmt.Errorf("environment overrides are not allowed")
+	}
+	return config.Build()
+}
+
 func configureMemoryRuntime() {
 	debug.SetGCPercent(10)
 	debug.SetMemoryLimit(goMemoryLimit)
@@ -151,9 +166,15 @@ func Invoke(requestJSON string) (responseJSON string) {
 }
 
 func validate(req request) response {
+	// Constructing a validation instance installs process-global dialer features.
+	// A live instance owns those features until stop finishes.
+	if state.instance != nil {
+		return failure("already_running", "stop the running Xray instance before validating another configuration")
+	}
 	// Exact parsing constructs a short-lived core instance and can transiently
 	// retain geodata. Return those pages before handing control back to Swift.
 	defer debug.FreeOSMemory()
+	defer internet.InitSystemDialer(nil, nil)
 
 	configJSON := req.configJSON()
 	if configJSON == "" {
@@ -163,7 +184,7 @@ func validate(req request) response {
 	environment := applyEnvironment(req)
 	defer restoreEnvironment(environment)
 
-	config, err := core.LoadConfig("json", strings.NewReader(configJSON))
+	config, err := loadConfig(configJSON)
 	if err != nil {
 		return failure("invalid_config", err.Error())
 	}
@@ -203,6 +224,7 @@ func start(req request) response {
 		if committed {
 			return
 		}
+		defer internet.InitSystemDialer(nil, nil)
 		// Restore process-wide bridge settings even if cleanup of a partially
 		// constructed core panics. Invoke's outer recovery will translate the
 		// panic, but a leaked TUN_FD or asset path would poison the next start.
@@ -212,7 +234,7 @@ func start(req request) response {
 		}
 	}()
 
-	config, err := core.LoadConfig("json", strings.NewReader(configJSON))
+	config, err := loadConfig(configJSON)
 	if err != nil {
 		return failure("start_failed", err.Error())
 	}
@@ -240,6 +262,7 @@ func stop() response {
 	// This also runs for an idempotent stop, so Swift can request an explicit
 	// heap release even after the core has already torn itself down.
 	defer debug.FreeOSMemory()
+	defer internet.InitSystemDialer(nil, nil)
 
 	if state.instance == nil {
 		stopMemoryCollector()

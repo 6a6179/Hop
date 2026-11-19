@@ -15,7 +15,7 @@ enum XrayConfigError: LocalizedError {
 }
 
 struct XrayConfigBuilder {
-    static let coreVersion = "v26.6.27"
+    static let coreVersion = XrayAdvancedDocument.currentSchemaVersion
 
     var limits: IOSRuntimeLimits = .default
 
@@ -45,6 +45,7 @@ struct XrayConfigBuilder {
         rules: [RoutingRule],
         settings: AppSettings = .defaults,
         logOutputPath _: String? = nil,
+        tokenizingSecretsWith nonce: String? = nil,
     ) throws -> String {
         try validateGlobalAdvanced(settings.xrayAdvanced)
 
@@ -75,7 +76,7 @@ struct XrayConfigBuilder {
 
         try validateURLGroups(Array(resolver.urlGroups.values))
 
-        var outbounds = try reachableProfiles.map(outboundDictionary)
+        var outbounds = try reachableProfiles.map { try outboundDictionary(for: $0, tokenizingSecretsWith: nonce) }
         try validateHeavyOutboundCount(outbounds)
         outbounds.append([
             "tag": .string("direct"),
@@ -97,8 +98,9 @@ struct XrayConfigBuilder {
         var root: JSONObject = try [
             "log": .object([
                 "access": .string("none"),
-                "loglevel": .string(xrayLogLevel(settings.logLevel)),
-                "maskAddress": .string("half"),
+                "dnsLog": .bool(false),
+                "error": .string("none"),
+                "logLevel": .string(xrayLogLevel(settings.logLevel)),
             ]),
             "dns": .object(dnsDictionary(settings: settings)),
             "inbounds": .array([.object(tunInboundDictionary(settings: settings))]),
@@ -301,6 +303,7 @@ private extension XrayConfigBuilder {
     ]
 
     static let forbiddenAdvancedKeys: Set<String> = [
+        "script",
         "allowInsecure",
         "api",
         "auth",
@@ -339,6 +342,7 @@ private extension XrayConfigBuilder {
         "rand", "length", "lengths", "maxSplit", "packetSize",
         "paddingMin", "paddingMax", "padding_min", "padding_max",
     ]
+    static let memorySensitiveKeysByLowercase = Dictionary(uniqueKeysWithValues: memorySensitiveKeys.map { ($0.lowercased(), $0) })
     static let positiveMemorySensitiveKeys: Set<String> = [
         "maxConnections", "scMaxBufferedPosts", "scMaxEachPostBytes",
         "handshake", "connIdle",
@@ -423,8 +427,10 @@ private extension XrayConfigBuilder {
         ]
     }
 
-    func outboundDictionary(for profile: ProxyProfile) throws -> JSONObject {
-        try validate(profile)
+    func outboundDictionary(for original: ProxyProfile, tokenizingSecretsWith nonce: String?) throws -> JSONObject {
+        try validate(original)
+        let runtime = try original.normalizingShadowsocks2022Keys()
+        let profile = nonce.map { runtime.tokenizingSecrets(nonce: $0) } ?? runtime
         var outbound: JSONObject = [
             "tag": .string(Self.tag(for: profile)),
         ]
@@ -522,23 +528,12 @@ private extension XrayConfigBuilder {
             if let timeout = options.udpIdleTimeoutSeconds {
                 try require((2 ... 600).contains(timeout), path: "\(path)/options/udpIdleTimeoutSeconds", "Hysteria2 UDP idle timeout must be between 2 and 600 seconds.")
             }
-            if let ports = options.ports {
-                let hops = ports.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                try require(!hops.isEmpty && hops.count <= limits.maxHysteriaPortHops, path: "\(path)/options/ports", "Hysteria2 port hopping exceeds the iOS limit of \(limits.maxHysteriaPortHops) entries.")
-                try require(hops.allSatisfy(validPortOrRange), path: "\(path)/options/ports", "Hysteria2 port hopping contains an invalid port or range.")
-            }
-            for (label, value) in [("up", options.up), ("down", options.down)] {
-                if let value, let mbps = bandwidthMbps(value) {
-                    try require(mbps <= Double(limits.maxHysteriaBandwidthMbps), path: "\(path)/options/\(label)", "Hysteria2 bandwidth exceeds the \(limits.maxHysteriaBandwidthMbps) Mbps iOS limit.")
-                } else if value != nil {
-                    try require(false, path: "\(path)/options/\(label)", "Hysteria2 bandwidth must use bps, kbps, mbps, or gbps.")
-                }
-            }
         case .tuic, .anyTLS:
             break
         case let .shadowsocks(options):
+            let method = options.method.lowercased()
             try require(
-                Self.secureShadowsocksMethods.contains(options.method.lowercased()),
+                Self.secureShadowsocksMethods.contains(method),
                 path: "\(path)/options/method",
                 "Unsupported or insecure Shadowsocks cipher \(options.method).",
             )
@@ -553,15 +548,32 @@ private extension XrayConfigBuilder {
             break
         case let .wireGuard(options):
             try require(profile.security.layer == .none, path: "\(path)/security", "WireGuard cannot use an additional TLS or REALITY layer.")
+            if let strategy = nonempty(options.domainStrategy) {
+                try require(
+                    strategy.lowercased() == "forceip", path: "\(path)/options/domainStrategy",
+                    "Xray no longer applies a WireGuard IP-family strategy to tunneled destinations. Clear the legacy domain strategy to use automatic address selection.",
+                )
+            }
+            try require(wireGuardKeyHex(options.privateKey) != nil, path: "\(path)/options/privateKey", "WireGuard private key must encode 32 bytes.")
             let peers = options.effectivePeers
             try require(!peers.isEmpty && peers.count <= limits.maxWireGuardPeers, path: "\(path)/options/peers", "WireGuard supports at most \(limits.maxWireGuardPeers) peers on iOS.")
             if options.peers != nil {
                 try require(Set(peers.map(\.id)).count == peers.count, path: "\(path)/options/peers", "WireGuard peer IDs must be unique.")
             }
+            var peerKeys = Set<String>()
             for (index, peer) in peers.enumerated() {
                 let peerPath = "\(path)/options/peers/\(index)"
-                try require(!peer.publicKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, path: "\(peerPath)/publicKey", "WireGuard peer public key is required.")
+                guard let publicKey = wireGuardKeyHex(peer.publicKey) else {
+                    throw XrayConfigError.validationFailed([XrayValidationIssue(path: "\(peerPath)/publicKey", message: "WireGuard peer public key must encode 32 bytes.")])
+                }
+                try require(peerKeys.insert(publicKey).inserted, path: "\(peerPath)/publicKey", "WireGuard peer public keys must be unique.")
+                if let key = peer.preSharedKey, !key.isEmpty {
+                    try require(wireGuardKeyHex(key) != nil, path: "\(peerPath)/preSharedKey", "WireGuard preshared key must encode 32 bytes.")
+                }
                 try require((peer.allowedIPs?.count ?? 2) <= 32, path: "\(peerPath)/allowedIPs", "Each WireGuard peer supports at most 32 allowed-IP entries on iOS.")
+                for (position, prefix) in (peer.allowedIPs ?? []).enumerated() {
+                    try require(validWireGuardPrefix(prefix), path: "\(peerPath)/allowedIPs/\(position)", "WireGuard allowed IP must be an IPv4 or IPv6 CIDR prefix.")
+                }
                 if let endpoint = peer.endpoint {
                     try require(!endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, path: "\(peerPath)/endpoint/host", "WireGuard peer endpoint host is required.")
                     try require((1 ... 65535).contains(endpoint.port), path: "\(peerPath)/endpoint/port", "WireGuard peer endpoint port must be between 1 and 65535.")
@@ -676,28 +688,7 @@ private extension XrayConfigBuilder {
             try validateObject(xhttpExtra, allowed: transportAdvancedKeys(for: .xhttp), path: "\(profilePath)/transport/xhttpExtra")
             try validateForbiddenFields(xhttpExtra, path: "\(profilePath)/transport/xhttpExtra")
         }
-        if let kcp = transport.kcp {
-            if let mtu = kcp.mtu {
-                try require((21 ... 1500).contains(mtu), path: "\(profilePath)/transport/kcp/mtu", "mKCP MTU must be between 21 and 1500.")
-            }
-            if let tti = kcp.tti {
-                try require((10 ... 1000).contains(tti), path: "\(profilePath)/transport/kcp/tti", "mKCP TTI must be between 10 and 1000 ms.")
-            }
-            let mtu = kcp.mtu ?? 1350
-            let window = kcp.maxSendingWindow ?? limits.maxKCPWriteBufferBytes
-            try require(window >= mtu && window <= limits.maxKCPWriteBufferBytes, path: "\(profilePath)/transport/kcp/maxSendingWindow", "mKCP send window must be at least its MTU and no larger than the 1 MiB iOS buffer limit.")
-            let cwndMultiplier = kcp.cwndMultiplier ?? 1
-            try require((1 ... limits.maxKCPCongestionWindowMultiplier).contains(cwndMultiplier), path: "\(profilePath)/transport/kcp/cwndMultiplier", "mKCP congestion-window multiplier must be between 1 and \(limits.maxKCPCongestionWindowMultiplier) on iOS.")
-            let tti = kcp.tti ?? 50
-            let intervalsPerSecond = max(1, 1000 / tti)
-            let bytesPerMiB = 1024 * 1024
-            let maxUplinkCapacity = limits.maxKCPWriteBufferBytes * intervalsPerSecond / bytesPerMiB
-            let maxDownlinkCapacity = limits.maxKCPReadBufferBytes * intervalsPerSecond / bytesPerMiB
-            let uplinkCapacity = kcp.uplinkCapacity ?? 5
-            let downlinkCapacity = kcp.downlinkCapacity ?? 20
-            try require((0 ... maxUplinkCapacity).contains(uplinkCapacity), path: "\(profilePath)/transport/kcp/uplinkCapacity", "mKCP uplink in-flight data exceeds the 1 MiB iOS write-buffer limit.")
-            try require((0 ... maxDownlinkCapacity).contains(downlinkCapacity), path: "\(profilePath)/transport/kcp/downlinkCapacity", "mKCP downlink in-flight data exceeds the 1 MiB iOS read-buffer limit.")
-        }
+        try require(transport.kcp == nil || transport.type == .mKCP, path: "\(profilePath)/transport/kcp", "mKCP options require the mKCP transport.")
         if let mux = transport.mux {
             try require(mux.concurrency <= limits.maxMuxConcurrency, path: "\(profilePath)/transport/mux/concurrency", "Mux concurrency exceeds the iOS limit of \(limits.maxMuxConcurrency).")
             try require(mux.xudpConcurrency <= limits.maxXUDPConcurrency, path: "\(profilePath)/transport/mux/xudpConcurrency", "XUDP concurrency exceeds the iOS limit of \(limits.maxXUDPConcurrency).")
@@ -895,7 +886,7 @@ private extension XrayConfigBuilder {
         case .http, .socks:
             ["address", "port", "user", "pass"]
         case .wireGuard:
-            ["noKernelTun", "secretKey", "address", "peers", "mtu", "reserved", "domainStrategy"]
+            ["noKernelTun", "secretKey", "address", "peers", "mtu", "reserved"]
         case .tuic, .anyTLS:
             []
         }
@@ -1066,7 +1057,7 @@ private extension XrayConfigBuilder {
         }
 
         if let finalMask = profile.transport.finalMask {
-            stream["finalmask"] = try finalMaskWithSafeDefaults(finalMask)
+            stream["finalmask"] = finalMask
         }
         if let socketOptions = profile.transport.socketOptions {
             stream["sockopt"] = socketOptions
@@ -1085,8 +1076,10 @@ private extension XrayConfigBuilder {
         ]
         try addSecurity(profile.security, to: &stream)
 
-        var finalMask = try finalMaskWithSafeDefaults(profile.transport.finalMask ?? .object([:])).objectValue ?? [:]
-        var quic = finalMask["quicParams"]?.objectValue ?? [:]
+        var finalMask = profile.transport.finalMask?.objectValue ?? [:]
+        guard var quic = (finalMask["quicParams"] ?? .object([:])).objectValue else {
+            throw XrayConfigError.validationFailed([XrayValidationIssue(path: "/transport/finalMask/quicParams", message: "QUIC parameters must be a JSON object.")])
+        }
         for (key, isTyped) in [
             ("brutalUp", options.up != nil),
             ("brutalDown", options.down != nil),
@@ -1108,13 +1101,15 @@ private extension XrayConfigBuilder {
             quic["congestion"] = .string("brutal")
         }
         if let ports = options.ports {
-            var udpHop: JSONObject = ["ports": .string(ports)]
+            // Keep the same intermediate shape as persisted advanced profiles.
+            // Finalization converts it to the current UDP mask after merging
+            // all layers, so typed and advanced forms share collision checks.
+            var udpHop: JSONObject = ["ports": .string(ports.replacingOccurrences(of: ":", with: "-"))]
             if let interval = options.hopIntervalSeconds {
                 udpHop["interval"] = .number(Double(interval))
             }
             quic["udpHop"] = .object(udpHop)
         }
-        fillSafeQUICDefaults(into: &quic)
         finalMask["quicParams"] = .object(quic)
 
         if let obfs = options.obfs, !obfs.isEmpty {
@@ -1167,6 +1162,7 @@ private extension XrayConfigBuilder {
 
     func tlsDictionary(_ tls: TLSOptions) -> JSONObject {
         compactObject([
+            "useSystemCA": .bool(true),
             "serverName": nonempty(tls.serverName).map(JSONValue.string),
             "alpn": tls.alpn.isEmpty ? nil : .array(tls.alpn.map(JSONValue.string)),
             "fingerprint": nonempty(tls.utlsFingerprint).map(JSONValue.string),
@@ -1274,14 +1270,13 @@ private extension XrayConfigBuilder {
     }
 
     func kcpDictionary(_ options: XrayKCPOptions?) -> JSONObject {
-        let mtu = options?.mtu ?? 1350
-        return compactObject([
-            "mtu": .number(Double(mtu)),
+        compactObject([
+            "mtu": options?.mtu.map { .number(Double($0)) },
             "tti": options?.tti.map { .number(Double($0)) },
             "uplinkCapacity": options?.uplinkCapacity.map { .number(Double($0)) },
             "downlinkCapacity": options?.downlinkCapacity.map { .number(Double($0)) },
             "cwndMultiplier": options?.cwndMultiplier.map { .number(Double($0)) },
-            "maxSendingWindow": .number(Double(options?.maxSendingWindow ?? limits.maxKCPWriteBufferBytes)),
+            "maxSendingWindow": options?.maxSendingWindow.map { .number(Double($0)) },
         ])
     }
 
@@ -1292,6 +1287,45 @@ private extension XrayConfigBuilder {
             "xudpConcurrency": .number(Double(mux.xudpConcurrency)),
             "xudpProxyUDP443": nonempty(mux.xudpProxyUDP443).map(JSONValue.string),
         ])
+    }
+
+    /// Xray accepts hex, standard base64, and URL-safe base64. WireGuard identifies
+    /// peers by the decoded bytes, even when two rows use different encodings.
+    func wireGuardKeyHex(_ value: String) -> String? {
+        if value.utf8.count == 64, value.allSatisfy({ $0.isASCII && $0.isHexDigit }) {
+            return value.lowercased()
+        }
+        var raw = value
+        if raw.hasSuffix("=") {
+            raw.removeLast()
+        }
+        raw = raw.replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\n", with: "")
+        guard raw.utf8.count == 43 else { return nil }
+        if !raw.contains("+"), !raw.contains("/") {
+            raw = raw.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        }
+        guard let bytes = Data(base64Encoded: raw + "="), bytes.count == 32 else { return nil }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    func validWireGuardPrefix(_ value: String) -> Bool {
+        let parts = value.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2, let bits = Int(parts[1]), String(bits) == parts[1],
+              !parts[0].utf8.contains(0), !parts[0].contains("%")
+        else { return false }
+        let address = String(parts[0])
+        // Darwin accepts zero-padded IPv4 octets; Go's netip.ParsePrefix rejects them.
+        if address.contains("."), let dotted = address.split(separator: ":").last,
+           dotted.split(separator: ".").contains(where: { $0.count > 1 && $0.first == "0" })
+        {
+            return false
+        }
+        if address.contains(":") {
+            var ipv6 = in6_addr()
+            return (0 ... 128).contains(bits) && inet_pton(AF_INET6, address, &ipv6) == 1
+        }
+        var ipv4 = in_addr()
+        return (0 ... 32).contains(bits) && inet_pton(AF_INET, address, &ipv4) == 1
     }
 
     func wireGuardSettings(profile: ProxyProfile, options: WireGuardOptions) -> JSONObject {
@@ -1319,7 +1353,6 @@ private extension XrayConfigBuilder {
         if let reserved = options.reserved {
             result["reserved"] = .array(reserved.map { .number(Double($0)) })
         }
-        insert(options.domainStrategy, key: "domainStrategy", into: &result)
         return result
     }
 
@@ -1330,10 +1363,17 @@ private extension XrayConfigBuilder {
     func applyProfileAdvanced(_ advanced: XrayAdvancedDocument?, profile: ProxyProfile, to outbound: inout JSONObject) throws {
         if let advanced, !advanced.isEmpty {
             var copy = advanced.values
-            if var stream = copy["streamSettings"]?.objectValue,
-               let socketOptions = stream.removeValue(forKey: "socketOptions")
-            {
-                stream["sockopt"] = socketOptions
+            if let proxy = copy.removeValue(forKey: "proxySettings")?.objectValue {
+                let path = "/profiles/\(profile.id)/proxySettings"
+                try require(proxy["transportLayer"] == .bool(true), path: path, "Protocol-layer chaining was removed. Review this chain and choose a socket dialer proxy before connecting.")
+                guard let tag = proxy["tag"]?.stringValue, !tag.isEmpty else {
+                    throw XrayConfigError.validationFailed([XrayValidationIssue(path: path, message: "The outbound chain needs a proxy tag.")])
+                }
+                var stream = copy["streamSettings"]?.objectValue ?? [:]
+                var socket = stream["sockopt"]?.objectValue ?? [:]
+                try require(socket["dialerProxy"] == nil, path: path, "proxySettings.tag conflicts with sockopt.dialerProxy.")
+                socket["dialerProxy"] = .string(tag)
+                stream["sockopt"] = .object(socket)
                 copy["streamSettings"] = .object(stream)
             }
             try mergeAdvanced(copy, into: &outbound, path: "/profiles/\(profile.id.uuidString.lowercased())")
@@ -1374,7 +1414,9 @@ private extension XrayConfigBuilder {
         if let key = finalMaskKeys.first,
            let finalMask = stream.removeValue(forKey: key)
         {
-            stream["finalmask"] = try finalMaskWithSafeDefaults(finalMask)
+            stream["finalmask"] = try finalMaskForPinnedCore(
+                finalMask, stream: stream, path: "\(path)/finalmask",
+            )
         }
         if isXHTTPH3(stream) {
             var finalMask = stream["finalmask"]?.objectValue ?? [:]
@@ -1383,17 +1425,24 @@ private extension XrayConfigBuilder {
             finalMask["quicParams"] = .object(quic)
             stream["finalmask"] = .object(finalMask)
         }
+        if let quic = stream["finalmask"]?.objectValue?["quicParams"]?.objectValue {
+            try validateQUICBandwidth(quic, path: "\(path)/finalmask/quicParams")
+        }
         let kcpKeys = stream.keys.filter { jsonKeyEquals($0, "kcpSettings") }
         try require(kcpKeys.count <= 1, path: "\(path)/kcpSettings", "JSON object contains duplicate protected keys that differ only by case.")
         if let key = kcpKeys.first,
            let kcp = stream.removeValue(forKey: key)
         {
-            guard let settings = kcp.objectValue else {
+            guard var settings = kcp.objectValue else {
                 try require(false, path: "\(path)/kcpSettings", "mKCP settings must be a JSON object.")
                 return
             }
+            // Only explicit typed fields take part in collision checks. Apply the
+            // iOS send-window cap after the accepted advanced settings are merged.
+            fillIfMissing("mtu", value: .number(1350), into: &settings)
+            fillIfMissing("maxSendingWindow", value: .number(Double(limits.maxKCPWriteBufferBytes)), into: &settings)
             try validateMergedKCPSettings(settings, path: "\(path)/kcpSettings")
-            stream["kcpSettings"] = kcp
+            stream["kcpSettings"] = .object(settings)
         }
         outbound["streamSettings"] = .object(stream)
     }
@@ -1465,9 +1514,10 @@ private extension XrayConfigBuilder {
         setRouteTarget(mode == .direct ? .outbound("direct") : selected, in: &catchAll)
         resultRules.append(.object(catchAll))
 
-        let needsDestinationIP = mode == .rule && rules.contains { [.geoIP, .ipIsPrivate].contains($0.kind) }
+        // IPIfNonMatch never retries DNS once our TCP/UDP catch-all matches.
+        let needsDestinationIP = mode == .rule && rules.contains { [.geoIP, .ipIsPrivate, .ipCIDR].contains($0.kind) }
         var routing: JSONObject = [
-            "domainStrategy": .string(needsDestinationIP ? "IPIfNonMatch" : "AsIs"),
+            "domainStrategy": .string(needsDestinationIP ? "IPOnDemand" : "AsIs"),
             "rules": .array(resultRules),
         ]
         let urlGroups = resolver.urlGroups.values.sorted { $0.group.id.uuidString < $1.group.id.uuidString }
@@ -1477,6 +1527,9 @@ private extension XrayConfigBuilder {
                     "tag": .string(Self.tag(for: resolved.group)),
                     "selector": .array(resolved.memberTags.map(JSONValue.string)),
                     "strategy": .object(["type": .string("leastPing")]),
+                    // Without a fallback Xray uses the global first outbound when
+                    // no member is healthy, even if it belongs to another group.
+                    "fallbackTag": .string("reject"),
                 ])
             })
         }
@@ -1497,7 +1550,7 @@ private extension XrayConfigBuilder {
 
         var result: JSONObject = ["type": .string("field")]
         setRouteTarget(destination, in: &result)
-        let values = stringList(rule.value)
+        let values = rule.kind == .domainRegex ? [rule.value] : stringList(rule.value)
 
         switch rule.kind {
         case .final:
@@ -1524,11 +1577,11 @@ private extension XrayConfigBuilder {
         case .port:
             result["port"] = .string(values.joined(separator: ","))
         case .portRange:
-            result["port"] = .string(values.map(normalizedPortRange).joined(separator: ","))
+            result["port"] = try .string(routingPortRanges(values, path: path))
         case .sourcePort:
             result["sourcePort"] = .string(values.joined(separator: ","))
         case .sourcePortRange:
-            result["sourcePort"] = .string(values.map(normalizedPortRange).joined(separator: ","))
+            result["sourcePort"] = try .string(routingPortRanges(values, path: path))
         case .network:
             try require(values.allSatisfy { ["tcp", "udp"].contains($0.lowercased()) }, path: path, "Xray TUN routing supports tcp and udp network matchers only.")
             result["network"] = .string(values.joined(separator: ","))
@@ -1614,16 +1667,10 @@ private extension XrayConfigBuilder {
         var nextByTag: [String: String] = [:]
         for (index, outbound) in outbounds.enumerated() {
             guard let tag = outbound["tag"]?.stringValue else { continue }
-            let references = [
-                outbound["proxySettings"]?.objectValue?["tag"]?.stringValue,
-                outbound["streamSettings"]?.objectValue?["sockopt"]?.objectValue?["dialerProxy"]?.stringValue,
-            ].compactMap(\.self).filter { !$0.isEmpty }
-            let path = "/outbounds/\(index)"
-            try require(references.count <= 1, path: path, "proxySettings.tag conflicts with sockopt.dialerProxy.")
-            if let reference = references.first {
-                try require(tags.contains(reference), path: path, "Outbound chain references an unavailable outbound: \(reference).")
-                nextByTag[tag] = reference
-            }
+            guard let reference = outbound["streamSettings"]?.objectValue?["sockopt"]?.objectValue?["dialerProxy"]?.stringValue,
+                  !reference.isEmpty else { continue }
+            try require(tags.contains(reference), path: "/outbounds/\(index)", "Outbound chain references an unavailable outbound: \(reference).")
+            nextByTag[tag] = reference
         }
         // ponytail: at most 32 outbounds; use a shared DFS if that cap grows.
         for tag in nextByTag.keys.sorted() {
@@ -1683,7 +1730,9 @@ private extension XrayConfigBuilder {
             for key in object.keys.sorted() {
                 guard let child = object[key] else { continue }
                 let childPath = "\(path)/\(key)"
-                let canonicalKey = Self.memorySensitiveKeys.first(where: { jsonKeyEquals(key, $0) })
+                let canonicalKey = key.utf8.allSatisfy { $0 < 128 }
+                    ? Self.memorySensitiveKeysByLowercase[key.lowercased()]
+                    : Self.memorySensitiveKeys.first(where: { jsonKeyEquals(key, $0) })
                 let isFinalMask = jsonKeyEquals(key, "finalmask")
                 if let protectedKey = canonicalKey ?? (isFinalMask ? "finalmask" : nil) {
                     try require(
@@ -1754,6 +1803,13 @@ private extension XrayConfigBuilder {
         try require(layers <= limits.maxFinalMaskLayers, path: path, "FinalMask exceeds the \(limits.maxFinalMaskLayers)-layer iOS limit.")
         let size = (try? JSONSerialization.data(withJSONObject: value.foundationValue, options: [])).map(\.count) ?? Int.max
         try require(size <= limits.maxFinalMaskGeneratedPayloadBytes, path: path, "FinalMask exceeds the \(limits.maxFinalMaskGeneratedPayloadBytes)-byte iOS payload limit.")
+        for layer in (tcp?.arrayValue ?? []) + (udp?.arrayValue ?? []) {
+            if let object = layer.objectValue,
+               let type = try uniqueCaseInsensitiveValue("type", in: object, path: path)?.stringValue?.lowercased()
+            {
+                try require(type != "filter" && type != "xmc", path: path, "The \(type) mask is unavailable in the iOS client.")
+            }
+        }
         try validateFinalMaskGeneratedPayload(value, path: path)
         try validateFinalMaskNetworkDestinations(udp, path: "\(path)/udp")
     }
@@ -1780,7 +1836,7 @@ private extension XrayConfigBuilder {
 
             let settingsValue = try uniqueCaseInsensitiveValue("settings", in: layerObject, path: layerPath)
             if type == "xdns" {
-                try validateXDNSFinalMaskSettings(settingsValue, path: "\(layerPath)/settings")
+                _ = try normalizedXDNS(settingsValue, path: "\(layerPath)/settings")
             } else if type == "realm" {
                 try validateRealmFinalMaskSettings(settingsValue, path: "\(layerPath)/settings")
             } else if let settings = settingsValue?.objectValue,
@@ -1791,55 +1847,100 @@ private extension XrayConfigBuilder {
         }
     }
 
-    func validateXDNSFinalMaskSettings(_ value: JSONValue?, path: String) throws {
-        guard let settings = value?.objectValue else {
-            try require(false, path: path, "XDNS settings must be a JSON object.")
-            return
+    /// Canonicalize Go's case-insensitive JSON keys without accepting duplicates.
+    func maskObject(_ value: JSONValue?, keys: Set<String>, path: String) throws -> JSONObject {
+        guard let object = value?.objectValue else {
+            throw XrayConfigError.validationFailed([XrayValidationIssue(path: path, message: "Expected a FinalMask settings object.")])
         }
-        guard let resolverValue = try uniqueCaseInsensitiveValue("resolvers", in: settings, path: path),
-              let resolvers = resolverValue.arrayValue,
-              !resolvers.isEmpty
-        else {
-            try require(false, path: "\(path)/resolvers", "XDNS resolvers must be a nonempty array.")
-            return
+        try validateCaseInsensitiveKeys(object, allowed: keys, path: path)
+        var result: JSONObject = [:]
+        for name in keys {
+            result[name] = try uniqueCaseInsensitiveValue(name, in: object, path: path)
         }
-        try require(
-            resolvers.count <= limits.maxXDNSResolvers,
-            path: "\(path)/resolvers",
-            "XDNS exceeds the \(limits.maxXDNSResolvers)-resolver iOS limit.",
-        )
-        let legacyDomain = try uniqueCaseInsensitiveValue("domain", in: settings, path: path)
-        let serverDomains = try uniqueCaseInsensitiveValue("domains", in: settings, path: path)
-        if legacyDomain != nil || serverDomains != nil {
-            try require(false, path: "\(path)/domains", "XDNS server domains cannot be supplied in a client configuration.")
+        return result
+    }
+
+    func normalizedXDNS(_ value: JSONValue?, path: String) throws -> JSONObject {
+        var settings = try maskObject(value, keys: ["domain", "domains", "resolvers"], path: path)
+        let resolvers = settings["resolvers"]?.arrayValue ?? []
+        try require(!resolvers.isEmpty, path: path, "XDNS resolvers must be a nonempty array.")
+        try require(resolvers.count <= limits.maxXDNSResolvers, path: path, "XDNS exceeds the \(limits.maxXDNSResolvers)-resolver iOS limit.")
+        try require(settings["domain"] == nil, path: path, "Legacy XDNS server domains cannot be used in a client.")
+        if resolvers.contains(where: { $0.stringValue != nil }) {
+            try require(settings["domains"] == nil, path: path, "Legacy XDNS server domains cannot be combined with client resolver strings.")
+            return try convertedXDNSResolverStrings(resolvers, path: path)
         }
-        for (index, resolver) in resolvers.enumerated() {
-            let resolverPath = "\(path)/resolvers/\(index)"
-            guard let raw = resolver.stringValue,
-                  let host = xdnsResolverHost(raw),
-                  ImportPolicy.isPublicIPAddressLiteral(host)
-            else {
-                try require(false, path: resolverPath, "XDNS resolvers must use a public IP literal and a port from 1 through 65535.")
-                continue
+        let domains = settings["domains"]?.arrayValue ?? []
+        try require(!domains.isEmpty && domains.count <= limits.maxXDNSResolvers, path: path, "XDNS needs between one and \(limits.maxXDNSResolvers) domain entries.")
+        var domainCount = 0
+        settings["domains"] = try .array(domains.map { domain in
+            var config = try maskObject(domain, keys: ["names", "types"], path: "\(path)/domains")
+            let names = config["names"]?.arrayValue ?? []
+            domainCount += names.count
+            try require(!names.isEmpty && domainCount <= limits.maxXDNSResolvers && names.allSatisfy { $0.stringValue.map(validXDNSDomain) == true }, path: path, "Invalid or excessive XDNS domain names.")
+            config["names"] = .array(names.compactMap(\.stringValue).map { .string($0.hasSuffix(".") ? String($0.dropLast()) : $0) })
+            if let types = config["types"] {
+                let queryTypes = types.arrayValue ?? []
+                try require(!queryTypes.isEmpty && queryTypes.count <= 3 && queryTypes.allSatisfy { [1, 16, 28].contains($0.integerValue) }, path: path, "XDNS query types must be A, TXT or AAAA.")
             }
+            return .object(config)
+        })
+        var addressCount = 0
+        settings["resolvers"] = try .array(resolvers.map { resolver in
+            let config = try maskObject(resolver, keys: ["addrs"], path: "\(path)/resolvers")
+            let addresses = config["addrs"]?.arrayValue ?? []
+            addressCount += addresses.count
+            try require(!addresses.isEmpty && addressCount <= limits.maxXDNSResolvers && addresses.allSatisfy { $0.stringValue.map(validXDNSAddress) == true }, path: path, "XDNS resolvers require bounded public UDP IP literals with explicit ports.")
+            return .object(config)
+        })
+        return settings
+    }
+
+    func convertedXDNSResolverStrings(_ resolvers: [JSONValue], path: String) throws -> JSONObject {
+        var domains: [JSONValue] = []
+        var addresses: [String] = []
+        var originalPairs: [JSONValue: Set<String>] = [:]
+        for resolver in resolvers {
+            let parts = resolver.stringValue?.components(separatedBy: "+udp://") ?? []
+            guard parts.count == 2 else { throw invalidXDNSResolver(path) }
+            let query = parts[0].components(separatedBy: ":")
+            let methods = ["": 16, "txt": 16, "a": 1, "aaaa": 28]
+            guard query.count <= 2, let name = query.first, validXDNSDomain(name),
+                  let type = methods[query.count == 2 ? query[1].lowercased() : ""],
+                  !parts[1].contains("://"), validXDNSAddress(parts[1])
+            else { throw invalidXDNSResolver(path) }
+            let domain = JSONValue.object(["names": .array([.string(name.hasSuffix(".") ? String(name.dropLast()) : name)]), "types": .array([.number(Double(type))])])
+            if originalPairs[domain] == nil {
+                domains.append(domain)
+            }
+            originalPairs[domain, default: []].insert(parts[1])
+            if !addresses.contains(parts[1]) {
+                addresses.append(parts[1])
+            }
+        }
+        // The new client selects domains and resolvers independently. Converting
+        // a partial matrix would send queries to resolvers the profile didn't select.
+        let allowed = Set(addresses)
+        try require(originalPairs.values.allSatisfy { $0 == allowed }, path: path, "Review XDNS domains and resolvers. This core cannot preserve the original domain-to-resolver pairings.")
+        return ["domains": .array(domains), "resolvers": .array([.object(["addrs": .array(addresses.map(JSONValue.string))])])]
+    }
+
+    func invalidXDNSResolver(_ path: String) -> XrayConfigError {
+        .validationFailed([XrayValidationIssue(path: path, message: "XDNS resolvers require a domain, supported query type and public UDP IP literal with a port.")])
+    }
+
+    func validXDNSDomain(_ name: String) -> Bool {
+        let domain = name.hasSuffix(".") ? name.dropLast() : name[...]
+        let labels = domain.split(separator: ".", omittingEmptySubsequences: false)
+        return !name.isEmpty && name.utf8.count <= 253 && !labels.isEmpty && labels.allSatisfy { label in
+            (1 ... 63).contains(label.utf8.count) && label.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
         }
     }
 
-    func xdnsResolverHost(_ raw: String) -> String? {
-        guard raw == raw.trimmingCharacters(in: .whitespacesAndNewlines),
-              let separator = raw.range(of: "+udp://"),
-              raw[separator.upperBound...].range(of: "+udp://") == nil
-        else { return nil }
-
-        let query = String(raw[..<separator.lowerBound])
-        guard !query.isEmpty else { return nil }
-        let queryParts = query.split(separator: ":", omittingEmptySubsequences: false)
-        guard queryParts.count <= 2,
-              !queryParts[0].isEmpty,
-              queryParts.count == 1 || ["", "txt", "a", "aaaa"].contains(queryParts[1].lowercased())
-        else { return nil }
-
-        return splitHostPort(String(raw[separator.upperBound...]))?.host
+    func validXDNSAddress(_ value: String) -> Bool {
+        let address = value.hasPrefix("udp://") ? String(value.dropFirst(6)) : value
+        guard let endpoint = splitHostPort(address) else { return false }
+        return ImportPolicy.isPublicIPAddressLiteral(endpoint.host)
     }
 
     func validateRealmFinalMaskSettings(_ value: JSONValue?, path: String) throws {
@@ -1847,6 +1948,7 @@ private extension XrayConfigBuilder {
             try require(false, path: path, "Realm settings must be a JSON object.")
             return
         }
+        try validateCaseInsensitiveKeys(settings, allowed: ["url", "stunServers", "tlsConfig"], path: path)
         let tlsConfig = try uniqueCaseInsensitiveValue("tlsConfig", in: settings, path: path)
         try require(
             tlsConfig == nil,
@@ -1973,24 +2075,67 @@ private extension XrayConfigBuilder {
         }
     }
 
-    func finalMaskWithSafeDefaults(_ value: JSONValue) throws -> JSONValue {
-        guard var object = value.objectValue else {
-            try require(false, path: "/transport/finalMask", "FinalMask must be a JSON object.")
-            return value
-        }
-        let quicKeys = object.keys.filter { jsonKeyEquals($0, "quicParams") }
-        try require(quicKeys.count <= 1, path: "/transport/finalMask/quicParams", "JSON object contains duplicate protected keys that differ only by case.")
-        if let key = quicKeys.first,
-           let value = object.removeValue(forKey: key)
-        {
-            guard var quic = value.objectValue else {
-                try require(false, path: "/transport/finalMask/quicParams", "QUIC parameters must be a JSON object.")
-                return .object(object)
-            }
+    func finalMaskForPinnedCore(_ value: JSONValue, stream: JSONObject, path: String) throws -> JSONValue {
+        var mask = try maskObject(value, keys: Self.finalMaskAdvancedKeys, path: path)
+        var layers = mask["udp"]?.arrayValue ?? []
+        if let rawQUIC = mask["quicParams"] {
+            try require(rawQUIC.objectValue != nil, path: "\(path)/quicParams", "QUIC parameters must be a JSON object.")
+            let allowed: Set = [
+                "congestion", "debug", "bbrProfile", "brutalUp", "brutalDown", "udpHop",
+                "initStreamReceiveWindow", "maxStreamReceiveWindow", "initConnectionReceiveWindow",
+                "maxConnectionReceiveWindow", "maxIdleTimeout", "keepAlivePeriod", "disablePathMTUDiscovery", "maxIncomingStreams",
+            ]
+            var quic = try maskObject(rawQUIC, keys: allowed, path: "\(path)/quicParams")
             fillSafeQUICDefaults(into: &quic)
-            object["quicParams"] = .object(quic)
+            try require(quic["debug"] == nil || quic["debug"] == .bool(false), path: "\(path)/quicParams/debug", "QUIC debug logging is unavailable in the tunnel.")
+            if let old = quic.removeValue(forKey: "udpHop") {
+                let hopPath = "\(path)/quicParams/udpHop"
+                // Older cores used this field only on Hysteria and XHTTP/3.
+                // Moving it blindly would activate formerly ignored hopping on mKCP.
+                try require(stream["network"] == .string("hysteria") || isXHTTPH3(stream), path: hopPath, "Legacy QUIC port hopping requires Hysteria or XHTTP with HTTP/3. Review the UDP mask for this transport.")
+                let oldSettings = try maskObject(old, keys: ["ports", "interval"], path: hopPath)
+                var settings: JSONObject = ["mode": .string("intervalLocal,intervalRemote")]
+                settings["remotePorts"] = oldSettings["ports"]
+                settings["interval"] = oldSettings["interval"]
+                try validateHopPorts(settings, path: hopPath)
+                layers.append(.object(["type": .string("udphop"), "settings": .object(settings)]))
+            }
+            mask["quicParams"] = .object(quic)
         }
-        return .object(object)
+        if mask["udp"] != nil || !layers.isEmpty {
+            try require(mask["udp"] == nil || mask["udp"]?.arrayValue != nil, path: path, "FinalMask UDP layers must be an array.")
+            mask["udp"] = try .array(layers.enumerated().map { index, layer in
+                let layerPath = "\(path)/udp/\(index)"
+                var object = try maskObject(layer, keys: ["type", "settings"], path: layerPath)
+                let type = object["type"]?.stringValue?.lowercased()
+                if ["udphop", "xdns", "xicmp"].contains(type) {
+                    try require(index == layers.count - 1, path: layerPath, "A UDP layer that opens its own socket must be last and cannot share the socket with another dialer.")
+                }
+                if type == "xdns" {
+                    object["type"] = .string("xdns")
+                    object["settings"] = try .object(normalizedXDNS(object["settings"], path: layerPath))
+                } else if type == "udphop" {
+                    let settings = try maskObject(object["settings"], keys: ["mode", "interval", "remotePorts"], path: layerPath)
+                    let modes = settings["mode"]?.stringValue?.lowercased().components(separatedBy: ",") ?? []
+                    let allowed = ["intervallocal", "intervalremote", "perconnremote"]
+                    try require(!modes.isEmpty && modes.allSatisfy(allowed.contains), path: layerPath, "Unsupported UDP hopping mode.")
+                    if modes.contains("intervalremote") || modes.contains("perconnremote") {
+                        try validateHopPorts(settings, path: layerPath)
+                    } else {
+                        try require(settings["remotePorts"] == nil, path: layerPath, "A remote hopping mode is required for remotePorts.")
+                        try validateHopInterval(settings["interval"], path: layerPath)
+                    }
+                    // The core's chained UDP connection has a synthetic peer address.
+                    // Subsequent dials would hop to 0.0.0.0 instead of the configured server.
+                    let chained = stream["sockopt"]?.objectValue?["dialerProxy"]?.stringValue
+                    try require(chained?.isEmpty != false || Set(modes) == ["perconnremote"], path: layerPath, "Interval UDP hopping cannot use a socket dialer proxy. Choose per-connection remote hopping or remove the chain.")
+                    object["type"] = .string("udphop")
+                    object["settings"] = .object(settings)
+                }
+                return .object(object)
+            })
+        }
+        return .object(mask)
     }
 
     func fillSafeQUICDefaults(into quic: inout JSONObject) {
@@ -2002,7 +2147,7 @@ private extension XrayConfigBuilder {
     }
 
     func atomCount(in rule: RoutingRule) -> Int {
-        rule.kind == .final ? 1 : max(1, stringList(rule.value).count)
+        rule.kind == .final || rule.kind == .domainRegex ? 1 : max(1, stringList(rule.value).count)
     }
 
     func stringList(_ value: String) -> [String] {
@@ -2017,35 +2162,88 @@ private extension XrayConfigBuilder {
         }
     }
 
-    func normalizedPortRange(_ value: String) -> String {
-        value.replacingOccurrences(of: ":", with: "-")
+    func routingPortRanges(_ values: [String], path: String) throws -> String {
+        try require(!values.isEmpty, path: path, "Routing port range is empty.")
+        return try values.map { value in
+            var normalized = value
+            if value.hasPrefix(":") {
+                normalized = "0" + normalized
+            }
+            if value.hasSuffix(":") {
+                normalized += "65535"
+            }
+            normalized = normalized.replacingOccurrences(of: ":", with: "-")
+            try require(value != ":" && portRange(normalized) != nil, path: path, "Invalid routing port range.")
+            return normalized
+        }.joined(separator: ",")
     }
 
-    func validPortOrRange(_ value: String) -> Bool {
-        let parts = value.replacingOccurrences(of: ":", with: "-").split(separator: "-", omittingEmptySubsequences: false)
-        guard (1 ... 2).contains(parts.count),
-              let first = Int(parts[0]), (1 ... 65535).contains(first)
-        else { return false }
-        guard parts.count == 2 else { return true }
-        guard let last = Int(parts[1]), (first ... 65535).contains(last) else { return false }
-        return true
+    func portRange(_ value: String) -> ClosedRange<Int>? {
+        let parts = value.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let first = parts.first.flatMap({ UInt16($0) }),
+              let last = parts.last.flatMap({ UInt16($0) }), first <= last
+        else { return nil }
+        return Int(first) ... Int(last)
     }
 
-    func bandwidthMbps(_ value: String) -> Double? {
-        let normalized = value.lowercased().filter { !$0.isWhitespace }
-        let number = normalized.prefix { $0.isNumber || $0 == "." }
-        guard !number.isEmpty, let amount = Double(number), amount >= 0 else { return nil }
-        let unit = String(normalized.dropFirst(number.count))
+    func validateQUICBandwidth(_ quic: JSONObject, path: String) throws {
+        for key in ["brutalUp", "brutalDown"] {
+            if let value = try uniqueCaseInsensitiveValue(key, in: quic, path: path) {
+                let bytesPerSecond = value.stringValue.flatMap(quicBandwidthBytesPerSecond)
+                let maxBytesPerSecond = UInt64(limits.maxHysteriaBandwidthMbps) * 1_000_000 / 8
+                try require(
+                    bytesPerSecond.map { $0 == 0 || (65536 ... maxBytesPerSecond).contains($0) } == true,
+                    path: "\(path)/\(key)", "QUIC bandwidth must be zero or between 65536 bytes/s and \(limits.maxHysteriaBandwidthMbps) Mbps.",
+                )
+            }
+        }
+    }
+
+    func validateHopInterval(_ interval: JSONValue?, path: String) throws {
+        if let interval {
+            let range = (interval.stringValue ?? interval.integerValue.map(String.init)).flatMap(portRange)
+            try require(range.map { $0.lowerBound >= 5 && $0.upperBound <= 3600 } == true, path: "\(path)/interval", "UDP hopping interval must be between 5 and 3600 seconds.")
+        }
+    }
+
+    func validateHopPorts(_ settings: JSONObject, path: String) throws {
+        try validateHopInterval(settings["interval"], path: path)
+        guard let ports = settings["remotePorts"] else {
+            throw XrayConfigError.validationFailed([XrayValidationIssue(path: path, message: "UDP hopping needs remotePorts on the profile endpoint.")])
+        }
+        let ranges = stringList(ports.stringValue ?? ports.integerValue.map(String.init) ?? "")
+        let portPath = "\(path)/remotePorts"
+        try require(!ranges.isEmpty, path: portPath, "UDP port hopping needs a port or range.")
+        var count = 0
+        for value in ranges {
+            guard let range = portRange(value), range.lowerBound > 0 else {
+                throw XrayConfigError.validationFailed([XrayValidationIssue(path: portPath, message: "Invalid UDP hop port or range.")])
+            }
+            // Xray expands each range, including overlaps, before opening a socket.
+            count += range.count
+            try require(count <= limits.maxHysteriaPortHops, path: portPath, "UDP hopping exceeds the iOS limit of \(limits.maxHysteriaPortHops) expanded ports.")
+        }
+    }
+
+    func quicBandwidthBytesPerSecond(_ value: String) -> UInt64? {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.isEmpty {
+            return 0
+        }
+        let number = normalized.prefix { $0.isASCII && ($0.isNumber || $0 == ".") }
+        guard let amount = Double(number) else { return nil }
+        let unit = normalized.dropFirst(number.count).trimmingCharacters(in: .whitespacesAndNewlines)
         let multiplier: Double
         switch unit {
-        case "", "b", "bps": multiplier = 1 / 1_000_000
-        case "k", "kb", "kbps": multiplier = 1024 / 1_000_000
-        case "m", "mb", "mbps": multiplier = 1_048_576 / 1_000_000
-        case "g", "gb", "gbps": multiplier = 1_073_741_824 / 1_000_000
-        case "t", "tb", "tbps": multiplier = 1_099_511_627_776 / 1_000_000
+        case "", "b", "bps": multiplier = 1
+        case "k", "kb", "kbps": multiplier = 1024
+        case "m", "mb", "mbps": multiplier = 1_048_576
+        case "g", "gb", "gbps": multiplier = 1_073_741_824
+        case "t", "tb", "tbps": multiplier = 1_099_511_627_776
         default: return nil
         }
-        return amount * multiplier
+        // Match Xray Bandwidth.Bps: binary unit multipliers, then whole bytes.
+        return UInt64(exactly: (amount * multiplier).rounded(.towardZero)).map { $0 / 8 }
     }
 
     func rawBase64URLByteCount(_ value: String) -> Int? {

@@ -280,14 +280,15 @@ struct SharedTunnelConfigurationStore {
         }
     }
 
-    func writeConfig(_ config: String, to url: URL) throws {
+    func writeConfig(_ config: String, nonce: String) throws {
+        let url = snapshotURL(nonce: nonce)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         let data = Data(config.utf8)
         let secret = SecretStore.runtime.ensureTunnelConfigAuthenticationSecret()
         guard !secret.isEmpty,
               SecretStore.runtime.tunnelConfigAuthenticationSecret() == secret,
-              let signature = TunnelConfigAuthenticator.signature(for: data, secret: secret)
+              let signature = TunnelConfigAuthenticator.snapshotSignature(for: data, nonce: nonce, secret: secret)
         else {
             throw TunnelConfigStoreError.authenticationSecretUnavailable
         }

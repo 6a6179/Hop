@@ -14,14 +14,35 @@ struct RuleConfiguration: Identifiable, Hashable, Codable {
         self.rules = rules
     }
 
-    mutating func saveRule(_ rule: RoutingRule) {
-        if let index = rules.firstIndex(where: { $0.id == rule.id }) {
-            rules[index] = rule
+    @discardableResult
+    mutating func saveRule(_ rule: RoutingRule) -> Bool {
+        if rule.kind == .final {
+            guard !rules.contains(where: { $0.kind == .final && $0.id != rule.id }) else { return false }
+            rules.removeAll { $0.id == rule.id }
+            rules.append(rule)
         } else {
-            let index = rule.kind == .final ? rules.endIndex :
-                rules.firstIndex { $0.kind == .final } ?? rules.endIndex
-            rules.insert(rule, at: index)
+            let previous = rules.firstIndex { $0.id == rule.id } ?? rules.endIndex
+            rules.removeAll { $0.id == rule.id }
+            let final = rules.firstIndex { $0.kind == .final } ?? rules.endIndex
+            rules.insert(rule, at: min(previous, final))
         }
+        return true
+    }
+
+    mutating func prependImportedRules(_ imported: [RoutingRule]) {
+        // Each list is first-match-wins. Rules following its own catch-all
+        // were unreachable and must not become active through a merge.
+        let incoming = imported.prefix { $0.kind != .final }
+        if let fallback = imported.dropFirst(incoming.count).first {
+            if let index = rules.firstIndex(where: { $0.kind == .final }) {
+                // Keep any unreachable legacy rows behind the original fallback
+                // position so an import never deletes or activates local edits.
+                rules[index] = fallback
+            } else {
+                rules.append(fallback)
+            }
+        }
+        rules.insert(contentsOf: incoming, at: 0)
     }
 }
 

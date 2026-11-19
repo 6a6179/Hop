@@ -130,7 +130,10 @@ struct ProfileEditorView: View {
                 ProfileTextField("Reserved Bytes", text: $draft.wireGuardReserved, prompt: "0, 0, 0")
                 ProfileTextField("Keepalive (s)", text: $draft.wireGuardKeepAlive, prompt: "25", keyboardType: .numberPad)
                 ProfileTextField("MTU", text: $draft.wireGuardMTU, prompt: "1280", keyboardType: .numberPad)
-                ProfileTextField("Domain Strategy", text: $draft.wireGuardDomainStrategy, prompt: "ForceIP")
+                if !draft.wireGuardDomainStrategy.isEmpty {
+                    LabeledContent("Legacy DNS Preference", value: draft.wireGuardDomainStrategy)
+                    Button("Use Default WireGuard DNS") { draft.wireGuardDomainStrategy = "" }
+                }
                 if draft.wireGuardHasExplicitEndpoint {
                     DisclosureGroup("Node Endpoint") {
                         ProfileTextField("Host", text: $draft.wireGuardFallbackHost)
@@ -266,7 +269,7 @@ struct ProfileEditorView: View {
                     }
                 }
             }
-            advancedFields("Outbound", definition: "OutboundDetourConfig", path: [], allowedKeys: ["sendThrough", "targetStrategy", "proxySettings"])
+            advancedFields("Outbound", definition: "OutboundDetourConfig", path: [], allowedKeys: ["sendThrough", "targetStrategy"])
         }
     }
 
@@ -513,9 +516,11 @@ struct ProfileEditorDraft {
     var finalMask: JSONValue?
     var muxFields: JSONValue?
     var socketOptions: JSONValue?
+    let advancedSchemaVersion: String
     var xrayAdvancedJSON = "{}"
 
     init(profile: ProxyProfile) {
+        advancedSchemaVersion = profile.xrayAdvanced?.schemaVersion ?? XrayAdvancedDocument.currentSchemaVersion
         id = profile.id
         subscriptionID = profile.subscriptionID
         name = profile.name
@@ -575,7 +580,8 @@ struct ProfileEditorDraft {
             wireGuardReserved = options.reserved?.map(String.init).joined(separator: ", ") ?? ""
             wireGuardKeepAlive = firstPeer?.keepAliveSeconds.map(String.init) ?? ""
             wireGuardMTU = options.mtu.map(String.init) ?? ""
-            wireGuardDomainStrategy = options.domainStrategy ?? ""
+            let legacyStrategy = options.domainStrategy?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            wireGuardDomainStrategy = legacyStrategy.lowercased() == "forceip" ? "" : legacyStrategy
             wireGuardPeers = options.peers
             extraWireGuardPeers = (options.peers ?? []).dropFirst().map(WireGuardPeerDraft.init(peer:))
         case let .anyTLS(options):
@@ -641,7 +647,7 @@ struct ProfileEditorDraft {
         case .hysteria2:
             guard !hysteriaPassword.isEmpty else { return .invalid("Enter a Hysteria2 password.") }
         case .tuic:
-            return .invalid("Xray v26.6.27 does not support TUIC.")
+            return .invalid("Xray \(XrayAdvancedDocument.currentSchemaVersion) does not support TUIC.")
         case .shadowsocks:
             guard !trimmed(shadowsocksMethod).isEmpty else { return .invalid("Enter a Shadowsocks method.") }
             guard !shadowsocksPassword.isEmpty else { return .invalid("Enter a Shadowsocks password.") }
@@ -661,7 +667,7 @@ struct ProfileEditorDraft {
             guard !trimmed(wireGuardPeerPublicKey).isEmpty else { return .invalid("Enter a WireGuard peer public key.") }
             guard !list(from: wireGuardLocalAddresses).isEmpty else { return .invalid("Enter a WireGuard local address.") }
         case .anyTLS:
-            return .invalid("Xray v26.6.27 does not support AnyTLS.")
+            return .invalid("Xray \(XrayAdvancedDocument.currentSchemaVersion) does not support AnyTLS.")
         }
 
         if securityLayer == .tls, tlsAllowInsecure, trimmed(tlsPinnedCertificates).isEmpty {
@@ -735,7 +741,7 @@ struct ProfileEditorDraft {
             }
         }
         do {
-            let advanced = try XrayAdvancedDocument(jsonString: xrayAdvancedJSON)
+            let advanced = try XrayAdvancedDocument(jsonString: xrayAdvancedJSON, schemaVersion: advancedSchemaVersion)
             let candidate = try makeProfile(advanced: advanced.isEmpty ? nil : advanced)
             if let issue = XrayConfigBuilder().validationIssues(
                 profiles: [candidate],

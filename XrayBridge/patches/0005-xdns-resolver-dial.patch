@@ -1,0 +1,138 @@
+diff --git a/transport/internet/finalmask/xdns/config.go b/transport/internet/finalmask/xdns/config.go
+index d982c0a..ac29b5e 100644
+--- a/transport/internet/finalmask/xdns/config.go
++++ b/transport/internet/finalmask/xdns/config.go
+@@ -5,7 +5,11 @@ import (
+ 	"github.com/xtls/xray-core/transport/internet/finalmask"
+ )
+ 
+-func (c *Config) WrapPacketConnClient(conn net.PacketConn, dest *net.Destination, dialer *finalmask.Dialer) (net.PacketConn, error) {
++// XDNS opens its own resolver sockets and has no use for a socket to the
++// proxy peer. Let FinalMask leave the initial dial to this layer.
++func (*Config) HandleDial() {}
++
++func (c *Config) WrapPacketConnClient(_ net.PacketConn, _ *net.Destination, dialer *finalmask.Dialer) (net.PacketConn, error) {
+ 	return NewClient(c, dialer)
+ }
+ 
+diff --git a/transport/internet/finalmask/xdns/resolver_dial_hop_test.go b/transport/internet/finalmask/xdns/resolver_dial_hop_test.go
+new file mode 100644
+index 0000000..a66adfa
+--- /dev/null
++++ b/transport/internet/finalmask/xdns/resolver_dial_hop_test.go
+@@ -0,0 +1,115 @@
++package xdns
++
++import (
++	"context"
++	"errors"
++	"fmt"
++	"net"
++	"slices"
++	"testing"
++	"time"
++
++	xnet "github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/transport/internet/finalmask"
++	"golang.org/x/net/dns/dnsmessage"
++)
++
++func TestHopXDNSResolverDial(t *testing.T) {
++	for _, failSecond := range []bool{false, true} {
++		t.Run(fmt.Sprintf("second-resolver-fails=%t", failSecond), func(t *testing.T) {
++			listen := func() *net.UDPConn {
++				t.Helper()
++				conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
++				if err != nil {
++					t.Fatal(err)
++				}
++				t.Cleanup(func() { _ = conn.Close() })
++				return conn
++			}
++			resolver := listen()
++			secondResolver := listen()
++			peer := listen()
++			config := &Config{
++				Domains: []*DomainProto{{Name: "hop.test", LenLimit: 200, LabelLimit: 48}},
++				Resolvers: []*ResolverProto{
++					{Type: "udp", Addr: resolver.LocalAddr().String()},
++					{Type: "udp", Addr: secondResolver.LocalAddr().String()},
++				},
++			}
++			// Dial real loopback sockets, track who owns every successful dial,
++			// and inject a failure after the first resolver has been acquired.
++			var attempts []string
++			var opened []*net.UDPConn
++			dial := func(_ context.Context, dest xnet.Destination) (xnet.PacketConn, xnet.Addr, error) {
++				addr := &net.UDPAddr{IP: dest.Address.IP(), Port: int(dest.Port)}
++				attempts = append(attempts, addr.String())
++				if failSecond && addr.String() == secondResolver.LocalAddr().String() {
++					return nil, nil, errors.New("injected resolver failure")
++				}
++				socket := listen()
++				opened = append(opened, socket)
++				return socket, addr, nil
++			}
++			manager := finalmask.NewFinalMask(nil, []finalmask.UDPMask{config}, nil, nil, dial, nil)
++			dest, err := xnet.ParseDestination("udp:" + peer.LocalAddr().String())
++			if err != nil {
++				t.Fatal(err)
++			}
++			client, err := manager.DialUDP(context.Background(), dest)
++			want := []string{resolver.LocalAddr().String(), secondResolver.LocalAddr().String()}
++			if !slices.Equal(attempts, want) {
++				t.Errorf("dialed %v, want only the configured resolvers %v", attempts, want)
++			}
++			if failSecond {
++				if err == nil {
++					_ = client.Close()
++					t.Fatal("dial should fail")
++				}
++			} else {
++				if err != nil {
++					t.Fatal(err)
++				}
++				t.Cleanup(func() { _ = client.Close() })
++				const payload = "hop-xdns"
++				if _, err := client.Write([]byte(payload)); err != nil {
++					t.Fatal(err)
++				}
++				if err := resolver.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
++					t.Fatal(err)
++				}
++				domain, err := NewDomain("hop.test", 200, 48, []uint16{uint16(dnsmessage.TypeTXT)}, 0)
++				if err != nil {
++					t.Fatal(err)
++				}
++				// The client may also send a poll. Wait for the data query.
++				for {
++					var packet [512]byte
++					n, _, err := resolver.ReadFromUDP(packet[:])
++					if err != nil {
++						t.Fatal(err)
++					}
++					var message dnsmessage.Message
++					if err := message.Unpack(packet[:n]); err != nil {
++						t.Fatal(err)
++					}
++					if len(message.Questions) != 1 {
++						t.Fatalf("unexpected question count %d", len(message.Questions))
++					}
++					var data [255]byte
++					size := domain.Decode(&data, message.Questions[0].Name)
++					if size >= 12 && string(data[12:size]) == payload {
++						break
++					}
++				}
++				if err := client.Close(); err != nil {
++					t.Fatal(err)
++				}
++			}
++			for i, socket := range opened {
++				if err := socket.SetReadDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
++					t.Errorf("dialed socket %d left open: %v", i, err)
++				}
++			}
++		})
++	}
++}

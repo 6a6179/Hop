@@ -2,15 +2,15 @@
 # Regenerate or verify the checked-in client-schema manifest from pinned Xray structs.
 set -euo pipefail
 
-GO_VERSION="go1.26.5"
-XRAY_TAG="v26.6.27"
-XRAY_COMMIT="45cf2898ab12e97a55dd8f1f3d78d903340bdc9e"
-XRAY_MODULE_VERSION="v1.260327.1-0.20260627131803-45cf2898ab12"
+GO_VERSION="go1.27.4"
+XRAY_TAG="v26.11.9"
+XRAY_COMMIT="676eaf66f8f05d4d558ee7a74b4736623d3feeb9"
+XRAY_MODULE_VERSION="v1.260327.1-0.20261109052709-676eaf66f8f0"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 bridge_dir="$repo_root/XrayBridge"
-output="$repo_root/Hop/Resources/xray-client-schema-v26.6.27.json"
+output="$repo_root/Hop/Resources/xray-client-schema-v26.11.9.json"
 
 err()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m==>\033[0m %s\n' "$*"; }

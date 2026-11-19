@@ -1,6 +1,6 @@
 # Hop
 
-Hop is an open-source iOS 26+ proxy client built with Swift 6.2, SwiftUI, a Network Extension packet tunnel, and a client-only [Xray-core](https://github.com/XTLS/Xray-core) `v26.6.27` bridge.
+Hop is an open-source iOS 26+ proxy client built with Swift 6.2, SwiftUI, a Network Extension packet tunnel, and a client-only [Xray-core](https://github.com/XTLS/Xray-core) `v26.11.9` bridge.
 
 There is no App Store build. Use the unsigned IPA from [Releases](../../releases), then re-sign it, or build it yourself.
 
@@ -14,7 +14,7 @@ There is no App Store build. Use the unsigned IPA from [Releases](../../releases
 - Export: per-node share links by copy, share sheet, or QR
 - Groups: manual select and URL-test
 - Routing: domain, suffix, keyword, regex, IP CIDR, ports, protocol, and verified local geosite/geoip data
-- Tunnel: kill switch, Connect On Demand, DoH presets, strict route, and protocol sniffing
+- Tunnel: kill switch, Connect On Demand, DoH presets, and protocol sniffing
 - Tools: node search, latency tests, logs, and subscription refresh
 - iOS safety: a hard 50 MiB Network Extension budget with preflight limits and a runtime memory watchdog
 
@@ -24,6 +24,12 @@ There is no App Store build. Use the unsigned IPA from [Releases](../../releases
 2. Re-sign it with provisioning that can include the Network Extension `packet-tunnel-provider` entitlement.
 3. Install the signed IPA.
 
+After upgrading to the November engine, open Hop and reconnect once. This rebuilds the tunnel configuration for the new core so Connect On Demand can use it.
+
+If a WireGuard profile specified an IPv4 or IPv6 DNS preference, Hop will ask you to review it before connecting. To accept the new core’s default, open that profile and tap **Use Default WireGuard DNS**. Other advanced settings that need review are listed in the [November field changes](docs/XRAY_FIELD_COVERAGE.md#november-field-changes).
+
+Xray rejects unencrypted connections to public VLESS and Trojan servers. If an existing profile hits this check, use the TLS or REALITY settings supplied by the server operator. VLESS can also use VLESS Encryption.
+
 Signing support:
 
 | Setup | Tunnel works? | Notes |
@@ -31,7 +37,6 @@ Signing support:
 | Free Apple ID | No | Free provisioning cannot include Network Extension entitlements. |
 | Paid Apple Developer Program | Yes | Enable Network Extensions on the App ID. |
 | Enterprise certificate | Maybe | Only works if the profile includes Network Extension support. |
-| TrollStore | Yes | Entitlements are not checked on supported iOS versions. |
 
 Your signer must preserve these entitlements on both `Hop.app` and `PlugIns/HopTunnel.appex`:
 
@@ -69,7 +74,7 @@ Requirements:
 
 - Xcode
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-- Go 1.26.5, only needed to rebuild the pinned Xray bridge
+- Go 1.27.4, only needed to rebuild the pinned Xray bridge
 
 Build:
 
@@ -88,7 +93,7 @@ xcodebuild test -project Hop.xcodeproj -scheme Hop \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' CODE_SIGNING_ALLOWED=NO
 ```
 
-`scripts/build-libxray.sh` builds the client-only bridge from pinned Xray-core and Go Mobile revisions. `scripts/verify-libxray.sh` checks the vendored framework against `Frameworks/LibXray.xcframework.sha256` during builds. The app links the bridge only for exact configuration validation; the Network Extension owns the single runtime core instance.
+`scripts/build-libxray.sh` builds the client-only bridge from pinned Xray-core and Go Mobile revisions and verifies its digest before installation. Maintainers updating the reviewed engine can run `scripts/build-libxray.sh --update-manifest` and then run the ordinary build again to check reproducibility. `scripts/verify-libxray.sh` checks the vendored framework against `Frameworks/LibXray.xcframework.sha256` during builds. The app links the bridge only for exact configuration validation; the Network Extension owns the single runtime core instance.
 
 Unsigned IPA packaging is in [`.github/workflows/unsigned-ipa.yml`](.github/workflows/unsigned-ipa.yml). A local packaging command is documented in [`AGENTS.md`](AGENTS.md).
 

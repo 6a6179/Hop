@@ -21,7 +21,6 @@
 		23F98133B5991C5E7ECAAA91 /* HopApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED8696CCF094E303BC77A9D7 /* HopApp.swift */; };
 		246A575B6AE82F98644E0A73 /* RuntimeEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9305B8EEC96671033BF8DD41 /* RuntimeEnvironment.swift */; };
 		2BAF0998EF3CD3EA39FD480E /* XrayConfigBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = D854BACEB125A0BF125C1E91 /* XrayConfigBuilder.swift */; };
-		300A492285BD3F203539D7C4 /* xray-client-schema-v26.6.27.json in Resources */ = {isa = PBXBuildFile; fileRef = 2963486864B574F29964B2E5 /* xray-client-schema-v26.6.27.json */; };
 		34033B4841BEAB632F245EE8 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 750644D1A75CC1430D986F8A /* JSONValue.swift */; };
 		3437B5CC89B37E7FDF19387C /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45D692D5F1AD88DA8A136049 /* DashboardView.swift */; };
 		35B5CE1EEA46D54914152942 /* HopAppDataStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D657EAB1CEE8F6507C6C26FD /* HopAppDataStore.swift */; };
@@ -73,6 +72,7 @@
 		AC74C8D9D2A6AD187A7C182D /* libresolv.tbd in Frameworks */ = {isa = PBXBuildFile; fileRef = 63AAF67F67AFF0C9362B98CF /* libresolv.tbd */; };
 		AD240E6D07071E6DC56FB0E6 /* TunnelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */; };
 		AD5430672945FB6F2C5DF2F3 /* LogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4BB6FA5218140CC9E14D3B74 /* LogsView.swift */; };
+		AF503527EE93E8126410D45D /* xray-client-schema-v26.11.9.json in Resources */ = {isa = PBXBuildFile; fileRef = D32098A228D09515C2147BF7 /* xray-client-schema-v26.11.9.json */; };
 		AF6D63988CE5F4978E1F415F /* TunnelMemoryPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEE6EA94F5BDBE9D5C6EAC1A /* TunnelMemoryPolicyTests.swift */; };
 		B188A6AE4841ABA22706074A /* ProxyGroupEditorPerformanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 766EBEE243F73C53D90C5E36 /* ProxyGroupEditorPerformanceTests.swift */; };
 		B49CDA4D0637BE4168E9C21F /* TunnelConfigAuthenticator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E06330102DC382967E53A68 /* TunnelConfigAuthenticator.swift */; };
@@ -147,7 +147,6 @@
 		1B49DF2D9B765059F8D7117D /* RuleConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuleConfiguration.swift; sourceTree = "<group>"; };
 		1E1B76DFDAC1976712EA1386 /* SecretStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretStore.swift; sourceTree = "<group>"; };
 		28DCC6F3C157E2984F8C31F1 /* ProxyProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyProfile.swift; sourceTree = "<group>"; };
-		2963486864B574F29964B2E5 /* xray-client-schema-v26.6.27.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "xray-client-schema-v26.6.27.json"; sourceTree = "<group>"; };
 		2C0F39000C684AB2876861F2 /* RoutingModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoutingModels.swift; sourceTree = "<group>"; };
 		2C525BE7E4E464399AFB088D /* LatencyTester.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LatencyTester.swift; sourceTree = "<group>"; };
 		2C63DE59E1CD4A5AE4878BFE /* TunnelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelController.swift; sourceTree = "<group>"; };
@@ -214,6 +213,7 @@
 		CD404CF3672673287AE228BD /* ProxyShareLink.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyShareLink.swift; sourceTree = "<group>"; };
 		CE01E0B5FA2B7FBCC1ABA804 /* ProfileEditorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileEditorTests.swift; sourceTree = "<group>"; };
 		D2133782FCFF25BE2983A29E /* RulesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RulesView.swift; sourceTree = "<group>"; };
+		D32098A228D09515C2147BF7 /* xray-client-schema-v26.11.9.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "xray-client-schema-v26.11.9.json"; sourceTree = "<group>"; };
 		D657EAB1CEE8F6507C6C26FD /* HopAppDataStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HopAppDataStore.swift; sourceTree = "<group>"; };
 		D854BACEB125A0BF125C1E91 /* XrayConfigBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XrayConfigBuilder.swift; sourceTree = "<group>"; };
 		D90A2CAFA2B9193BCA6BBBCE /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
@@ -433,7 +433,7 @@
 			isa = PBXGroup;
 			children = (
 				79F3F8AA2AE8E9390B779188 /* Assets.xcassets */,
-				2963486864B574F29964B2E5 /* xray-client-schema-v26.6.27.json */,
+				D32098A228D09515C2147BF7 /* xray-client-schema-v26.11.9.json */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -570,7 +570,7 @@
 				4F310B282EA4DE1AC601B351 /* Assets.xcassets in Resources */,
 				479F76E2F9BE6CEA11327C62 /* geoip.dat in Resources */,
 				C2187D3BA3B828C5A9D80C2D /* geosite.dat in Resources */,
-				300A492285BD3F203539D7C4 /* xray-client-schema-v26.6.27.json in Resources */,
+				AF503527EE93E8126410D45D /* xray-client-schema-v26.11.9.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

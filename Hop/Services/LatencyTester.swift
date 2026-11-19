@@ -104,29 +104,46 @@ struct LatencyTester {
         }
         defer { close(fd) }
 
-        var tv = timeval(tv_sec: Int(timeout), tv_usec: 0)
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-
-        let identifier = UInt16(truncatingIfNeeded: getpid())
+        guard connect(fd, resolved.pointee.ai_addr, resolved.pointee.ai_addrlen) == 0 else {
+            return .failure("Could not reach host")
+        }
+        let identifier = UInt16.random(in: .min ... .max)
         let sequence: UInt16 = 1
-        let packet = icmpEchoRequest(isIPv6: isIPv6, identifier: identifier, sequence: sequence)
+        let payload = withUnsafeBytes(of: UUID().uuid) { Array($0) }
+        let packet = icmpEchoRequest(isIPv6: isIPv6, identifier: identifier, sequence: sequence, payload: payload)
 
         let start = DispatchTime.now()
         let sent = packet.withUnsafeBytes { raw in
-            sendto(fd, raw.baseAddress, raw.count, 0, resolved.pointee.ai_addr, resolved.pointee.ai_addrlen)
+            send(fd, raw.baseAddress, raw.count, 0)
         }
         guard sent >= 0 else {
             return .failure("ICMP send failed")
         }
 
         var buffer = [UInt8](repeating: 0, count: 1024)
-        let deadline = start.uptimeNanoseconds + UInt64(timeout * 1_000_000_000)
-        while DispatchTime.now().uptimeNanoseconds < deadline {
-            let received = recv(fd, &buffer, buffer.count, 0)
-            if received <= 0 {
-                break // timed out (SO_RCVTIMEO) or error
+        let deadline = (start + timeout).uptimeNanoseconds
+        var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        while true {
+            let now = DispatchTime.now().uptimeNanoseconds
+            guard now < deadline else { break }
+            let waitMilliseconds = Int32(clamping: (deadline - now + 999_999) / 1_000_000)
+            let ready = poll(&pollFD, 1, waitMilliseconds)
+            if ready < 0, errno == EINTR {
+                continue
             }
-            if isMatchingReply(Array(buffer.prefix(received)), isIPv6: isIPv6, identifier: identifier, sequence: sequence) {
+            guard ready > 0 else { break }
+            let received = recv(fd, &buffer, buffer.count, MSG_DONTWAIT)
+            if received < 0, errno == EAGAIN || errno == EINTR {
+                continue
+            }
+            guard received > 0 else { break }
+            if isMatchingReply(
+                Array(buffer.prefix(received)),
+                isIPv6: isIPv6,
+                identifier: identifier,
+                sequence: sequence,
+                payload: payload,
+            ) {
                 let elapsed = DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds
                 return .success(max(Int(Double(elapsed) / 1_000_000), 0))
             }
@@ -153,7 +170,7 @@ struct LatencyTester {
         return UInt16(~sum & 0xFFFF)
     }
 
-    static func icmpEchoRequest(isIPv6: Bool, identifier: UInt16, sequence: UInt16) -> [UInt8] {
+    static func icmpEchoRequest(isIPv6: Bool, identifier: UInt16, sequence: UInt16, payload: [UInt8]) -> [UInt8] {
         var packet: [UInt8] = [
             isIPv6 ? 128 : 8, // type: echo request
             0, // code
@@ -161,7 +178,7 @@ struct LatencyTester {
             UInt8(identifier >> 8), UInt8(identifier & 0xFF),
             UInt8(sequence >> 8), UInt8(sequence & 0xFF),
         ]
-        packet.append(contentsOf: Array("hop-latency-probe".utf8))
+        packet.append(contentsOf: payload)
 
         if !isIPv6 {
             let checksum = internetChecksum(packet)
@@ -171,24 +188,26 @@ struct LatencyTester {
         return packet
     }
 
-    static func isMatchingReply(_ data: [UInt8], isIPv6: Bool, identifier: UInt16, sequence: UInt16) -> Bool {
+    static func isMatchingReply(_ data: [UInt8], isIPv6: Bool, identifier: UInt16, sequence: UInt16, payload: [UInt8]) -> Bool {
         var offset = 0
         // An IPv4 datagram socket may hand back the IP header; skip it.
         if !isIPv6, let first = data.first, (first >> 4) == 4 {
             offset = Int(first & 0x0F) * 4
+            guard offset >= 20 else { return false }
         }
         guard data.count >= offset + 8 else {
             return false
         }
 
         let expectedType: UInt8 = isIPv6 ? 129 : 0 // echo reply
-        guard data[offset] == expectedType else {
+        guard data[offset] == expectedType, data[offset + 1] == 0 else {
             return false
         }
 
         let replyIdentifier = (UInt16(data[offset + 4]) << 8) | UInt16(data[offset + 5])
         let replySequence = (UInt16(data[offset + 6]) << 8) | UInt16(data[offset + 7])
         return replyIdentifier == identifier && replySequence == sequence
+            && data.dropFirst(offset + 8).elementsEqual(payload)
     }
 }
 

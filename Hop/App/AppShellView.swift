@@ -156,6 +156,34 @@ struct AppShellView: View {
     }
 }
 
+struct LibraryRecoveryView: View {
+    let retry: () -> Void
+    let reset: () -> Bool
+    @State private var confirmingReset = false
+    @State private var resetFailed = false
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Library Unavailable", systemImage: "lock.doc")
+        } description: {
+            Text("Hop couldn’t open your saved library. Unlock your device and try again.")
+        } actions: {
+            Button("Retry", action: retry)
+                .buttonStyle(.borderedProminent)
+            Button("Reset Library", role: .destructive) { confirmingReset = true }
+            if resetFailed {
+                Text("Reset failed. Check that your device is unlocked and try again.")
+            }
+        }
+        .alert("Erase the saved library?", isPresented: $confirmingReset) {
+            Button("Cancel", role: .cancel) {}
+            Button("Erase Library", role: .destructive) { resetFailed = !reset() }
+        } message: {
+            Text("This permanently replaces your profiles, subscriptions, routing rules, settings, and saved credentials with a new library.")
+        }
+    }
+}
+
 #Preview {
     AppShellView()
         .environment(HopStore.preview)

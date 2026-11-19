@@ -5,12 +5,19 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
 frameworks_dir="$repo_root/Frameworks"
-xcframework="$frameworks_dir/LibXray.xcframework"
 manifest="$frameworks_dir/LibXray.xcframework.sha256"
 
 err()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 
+update_manifest=false
+case "${1:-}" in
+  --frameworks-dir) [[ $# -eq 2 ]] || err "expected a staging directory"; frameworks_dir="$2";;
+  --update) [[ $# -eq 1 ]] || err "usage: $0 --update"; update_manifest=true;;
+  "") [[ $# -eq 0 ]] || err "unexpected empty argument";;
+  *) err "usage: $0 [--frameworks-dir DIR | --update]";;
+esac
+xcframework="$frameworks_dir/LibXray.xcframework"
 command -v shasum >/dev/null 2>&1 || err "shasum is required."
 [[ -d "$xcframework" ]] || err "Frameworks/LibXray.xcframework not found. Run scripts/build-libxray.sh first."
 
@@ -32,16 +39,18 @@ compute_digest() {
 
 digest="$(compute_digest)"
 
-if [[ "${1:-}" == "--update" ]]; then
-  [[ $# -eq 1 ]] || err "usage: $0 [--update]"
-  printf '%s\n' "$digest" > "$manifest"
+if [[ "$update_manifest" == true ]]; then
+  temporary_manifest="$(mktemp "$manifest.XXXXXX")"
+  trap 'rm -f "$temporary_manifest"' EXIT
+  printf '%s\n' "$digest" > "$temporary_manifest"
+  chmod 644 "$temporary_manifest"
+  mv -f "$temporary_manifest" "$manifest"
   info "Recorded trusted LibXray.xcframework digest:"
   printf '  %s\n' "$digest"
   info "Wrote $manifest"
   exit 0
 fi
 
-[[ $# -eq 0 ]] || err "usage: $0 [--update]"
 [[ -f "$manifest" ]] || err "Provenance manifest missing: $manifest
 Run '$0 --update' after a reviewed engine build."
 

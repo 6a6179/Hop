@@ -1,0 +1,112 @@
+diff --git a/app/router/router.go b/app/router/router.go
+index cd695d8..707c022 100644
+--- a/app/router/router.go
++++ b/app/router/router.go
+@@ -14,6 +14,7 @@ import (
+ 	"github.com/xtls/xray-core/features/outbound"
+ 	"github.com/xtls/xray-core/features/routing"
+ 	routing_dns "github.com/xtls/xray-core/features/routing/dns"
++	routing_session "github.com/xtls/xray-core/features/routing/session"
+ )
+ 
+ // Router is an implementation of routing.Router.
+@@ -205,7 +206,13 @@ func (r *Router) pickRouteInternal(ctx routing.Context) (*Rule, routing.Context,
+ 	skipDNSResolve := ctx.GetSkipDNSResolve()
+ 
+ 	if r.domainStrategy == Config_IpOnDemand && !skipDNSResolve {
+-		ctx = routing_dns.ContextWithDNSClient(ctx, r.dns)
++		// Route-only sniffing adds a hostname for domain rules while retaining
++		// the actual packet destination for IP rules. FakeDNS instead replaces
++		// the target with a domain, which still needs normal DNS resolution.
++		session, ok := ctx.(*routing_session.Context)
++		if !ok || session.GetTargetDomain() == "" || len(session.GetTargetIPs()) == 0 {
++			ctx = routing_dns.ContextWithDNSClient(ctx, r.dns)
++		}
+ 	}
+ 
+ 	rules := *r.rules.Load()
+diff --git a/features/routing/dns/route_target_hop_test.go b/features/routing/dns/route_target_hop_test.go
+new file mode 100644
+index 0000000..5083e68
+--- /dev/null
++++ b/features/routing/dns/route_target_hop_test.go
+@@ -0,0 +1,79 @@
++package dns_test
++
++import (
++	"context"
++	"testing"
++
++	"github.com/xtls/xray-core/app/router"
++	"github.com/xtls/xray-core/common/geodata"
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/common/session"
++	"github.com/xtls/xray-core/features/dns"
++	routing_session "github.com/xtls/xray-core/features/routing/session"
++)
++
++type hopRoutingDNS struct {
++	dns.Client
++	lookups []string
++}
++
++func (d *hopRoutingDNS) LookupIP(domain string, _ dns.IPOption) ([]net.IP, uint32, error) {
++	d.lookups = append(d.lookups, domain)
++	return []net.IP{{198, 51, 100, 12}}, 60, nil
++}
++
++func TestHopIPOnDemandPacketDestination(t *testing.T) {
++	rule := func(tag string, address []byte) *router.RoutingRule {
++		return &router.RoutingRule{
++			TargetTag: &router.RoutingRule_Tag{Tag: tag},
++			Ip: []*geodata.IPRule{{Value: &geodata.IPRule_Custom{
++				Custom: &geodata.CIDRRule{Cidr: &geodata.CIDR{Ip: address, Prefix: 24}},
++			}}},
++		}
++	}
++	config := &router.Config{
++		DomainStrategy: router.Config_IpOnDemand,
++		Rule: []*router.RoutingRule{
++			rule("packet-ip", []byte{192, 0, 2, 0}),
++			rule("domain-ip", []byte{198, 51, 100, 0}),
++		},
++	}
++	domain := net.TCPDestination(net.DomainAddress("routing.example"), 443)
++	packet := net.TCPDestination(net.IPAddress([]byte{192, 0, 2, 5}), 443)
++	fake := net.TCPDestination(net.IPAddress([]byte{198, 18, 0, 1}), 443)
++	cases := []struct {
++		name     string
++		outbound session.Outbound
++		tag      string
++		lookups  int
++	}{
++		{"route-only sniffing", session.Outbound{OriginalTarget: packet, Target: packet, RouteTarget: domain}, "packet-ip", 0},
++		{"FakeDNS-restored hostname", session.Outbound{OriginalTarget: fake, Target: domain}, "domain-ip", 1},
++		{"ordinary hostname", session.Outbound{OriginalTarget: domain, Target: domain}, "domain-ip", 1},
++		{"unsniffed IP", session.Outbound{OriginalTarget: packet, Target: packet}, "packet-ip", 0},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			resolver := &hopRoutingDNS{}
++			r := new(router.Router)
++			if err := r.Init(context.Background(), config, resolver, nil, nil); err != nil {
++				t.Fatal(err)
++			}
++			t.Cleanup(func() { _ = r.Close() })
++			ctx := session.ContextWithOutbounds(context.Background(), []*session.Outbound{&tc.outbound})
++			route, err := r.PickRoute(routing_session.AsRoutingContext(ctx))
++			if err != nil {
++				t.Fatal(err)
++			}
++			if got := route.GetOutboundTag(); got != tc.tag {
++				t.Errorf("selected %q, want %q", got, tc.tag)
++			}
++			if len(resolver.lookups) != tc.lookups || (tc.lookups != 0 && resolver.lookups[0] != "routing.example") {
++				t.Errorf("lookups = %v, want %d lookups for routing.example", resolver.lookups, tc.lookups)
++			}
++			if tc.outbound.RouteTarget.IsValid() && route.GetTargetDomain() != "routing.example" {
++				t.Error("sniffed domain unavailable to domain rules")
++			}
++		})
++	}
++}

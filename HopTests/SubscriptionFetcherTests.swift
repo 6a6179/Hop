@@ -32,6 +32,16 @@ final class SubscriptionFetcherTests: XCTestCase {
         XCTAssertEqual(result.profiles.map(\.name), ["One", "Two"])
     }
 
+    func testPartialResponseContainingACompleteLinkCannotBecomeASnapshot() async throws {
+        let url = try XCTUnwrap(URL(string: "https://stub.invalid/partial"))
+        let prefix = Data("trojan://secret@one.example.net:443#One".utf8)
+        SubscriptionStubProtocol.register(url: url, status: 206, chunks: [prefix])
+        await assertImportFails(url: url, with: .incompleteSubscriptionInventory)
+
+        SubscriptionStubProtocol.register(url: url, status: 200, headers: ["Content-Range": "bytes 0-37/100"], chunks: [prefix])
+        await assertImportFails(url: url, with: .incompleteSubscriptionInventory)
+    }
+
     func testNon2xxResponseFailsAsUnavailable() async throws {
         let url = try XCTUnwrap(URL(string: "https://stub.invalid/missing"))
         SubscriptionStubProtocol.register(url: url, status: 404, chunks: [Data("not found".utf8)])
@@ -78,6 +88,47 @@ final class SubscriptionFetcherTests: XCTestCase {
 
         XCTAssertEqual(data.count, ImportPolicy.maxPayloadBytes)
         XCTAssertEqual(data.last, UInt8(ascii: "b"))
+    }
+
+    @MainActor
+    func testAutoRefreshRechecksConsentAndQueuedSourceBeforeFetching() async throws {
+        let firstURL = try XCTUnwrap(URL(string: "https://stub.invalid/first"))
+        let secondURL = try XCTUnwrap(URL(string: "https://stub.invalid/second"))
+        for revokeConsent in [true, false] {
+            SubscriptionStubProtocol.reset()
+            let started = expectation(description: "First fetch started")
+            SubscriptionStubProtocol.registerStalled(url: firstURL, started: started)
+            let first = SubscriptionSource(name: "First", url: firstURL.absoluteString)
+            let second = SubscriptionSource(name: "Second", url: secondURL.absoluteString)
+            var settings = AppSettings.defaults
+            settings.autoRefreshSubscriptions = true
+            let store = HopStore(
+                subscriptions: [first, second],
+                settings: settings,
+                dataStore: HopAppDataStore(
+                    url: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString),
+                    secretStore: .inMemory(),
+                    authenticationStore: .inMemory(),
+                ),
+                importService: importService,
+            )
+            let refresh = Task { await store.autoRefreshStaleSubscriptions() }
+            guard await XCTWaiter.fulfillment(of: [started], timeout: 5) == .completed else {
+                refresh.cancel()
+                await refresh.value
+                return XCTFail("The first subscription request never started")
+            }
+            if revokeConsent {
+                store.settings.autoRefreshSubscriptions = false
+            } else {
+                store.deleteSubscription(id: second.id)
+            }
+            SubscriptionStubProtocol.finishStalled(url: firstURL, body: "trojan://secret@one.example.net:443#One")
+            await refresh.value
+            XCTAssertEqual(SubscriptionStubProtocol.requestedURLs, [firstURL.absoluteString])
+            XCTAssertEqual(store.profiles.count, revokeConsent ? 0 : 1)
+            store.flushPendingPersists()
+        }
     }
 
     func testCancellationStopsStalledTransfer() async throws {
@@ -175,11 +226,12 @@ private final class SubscriptionStubProtocol: URLProtocol {
         var status: Int
         var headers: [String: String]
         var chunks: [Data]
-        var stalled: (started: XCTestExpectation, stopped: XCTestExpectation)?
+        var stalled: (started: XCTestExpectation, stopped: XCTestExpectation?)?
     }
 
     private nonisolated(unsafe) static var stubs: [String: Stub] = [:]
     private nonisolated(unsafe) static var requested: [String] = []
+    private nonisolated(unsafe) static var stalledRequests: [String: SubscriptionStubProtocol] = [:]
     private static let lock = NSLock()
 
     static func reset() {
@@ -187,6 +239,7 @@ private final class SubscriptionStubProtocol: URLProtocol {
         defer { lock.unlock() }
         stubs = [:]
         requested = []
+        stalledRequests = [:]
     }
 
     static func register(url: URL, status: Int, headers: [String: String] = [:], chunks: [Data]) {
@@ -195,10 +248,17 @@ private final class SubscriptionStubProtocol: URLProtocol {
         stubs[url.absoluteString] = Stub(status: status, headers: headers, chunks: chunks)
     }
 
-    static func registerStalled(url: URL, started: XCTestExpectation, stopped: XCTestExpectation) {
+    static func registerStalled(url: URL, started: XCTestExpectation, stopped: XCTestExpectation? = nil) {
         lock.lock()
         defer { lock.unlock() }
         stubs[url.absoluteString] = Stub(status: 200, headers: [:], chunks: [], stalled: (started, stopped))
+    }
+
+    static func finishStalled(url: URL, body: String) {
+        lock.lock()
+        let request = stalledRequests.removeValue(forKey: url.absoluteString)
+        lock.unlock()
+        request?.respond(url: url, status: 200, headers: [:], chunks: [Data(body.utf8)])
     }
 
     static var requestedURLs: [String] {
@@ -224,6 +284,9 @@ private final class SubscriptionStubProtocol: URLProtocol {
         Self.lock.lock()
         Self.requested.append(url.absoluteString)
         let stub = Self.stubs[url.absoluteString]
+        if stub?.stalled != nil {
+            Self.stalledRequests[url.absoluteString] = self
+        }
         Self.lock.unlock()
 
         // Unregistered URL (e.g. a redirect that should have been refused):
@@ -254,6 +317,7 @@ private final class SubscriptionStubProtocol: URLProtocol {
         guard let url = request.url else { return }
         Self.lock.lock()
         let stopped = Self.stubs[url.absoluteString]?.stalled?.stopped
+        Self.stalledRequests[url.absoluteString] = nil
         Self.lock.unlock()
         stopped?.fulfill()
     }

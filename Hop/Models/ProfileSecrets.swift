@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// The secret-bearing fields of a profile that are stored in the Keychain
@@ -60,6 +61,54 @@ extension SubscriptionSource {
 }
 
 extension ProxyProfile {
+    /// July's Shadowsocks 2022 client hashed oversized base64 PSKs before use.
+    /// November expects the effective keys. Only runtime snapshots use this copy.
+    func normalizingShadowsocks2022Keys() throws -> ProxyProfile {
+        guard case var .shadowsocks(options) = options else { return self }
+        let length: Int
+        let path = "/profiles/\(id.uuidString.lowercased())/options/password"
+        switch options.method.lowercased() {
+        case "2022-blake3-aes-128-gcm":
+            length = 16
+        case "2022-blake3-aes-256-gcm":
+            length = 32
+        case "2022-blake3-chacha20-poly1305":
+            guard !options.password.utf8.contains(0x3A) else {
+                throw XrayConfigError.validationFailed([.init(path: path, message: "Shadowsocks 2022 ChaCha20 accepts one preshared key.")])
+            }
+            length = 32
+        default:
+            return self
+        }
+
+        var normalized = ""
+        var remaining = options.password.utf8[...]
+        while true {
+            let end = remaining.firstIndex(of: 0x3A) ?? remaining.endIndex
+            let key = remaining[..<end]
+            // Go's standard base64 ignores CR/LF and requires complete quartets
+            // with at most two trailing '='. Foundation alone accepts excess padding.
+            let encoded = Data(key.filter { $0 != 0x0D && $0 != 0x0A })
+            let decoded = encoded.count.isMultiple(of: 4) && !encoded.suffix(3).elementsEqual("===".utf8)
+                ? Data(base64Encoded: encoded) : nil
+            if let decoded, decoded.count > length {
+                normalized += Data(SHA256.hash(data: decoded).prefix(length)).base64EncodedString()
+            } else if (decoded?.count ?? key.count) == length {
+                // The current core accepts exact raw UTF-8 when base64 decoding fails.
+                normalized += String(decoding: key, as: UTF8.self)
+            } else {
+                throw XrayConfigError.validationFailed([.init(path: path, message: "Each Shadowsocks 2022 preshared key must be \(length) raw bytes or standard base64 encoding at least \(length) bytes.")])
+            }
+            guard end != remaining.endIndex else { break }
+            normalized.append(":")
+            remaining = remaining[remaining.index(after: end)...]
+        }
+        options.password = normalized
+        var profile = self
+        profile.options = .shadowsocks(options)
+        return profile
+    }
+
     /// Non-empty secret values currently set on this profile.
     var secretFieldValues: [ProfileSecretField: String] {
         var values: [ProfileSecretField: String] = [:]
@@ -335,8 +384,19 @@ private enum XrayAdvancedSecret {
         {
             return true
         }
+        // Imported transport dictionaries can be saved for editing before the
+        // builder enforces the supported transports and masks.
+        if lower.contains("masquesettings") {
+            return ["user", "pass", "privatekey"].contains(key) || lower.contains("headers")
+        }
+        if lower.contains("xdrivesettings") {
+            return lower.contains("secrets") || lower.contains("template")
+        }
         if lower.contains("finalmask"), lower.contains("settings") {
-            return key == "password" || (key == "url" && lower.contains("udp"))
+            if lower.contains("profiles"), ["username", "uuid", "texturesvalue", "texturessignature"].contains(key) {
+                return true
+            }
+            return key == "password" || key == "script" || (key == "url" && lower.contains("udp"))
         }
         if lower.contains("hysteriasettings"), key == "auth" {
             return true

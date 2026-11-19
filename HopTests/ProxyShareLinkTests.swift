@@ -23,6 +23,19 @@ final class ProxyShareLinkTests: XCTestCase {
         }
     }
 
+    func testVMessGRPCAuthorityDoesNotReplaceDefaultTLSName() throws {
+        let profile = ProxyProfile(
+            name: "VMess gRPC",
+            endpoint: Endpoint(host: "edge.example.net", port: 443),
+            options: .vmess(VMessOptions(uuid: "11111111-1111-4111-8111-111111111111", security: "auto", alterID: 0)),
+            security: .tls(TLSOptions()),
+            transport: TransportOptions(type: .grpc, host: "rpc.example.net:8443", serviceName: "rpc"),
+        )
+        let parsed = try roundTrip(profile)
+        XCTAssertEqual(parsed.transport, profile.transport)
+        XCTAssertEqual(parsed.security.tls?.serverName, profile.endpoint.host)
+    }
+
     // MARK: - Round-trip helpers
 
     private func roundTrip(_ profile: ProxyProfile, file: StaticString = #filePath, line: UInt = #line) throws -> ProxyProfile {
@@ -39,7 +52,7 @@ final class ProxyShareLinkTests: XCTestCase {
             endpoint: Endpoint(host: "edge.example.net", port: 443),
             options: .vless(VLESSOptions(uuid: "11111111-1111-4111-8111-111111111111", flow: "xtls-rprx-vision")),
             security: .reality(RealityOptions(publicKey: "REALITYPUBLICKEY", shortID: "abcd1234", serverName: "www.cloudflare.com")),
-            transport: TransportOptions(type: .grpc, serviceName: "GrpcService"),
+            transport: TransportOptions(type: .grpc, host: "rpc.example.net:8443", serviceName: "GrpcService"),
         )
 
         let reparsed = try roundTrip(profile)
@@ -52,6 +65,7 @@ final class ProxyShareLinkTests: XCTestCase {
         XCTAssertEqual(reparsed.security.reality?.shortID, "abcd1234")
         XCTAssertEqual(reparsed.transport.type, .grpc)
         XCTAssertEqual(reparsed.transport.serviceName, "GrpcService")
+        XCTAssertEqual(reparsed.transport.host, "rpc.example.net:8443")
         if case let .vless(options) = reparsed.options {
             XCTAssertEqual(options.uuid, "11111111-1111-4111-8111-111111111111")
         } else {

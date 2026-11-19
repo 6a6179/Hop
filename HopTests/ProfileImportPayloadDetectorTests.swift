@@ -26,6 +26,22 @@ final class ProfileImportPayloadDetectorTests: XCTestCase {
         XCTAssertEqual(ProfileImportPayloadDetector.detect(link), .importText(link))
     }
 
+    func testExportedAnonymousHTTPSNodePreviewsLocally() throws {
+        let profile = ProxyProfile(
+            name: "HTTPS proxy",
+            endpoint: Endpoint(host: "proxy.example.net", port: 443),
+            options: .http(HTTPOptions()),
+            security: .tls(TLSOptions(serverName: "proxy.example.net")),
+        )
+        let link = try XCTUnwrap(ProxyShareLink.shareLink(for: profile))
+        XCTAssertEqual(ProfileImportPayloadDetector.detect(link), .importText(link))
+    }
+
+    func testQueryOnlySubscriptionWithPortAndLabelStillFetches() throws {
+        let link = "https://sub.example.com:443?token=abc&fp=chrome#Work"
+        XCTAssertEqual(ProfileImportPayloadDetector.detect(link), try .subscription(XCTUnwrap(URL(string: link))))
+    }
+
     func testDetectsHTTPSURLWithPortAndPathAsSubscription() throws {
         let payload = ProfileImportPayloadDetector.detect("https://sub.example.com:443/path/token")
 

@@ -4,6 +4,10 @@ import XCTest
 
 @MainActor
 final class ProfileEditorTests: XCTestCase {
+    private func wireGuardKey(_ byte: UInt8) -> String {
+        Data(repeating: byte, count: 32).base64EncodedString()
+    }
+
     func testLegacyInsecureTLSCanBeRepairedWithAValidCertificatePin() throws {
         let profile = ProxyProfile(
             name: "Legacy", endpoint: Endpoint(host: "example.com", port: 443),
@@ -23,7 +27,7 @@ final class ProfileEditorTests: XCTestCase {
     func testWireGuardReservedBytesRejectMalformedTokensWithoutDroppingThem() throws {
         let profile = ProxyProfile(
             name: "WireGuard", endpoint: Endpoint(host: "example.com", port: 51820),
-            options: .wireGuard(WireGuardOptions(privateKey: "private-key", peerPublicKey: "peer-key", localAddress: ["10.0.0.2/32"])),
+            options: .wireGuard(WireGuardOptions(privateKey: wireGuardKey(1), peerPublicKey: wireGuardKey(2), localAddress: ["10.0.0.2/32"])),
             security: .none,
         )
         var draft = ProfileEditorDraft(profile: profile)
@@ -103,13 +107,13 @@ final class ProfileEditorTests: XCTestCase {
 
     func testWireGuardEditsFirstExplicitEndpointWithoutRetargetingOtherPeers() throws {
         let fallback = Endpoint(host: "fallback.example.com", port: 51820)
-        let first = WireGuardPeer(publicKey: "first-key", endpoint: Endpoint(host: "first.example.com", port: 51821))
-        let second = WireGuardPeer(publicKey: "second-key")
+        let first = WireGuardPeer(publicKey: wireGuardKey(2), endpoint: Endpoint(host: "first.example.com", port: 51821))
+        let second = WireGuardPeer(publicKey: wireGuardKey(3))
         let profile = ProxyProfile(
             name: "WireGuard",
             endpoint: fallback,
             options: .wireGuard(WireGuardOptions(
-                privateKey: "private-key",
+                privateKey: wireGuardKey(1),
                 peerPublicKey: first.publicKey,
                 localAddress: ["10.0.0.2/32"],
                 peers: [first, second],
@@ -143,13 +147,13 @@ final class ProfileEditorTests: XCTestCase {
     }
 
     func testWireGuardEditsFallbackWhenFirstPeerHasNoExplicitEndpoint() throws {
-        let first = WireGuardPeer(publicKey: "first-key")
+        let first = WireGuardPeer(publicKey: wireGuardKey(2))
         for peers: [WireGuardPeer]? in [nil, [first]] {
             let profile = ProxyProfile(
                 name: "WireGuard",
                 endpoint: Endpoint(host: "old.example.com", port: 51820),
                 options: .wireGuard(WireGuardOptions(
-                    privateKey: "private-key",
+                    privateKey: wireGuardKey(1),
                     peerPublicKey: first.publicKey,
                     localAddress: ["10.0.0.2/32"],
                     peers: peers,
@@ -208,20 +212,20 @@ final class ProfileEditorTests: XCTestCase {
     }
 
     func testAdditionalPeerControlsPreserveIDsAndSupportAddRemove() throws {
-        let first = WireGuardPeer(publicKey: "first", endpoint: Endpoint(host: "first.example.com", port: 51820))
-        let second = WireGuardPeer(publicKey: "second")
-        let profile = ProxyProfile(name: "WireGuard", endpoint: Endpoint(host: "fallback.example.com", port: 51820), options: .wireGuard(WireGuardOptions(privateKey: "private", peerPublicKey: first.publicKey, localAddress: ["10.0.0.2/32"], peers: [first, second])), security: .none)
+        let first = WireGuardPeer(publicKey: wireGuardKey(2), endpoint: Endpoint(host: "first.example.com", port: 51820))
+        let second = WireGuardPeer(publicKey: wireGuardKey(3))
+        let profile = ProxyProfile(name: "WireGuard", endpoint: Endpoint(host: "fallback.example.com", port: 51820), options: .wireGuard(WireGuardOptions(privateKey: wireGuardKey(1), peerPublicKey: first.publicKey, localAddress: ["10.0.0.2/32"], peers: [first, second])), security: .none)
         var draft = ProfileEditorDraft(profile: profile)
-        draft.extraWireGuardPeers[0].publicKey = "edited"
+        draft.extraWireGuardPeers[0].publicKey = wireGuardKey(5)
         var saved = try XCTUnwrap(draft.validation.profile, draft.validation.message ?? "")
         guard case let .wireGuard(edited) = saved.options else { return XCTFail("Expected WireGuard") }
         XCTAssertEqual(edited.peers?.map(\.id), [first.id, second.id])
-        XCTAssertEqual(edited.peers?[1].publicKey, "edited")
+        XCTAssertEqual(edited.peers?[1].publicKey, wireGuardKey(5))
         draft.extraWireGuardPeers.removeAll()
         saved = try XCTUnwrap(draft.validation.profile, draft.validation.message ?? "")
         guard case let .wireGuard(removed) = saved.options else { return XCTFail("Expected WireGuard") }
         XCTAssertEqual(removed.peers, [first])
-        draft.extraWireGuardPeers.append(WireGuardPeerDraft(peer: WireGuardPeer(publicKey: "new")))
+        draft.extraWireGuardPeers.append(WireGuardPeerDraft(peer: WireGuardPeer(publicKey: wireGuardKey(4))))
         saved = try XCTUnwrap(draft.validation.profile, draft.validation.message ?? "")
         guard case let .wireGuard(added) = saved.options else { return XCTFail("Expected WireGuard") }
         XCTAssertEqual(added.peers?.count, 2)
@@ -287,8 +291,8 @@ final class ProfileEditorTests: XCTestCase {
         draft.hysteriaPassword = "secret"
         draft.hysteriaHopInterval = "invalid"
         draft.hysteriaUDPIdleTimeout = "invalid"
-        draft.wireGuardPrivateKey = "private-key"
-        draft.wireGuardPeerPublicKey = "peer-key"
+        draft.wireGuardPrivateKey = wireGuardKey(1)
+        draft.wireGuardPeerPublicKey = wireGuardKey(2)
         draft.wireGuardLocalAddresses = "10.0.0.2/32"
         draft.wireGuardKeepAlive = "invalid"
         draft.wireGuardMTU = "invalid"
@@ -339,7 +343,7 @@ final class ProfileEditorTests: XCTestCase {
     }
 
     func testWireGuardIgnoresHiddenConnectionDraftWithoutClearingIt() throws {
-        let profile = ProxyProfile(name: "WireGuard", endpoint: Endpoint(host: "example.com", port: 51820), options: .wireGuard(WireGuardOptions(privateKey: "private-key", peerPublicKey: "peer-key", localAddress: ["10.0.0.2/32"])), security: .none)
+        let profile = ProxyProfile(name: "WireGuard", endpoint: Endpoint(host: "example.com", port: 51820), options: .wireGuard(WireGuardOptions(privateKey: wireGuardKey(1), peerPublicKey: wireGuardKey(2), localAddress: ["10.0.0.2/32"])), security: .none)
         var draft = ProfileEditorDraft(profile: profile)
         draft.muxFields = .object(["concurrency": .string("invalid")])
         draft.finalMask = .string("invalid")

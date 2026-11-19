@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"testing"
 
 	"github.com/xtls/xray-core/common/platform"
+	"github.com/xtls/xray-core/transport/internet"
 )
 
 const minimalConfig = `{
@@ -65,6 +67,7 @@ func TestInvalidRequestsReturnStructuredErrors(t *testing.T) {
 		{"method", `{"version":1,"method":"wat"}`, "unknown_method"},
 		{"removed stats", `{"version":1,"method":"stats"}`, "unknown_method"},
 		{"config", `{"version":1,"method":"validate","configJSON":"{"}`, "invalid_config"},
+		{"trailing config", `{"version":1,"method":"validate","configJSON":"{} {}"}`, "invalid_config"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -76,6 +79,45 @@ func TestInvalidRequestsReturnStructuredErrors(t *testing.T) {
 				t.Fatalf("got %+v, want error %q", result, test.code)
 			}
 		})
+	}
+}
+
+func TestClosedCoreReleasesSystemDialer(t *testing.T) {
+	t.Cleanup(func() { _ = stop() })
+	assertReleased := func() {
+		t.Helper()
+		_, err := internet.LookupForIP("localhost", internet.DomainStrategy_USE_IP, nil)
+		if err == nil || !strings.Contains(err.Error(), "DNS client not initialized") {
+			t.Fatalf("system dialer still has a DNS client after close: %v", err)
+		}
+	}
+	fields := map[string]any{"configJSON": minimalConfig}
+	if result := call(t, "validate", fields); !result.OK {
+		t.Fatal(result.Error)
+	}
+	assertReleased()
+	if result := call(t, "start", fields); !result.OK {
+		t.Fatal(result.Error)
+	}
+	if result := call(t, "validate", fields); result.OK || result.Error == nil || result.Error.Code != "already_running" {
+		t.Fatalf("validation replaced the running core's system dialer: %+v", result)
+	}
+	if result := call(t, "stop", nil); !result.OK {
+		t.Fatal(result.Error)
+	}
+	assertReleased()
+}
+
+func TestConfigCannotChangeProcessEnvironment(t *testing.T) {
+	const key = "HOP_BRIDGE_ENV_TEST"
+	t.Setenv(key, "original")
+	for _, method := range []string{"validate", "start"} {
+		result := call(t, method, map[string]any{
+			"configJSON": `{"env":{"HOP_BRIDGE_ENV_TEST":"changed"},"outbounds":[{"protocol":"freedom"}]}`,
+		})
+		if result.OK || os.Getenv(key) != "original" {
+			t.Fatalf("%s accepted an environment override", method)
+		}
 	}
 }
 

@@ -101,6 +101,10 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         XCTAssertEqual(store.subscriptions.first?.name, "Renamed")
         XCTAssertNotNil(store.subscriptions.first?.lastUpdatedAt)
 
+        guard case .failed = store.reviewSubscriptionRefresh(result, for: original) else {
+            return XCTFail("A delayed review must not replace a newer refresh of the same source")
+        }
+
         var moved = renamed
         moved.url = "https://replacement.example/sub"
         store.updateSubscription(moved)
@@ -1170,6 +1174,26 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
     }
 
     @MainActor
+    func testInitialSubscriptionImportRejectsLocalRuleWhoseNameBecomesAmbiguous() {
+        let manual = trojanProfile(name: "Tokyo", host: "manual.example.com")
+        let subscription = SubscriptionSource(name: "Provider", url: "https://example.com/sub")
+        let configuration = RuleConfiguration(name: "Custom", rules: [
+            RoutingRule(kind: .domainSuffix, value: "example.com", target: .named("Tokyo")),
+            RoutingRule(kind: .final, value: "*", target: .direct),
+        ])
+        let store = HopStore(
+            profiles: [manual],
+            ruleConfigurations: [configuration],
+            activeRuleConfigurationID: configuration.id,
+            dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()),
+        )
+
+        let imported = trojanProfile(name: "Tokyo", host: "provider.example.com")
+        XCTAssertTrue(store.applySubscriptionImport(ImportResult(profiles: [imported]), adding: subscription))
+        XCTAssertEqual(store.rules.map(\.target), [.reject, .direct])
+    }
+
+    @MainActor
     func testInitialSubscriptionImportStampsAllOwnershipDropsRulesAndPreservesSelection() throws {
         let manual = trojanProfile(name: "Manual", host: "manual.example.com")
         let subscription = SubscriptionSource(name: "Provider", url: "https://example.com/sub")
@@ -1600,6 +1624,23 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         let truncated = try ProxyImportService().importText(truncatedText)
         XCTAssertNil(truncated.validatedEmptySubscriptionSnapshot)
         XCTAssertFalse(store.applySubscriptionRefresh(truncated, updating: subscription))
+
+        let present = "Present = trojan, present.example.com, 443, password=secret"
+        let partialConfigurations = [
+            "[Proxy]\n" + present + "\n" + String(repeating: "# filler\n", count: ImportPolicy.maxLines) + "Late = trojan, late.example.com, 443, secret",
+            "[Proxy]\n" + present + "\nMalformed line",
+            "trojan://fixture@present.example.com:443#Present\ntruncated-node",
+            "trojan://fixture@present.example.com:443#Present" + String(repeating: " ", count: ImportPolicy.maxLines) + "trojan://fixture@late.example.com:443#Late",
+        ]
+        for payload in partialConfigurations {
+            let partial = try ProxyImportService().importText(payload)
+            XCTAssertFalse(partial.isEmpty)
+            XCTAssertEqual(partial.incompleteSubscriptionInventory, true)
+            XCTAssertFalse(store.applySubscriptionRefresh(partial, updating: subscription))
+        }
+        let overItemLimit = ImportResult(profiles: [owned, owned]).truncated(to: 1)
+        XCTAssertEqual(overItemLimit.incompleteSubscriptionInventory, true)
+        XCTAssertFalse(store.applySubscriptionRefresh(overItemLimit, updating: subscription))
 
         XCTAssertEqual(store.profiles, [owned])
         XCTAssertEqual(store.groups, [ownedGroup])

@@ -2,14 +2,20 @@
 # Build Hop's pinned, client-only Xray gomobile bridge for iOS.
 set -euo pipefail
 
-GO_VERSION="go1.26.5"
-XRAY_TAG="v26.6.27"
-XRAY_COMMIT="45cf2898ab12e97a55dd8f1f3d78d903340bdc9e"
-XRAY_MODULE_VERSION="v1.260327.1-0.20260627131803-45cf2898ab12"
+GO_VERSION="go1.27.4"
+XRAY_TAG="v26.11.9"
+XRAY_COMMIT="676eaf66f8f05d4d558ee7a74b4736623d3feeb9"
+XRAY_MODULE_VERSION="v1.260327.1-0.20261109052709-676eaf66f8f0"
 GOMOBILE_VERSION="v0.0.0-20260709172247-6129f5bee9d5"
 GOMOBILE_COMMIT="6129f5bee9d516e31842c9815bf24f60fa682b6e"
 IOS_VERSION="26.0"
-XRAY_IOS_PATCH="XrayBridge/patches/0001-bound-ios-tun-memory.patch"
+XRAY_PATCHES=(
+  XrayBridge/patches/0001-bound-ios-tun-memory.patch
+  XrayBridge/patches/0002-release-system-dialer.patch
+  XrayBridge/patches/0003-prefer-packet-destination.patch
+  XrayBridge/patches/0004-bound-client-queues.patch
+  XrayBridge/patches/0005-xdns-resolver-dial.patch
+)
 
 # A FIPS-enabled Go build defaults the runtime to FIPS mode. Its entropy path
 # can fault in a roughly 32 MiB scratch region, which cannot fit beside Xray in
@@ -27,6 +33,12 @@ destination="$frameworks_dir/LibXray.xcframework"
 err()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m==>\033[0m %s\n' "$*"; }
 
+update_manifest=false
+if [[ $# -gt 0 ]]; then
+  [[ $# -eq 1 && "$1" == "--update-manifest" ]] || err "usage: $0 [--update-manifest]"
+  update_manifest=true
+fi
+
 command -v go >/dev/null 2>&1 || err "Go $GO_VERSION is required."
 command -v git >/dev/null 2>&1 || err "git is required."
 command -v python3 >/dev/null 2>&1 || err "python3 is required to normalize the xcframework metadata."
@@ -37,7 +49,9 @@ command -v xcodebuild >/dev/null 2>&1 || err "Xcode is required."
 [[ "$(go env GOFIPS140 2>/dev/null)" == "off" ]] \
   || err "GOFIPS140 must be off for the memory-constrained iOS tunnel build."
 [[ -f "$bridge_dir/go.mod" ]] || err "XrayBridge/go.mod is missing."
-[[ -f "$repo_root/$XRAY_IOS_PATCH" ]] || err "$XRAY_IOS_PATCH is missing."
+for patch in "${XRAY_PATCHES[@]}"; do
+  [[ -f "$repo_root/$patch" ]] || err "$patch is missing."
+done
 
 remote_commit="$(git ls-remote https://github.com/XTLS/Xray-core.git "refs/tags/$XRAY_TAG" | awk 'NR == 1 { print $1 }')"
 [[ "$remote_commit" == "$XRAY_COMMIT" ]] || err "Xray-core $XRAY_TAG resolved to ${remote_commit:-nothing}, expected $XRAY_COMMIT."
@@ -56,6 +70,9 @@ work_dir="/private/tmp/hop-libxray-build"
 lock_dir="$work_dir.lock"
 mkdir "$lock_dir" 2>/dev/null || err "another LibXray build is active (remove stale $lock_dir if no build is running)."
 cleanup() {
+  if [[ -d "$work_dir/previous.xcframework" && ! -e "$destination" ]]; then
+    mv "$work_dir/previous.xcframework" "$destination" || return 1
+  fi
   rm -rf "$work_dir"
   rmdir "$lock_dir" 2>/dev/null || true
 }
@@ -65,32 +82,31 @@ bin_dir="$work_dir/bin"
 output="$work_dir/LibXray.xcframework"
 mkdir -p "$bin_dir"
 
-# Keep the upstream module immutable and pinned, but patch a temporary copy
-# while compiling. Xray's generic gVisor defaults permit multi-megabyte buffers
-# per flow and its current UDP path retains much larger queues than an iOS
-# packet-tunnel process can afford. The patch also gives Go its own TUN
-# descriptor and synchronizes packet-reader shutdown. A fixed path and relative
-# module replacement keeps Go's embedded source/build metadata deterministic.
+# Apply the iOS lifetime, memory and routing patches to a temporary copy of
+# the pinned module. The fixed path and relative replacement keep the embedded
+# Go build metadata reproducible.
 module_dir="$(printf '%s\n' "$module_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["Dir"])')"
-patch_digest="$(shasum -a 256 "$repo_root/$XRAY_IOS_PATCH" | awk '{print $1}')"
-(
-  cd "$module_dir"
-  git apply --unidiff-zero --check "$repo_root/$XRAY_IOS_PATCH"
-)
 patched_module="$work_dir/xray-core"
 cp -R "$module_dir" "$patched_module"
 chmod -R u+w "$patched_module"
 (
   cd "$patched_module"
-  git apply --unidiff-zero "$repo_root/$XRAY_IOS_PATCH"
-  GOWORK=off go test -race ./proxy/tun -run '^TestHop' -count=1
+  for patch in "${XRAY_PATCHES[@]}"; do
+    git apply "$repo_root/$patch"
+  done
 )
+ln -s "$repo_root/Geodata" "$work_dir/Geodata"
 build_bridge="$work_dir/XrayBridge"
 cp -R "$bridge_dir" "$build_bridge"
 chmod -R u+w "$build_bridge"
 (
   cd "$build_bridge"
   GOWORK=off go mod edit -replace=github.com/xtls/xray-core=../xray-core
+  GOWORK=off go test -mod=readonly -race -run '^TestHop' -count=1 \
+    github.com/xtls/xray-core/proxy/tun \
+    github.com/xtls/xray-core/features/routing/dns \
+    github.com/xtls/xray-core/transport/internet/finalmask/xdns
+  GOWORK=off go test -mod=readonly -race .
 )
 
 info "Installing pinned gomobile $GOMOBILE_COMMIT ..."
@@ -143,11 +159,23 @@ if ! grep -Rqs --include='*.h' 'LibXrayInvoke' "$output"; then
 fi
 
 mkdir -p "$frameworks_dir"
-rm -rf "$destination"
+if [[ "$update_manifest" == false ]]; then
+  "$repo_root/scripts/verify-libxray.sh" --frameworks-dir "$work_dir"
+fi
+if [[ -d "$destination" ]]; then
+  mv "$destination" "$work_dir/previous.xcframework"
+fi
 mv "$output" "$destination"
-"$repo_root/scripts/verify-libxray.sh" --update
+if [[ "$update_manifest" == true ]]; then
+  if ! "$repo_root/scripts/verify-libxray.sh" --update; then
+    mv "$destination" "$output"
+    err "Could not record the new engine digest."
+  fi
+fi
 
 info "Done -> $destination"
 info "Pinned Xray: $XRAY_TAG ($XRAY_COMMIT)"
-info "Applied iOS patch: $XRAY_IOS_PATCH ($patch_digest)"
+for patch in "${XRAY_PATCHES[@]}"; do
+  shasum -a 256 "$repo_root/$patch"
+done
 info "Pinned Go Mobile: $GOMOBILE_COMMIT"

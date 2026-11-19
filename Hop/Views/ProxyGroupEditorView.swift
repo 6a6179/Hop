@@ -7,6 +7,7 @@ struct ProxyGroupEditorView: View {
     @Environment(HopStore.self) private var store
     @State private var draft: ProxyGroupEditorDraft
     @State private var isSaving = false
+    @State private var validationError: String?
 
     let onSave: (ProxyGroup) -> Void
 
@@ -16,7 +17,9 @@ struct ProxyGroupEditorView: View {
     }
 
     var body: some View {
-        let selectableGroups = store.groups.filter { $0.id != draft.id }
+        let selectableGroups = store.groups.filter { group in
+            group.id != draft.id && (draft.type != .urlTest || (group.isEnabled && group.type == .select) || draft.members.contains(.group(group.id)))
+        }
 
         NavigationStack {
             Form {
@@ -33,8 +36,12 @@ struct ProxyGroupEditorView: View {
                 }
 
                 Section {
-                    Toggle("Direct", isOn: memberBinding(for: .direct))
-                    Toggle("Reject", isOn: memberBinding(for: .reject))
+                    if draft.type != .urlTest || draft.members.contains(.direct) {
+                        Toggle("Direct", isOn: memberBinding(for: .direct))
+                    }
+                    if draft.type != .urlTest || draft.members.contains(.reject) {
+                        Toggle("Reject", isOn: memberBinding(for: .reject))
+                    }
 
                     ForEach(store.profiles) { profile in
                         Toggle(profile.name, isOn: memberBinding(for: .profile(profile.id)))
@@ -46,23 +53,34 @@ struct ProxyGroupEditorView: View {
                 } header: {
                     Text("Members")
                 } footer: {
-                    Text("Review Direct/Reject targets. Avoid circular groups.")
+                    Text(draft.type == .urlTest ? "Choose nodes or enabled manual groups that resolve to a node. Remove any other members." : "Review Direct/Reject targets. Avoid circular groups.")
                 }
 
-                Section("Default") {
-                    Picker("Default", selection: $draft.defaultTarget) {
-                        Text("First Member").tag(OutboundTarget?.none)
-                        ForEach(draft.members, id: \.id) { target in
-                            Text(store.displayName(for: target)).tag(Optional(target))
+                if draft.type == .select {
+                    Section("Default") {
+                        Picker("Default", selection: $draft.defaultTarget) {
+                            Text("First Member").tag(OutboundTarget?.none)
+                            ForEach(draft.members, id: \.id) { target in
+                                Text(store.displayName(for: target)).tag(Optional(target))
+                            }
                         }
                     }
                 }
 
                 if draft.type == .urlTest {
                     Section("URL Test") {
-                        ProfileTextField("URL", text: $draft.url, prompt: "https://www.gstatic.com/generate_204")
+                        if draft.importedType == nil {
+                            ProfileTextField("URL", text: $draft.url, prompt: ProxyGroupTestOptions.defaultURL)
+                        } else {
+                            LabeledContent("Probe URL", value: ProxyGroupTestOptions.defaultURL)
+                        }
                         ProfileTextField("Interval (s)", text: $draft.intervalSeconds, prompt: "600", keyboardType: .numberPad)
-                        ProfileTextField("Tolerance (ms)", text: $draft.toleranceMilliseconds, prompt: "50", keyboardType: .numberPad)
+                    }
+                }
+
+                if let validationError {
+                    Section {
+                        Label(validationError, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                     }
                 }
 
@@ -73,6 +91,7 @@ struct ProxyGroupEditorView: View {
                     }
                 }
             }
+            .disabled(isSaving)
             .navigationTitle(store.groups.contains(where: { $0.id == draft.id }) ? "Edit Group" : "New Group")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -85,11 +104,27 @@ struct ProxyGroupEditorView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button(isSaving ? "Saving..." : "Save") {
                         let draft = draft
+                        let profiles = store.profiles
+                        let otherGroups = store.groups.filter { $0.id != draft.id }
+                        validationError = nil
                         isSaving = true
                         Task { @MainActor in
                             guard let group = await draft.resolvedGroup() else {
                                 isSaving = false
                                 return
+                            }
+                            if group.isEnabled, group.type == .urlTest {
+                                let issue = await Task.detached(priority: .userInitiated) {
+                                    XrayConfigBuilder().validationIssues(
+                                        profiles: profiles, groups: otherGroups + [group], selectedTarget: .group(group.id),
+                                        routingMode: .global, rules: [],
+                                    ).first
+                                }.value
+                                if let issue {
+                                    validationError = issue.message
+                                    isSaving = false
+                                    return
+                                }
                             }
                             onSave(group)
                             dismiss()
@@ -127,7 +162,7 @@ struct ProxyGroupEditorDraft {
     var defaultTarget: OutboundTarget?
     var url: String
     var intervalSeconds: String
-    var toleranceMilliseconds: String
+    let toleranceMilliseconds: Int
     var isEnabled: Bool
     var importedType: String?
     var warning: String?
@@ -142,7 +177,7 @@ struct ProxyGroupEditorDraft {
         defaultTarget = group.defaultTarget
         url = group.testOptions.url
         intervalSeconds = String(group.testOptions.intervalSeconds)
-        toleranceMilliseconds = String(group.testOptions.toleranceMilliseconds)
+        toleranceMilliseconds = group.testOptions.toleranceMilliseconds
         isEnabled = group.isEnabled
         importedType = group.importedType
         warning = group.warning
@@ -153,7 +188,7 @@ struct ProxyGroupEditorDraft {
         !trimmed(name).isEmpty
             && !members.isEmpty
             && Int(trimmed(intervalSeconds)) != nil
-            && Int(trimmed(toleranceMilliseconds)) != nil
+            && (!isEnabled || type != .urlTest || (!members.contains(.direct) && !members.contains(.reject)))
     }
 
     /// DNS resolution may block for seconds, so it must never run from a
@@ -168,6 +203,9 @@ struct ProxyGroupEditorDraft {
         guard isStructurallyValid else {
             return nil
         }
+        if type != .urlTest || importedType != nil {
+            return makeGroup(probeURLIsAllowed: type != .urlTest)
+        }
         let candidateURL = url
         let probeURLIsAllowed = await Task.detached(priority: .userInitiated) {
             probeURLValidator(candidateURL)
@@ -177,10 +215,8 @@ struct ProxyGroupEditorDraft {
 
     func makeGroup(probeURLIsAllowed: Bool) -> ProxyGroup? {
         let trimmedName = trimmed(name)
-        guard !trimmedName.isEmpty,
-              !members.isEmpty,
-              let interval = Int(trimmed(intervalSeconds)),
-              let tolerance = Int(trimmed(toleranceMilliseconds))
+        guard isStructurallyValid,
+              let interval = Int(trimmed(intervalSeconds))
         else {
             return nil
         }
@@ -193,14 +229,14 @@ struct ProxyGroupEditorDraft {
             name: trimmedName,
             type: type,
             members: members,
-            defaultTarget: defaultTarget,
+            defaultTarget: type == .urlTest ? nil : defaultTarget,
             testOptions: ProxyGroupTestOptions(
                 // Keep the editor in agreement with the import path and config
                 // builder: a disallowed/empty probe URL falls back to the default
                 // so the persisted state never holds an SSRF-style probe target.
                 url: probeURLIsAllowed ? trimmedURL : ProxyGroupTestOptions.defaultURL,
                 intervalSeconds: ImportPolicy.clampURLTestInterval(interval),
-                toleranceMilliseconds: ImportPolicy.clampURLTestTolerance(tolerance),
+                toleranceMilliseconds: toleranceMilliseconds,
             ),
             isEnabled: isEnabled,
             importedType: importedType,

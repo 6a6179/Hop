@@ -166,6 +166,7 @@ enum ProxyShareLink {
             object["host"] = profile.transport.host ?? ""
         case .grpc:
             object["path"] = profile.transport.serviceName ?? ""
+            object["host"] = profile.transport.host
         case .tcp, .mKCP, .hysteria, .quic:
             break
         case .xhttp:
@@ -177,6 +178,10 @@ enum ProxyShareLink {
             object["tls"] = profile.security.layer == .reality ? "reality" : "tls"
             if let serverName = tls.serverName, !serverName.isEmpty {
                 object["sni"] = serverName
+            } else if profile.transport.type == .grpc, profile.transport.host?.isEmpty == false {
+                // VMess readers can fall back to "host" for SNI. Keep the
+                // original verification name separate from the gRPC authority.
+                object["sni"] = profile.endpoint.host
             }
             if !tls.alpn.isEmpty {
                 object["alpn"] = tls.alpn.joined(separator: ",")
@@ -332,6 +337,9 @@ enum ProxyShareLink {
             }
         case .grpc:
             query = [("type", "grpc")]
+            if let authority = transport.host, !authority.isEmpty {
+                query.append(("authority", authority))
+            }
             if let serviceName = transport.serviceName, !serviceName.isEmpty {
                 query.append(("serviceName", serviceName))
             }

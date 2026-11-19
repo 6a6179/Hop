@@ -1,0 +1,39 @@
+diff --git a/proxy/wireguard/netstack.go b/proxy/wireguard/netstack.go
+index b2b0f4e..c4b7374 100644
+--- a/proxy/wireguard/netstack.go
++++ b/proxy/wireguard/netstack.go
+@@ -29,7 +29,7 @@ import (
+ )
+ 
+ // netTunQueue is how many packets of the stack can wait to be read from its device
+-const netTunQueue = 1024
++const netTunQueue = 64
+ 
+ // netTun is the device of a TCP/IP stack of Xray: what is written to it goes to the stack,
+ // and what the stack sends is read from it
+diff --git a/transport/internet/hysteria/config.go b/transport/internet/hysteria/config.go
+index bf87d60..942c3ae 100644
+--- a/transport/internet/hysteria/config.go
++++ b/transport/internet/hysteria/config.go
+@@ -22,7 +22,7 @@ const (
+ 	StatusAuthOK              = 233
+ 	FrameTypeTCPRequest       = 0x401
+ 	MaxDatagramFrameSize      = 1200
+-	udpMessageChanSize        = 1024
++	udpMessageChanSize        = 64
+ 	idleCleanupInterval       = 1 * time.Second
+ )
+ 
+diff --git a/transport/internet/kcp/dialer.go b/transport/internet/kcp/dialer.go
+index 443befc..cf51a8f 100644
+--- a/transport/internet/kcp/dialer.go
++++ b/transport/internet/kcp/dialer.go
+@@ -18,7 +18,7 @@ import (
+ var globalConv = uint32(dice.RollUint16())
+ 
+ func fetchInput(_ context.Context, input io.Reader, reader PacketReader, conn *Connection) {
+-	cache := make(chan *buf.Buffer, 1024)
++	cache := make(chan *buf.Buffer, 64)
+ 	go func() {
+ 		for {
+ 			payload := buf.New()

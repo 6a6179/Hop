@@ -15,6 +15,8 @@ struct DashboardView: View {
         let state = store.tunnel.state
         let enabledGroups = store.groups.filter(\.isEnabled)
         let selectedTarget = store.selectedTarget
+        let installed = store.tunnel.installedConnection
+        let showingInstalled = state.isConnected || state == .disconnecting
         let needsProfile = store.profiles.isEmpty && !state.isConnected
         let connectionActionDisabled = state.isInFlight || (!state.isConnected && !needsProfile && selectedTarget == nil)
 
@@ -22,8 +24,8 @@ struct DashboardView: View {
             Section {
                 ConnectWidget(
                     state: state,
-                    profileName: store.selectedTargetDisplayName,
-                    routingMode: store.routingMode,
+                    profileName: showingInstalled ? installed?.targetName : store.selectedTargetDisplayName,
+                    routingMode: showingInstalled ? installed?.routingMode : store.routingMode,
                     isDisabled: connectionActionDisabled,
                     showsSetupAction: needsProfile,
                 ) {
@@ -35,6 +37,7 @@ struct DashboardView: View {
                         } else if let selectedTarget {
                             await store.tunnel.connect(
                                 target: selectedTarget,
+                                targetName: store.displayName(for: selectedTarget),
                                 profiles: store.profiles,
                                 groups: store.groups,
                                 routingMode: store.routingMode,
@@ -47,7 +50,7 @@ struct DashboardView: View {
                 .listRowInsets(EdgeInsets(top: 18, leading: 16, bottom: 16, trailing: 16))
             }
 
-            Section("Outbound") {
+            Section {
                 Picker("Mode", selection: $store.routingMode) {
                     ForEach(RoutingMode.allCases, id: \.self) { mode in
                         Text(mode.title).tag(mode)
@@ -92,6 +95,8 @@ struct DashboardView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+            } header: {
+                Text(showingInstalled ? "Next Connection" : "Outbound")
             }
         }
         .contentMargins(.top, 8, for: .scrollContent)
@@ -181,8 +186,8 @@ private struct ConnectWidget: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     let state: TunnelConnectionState
-    let profileName: String
-    let routingMode: RoutingMode
+    let profileName: String?
+    let routingMode: RoutingMode?
     let isDisabled: Bool
     let showsSetupAction: Bool
     let action: () -> Void
@@ -239,8 +244,8 @@ private struct ConnectWidget: View {
 
 private struct ConnectionStatusText: View {
     let state: TunnelConnectionState
-    let profileName: String
-    let routingMode: RoutingMode
+    let profileName: String?
+    let routingMode: RoutingMode?
     let showsSetupAction: Bool
 
     var body: some View {
@@ -251,12 +256,14 @@ private struct ConnectionStatusText: View {
                 .allowsTightening(true)
                 .minimumScaleFactor(0.85)
                 .truncationMode(.tail)
-            Text(showsSetupAction ? "Add a profile to begin" : profileName)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
-            if !showsSetupAction {
+            if let detail = showsSetupAction ? "Add a profile to begin" : profileName {
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !showsSetupAction, let routingMode {
                 Text("\(routingMode.title) routing")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(state.accent)

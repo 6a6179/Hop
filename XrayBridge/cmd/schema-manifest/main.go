@@ -25,9 +25,9 @@ import (
 )
 
 const (
-	coreVersion       = "v26.6.27"
-	coreCommit        = "45cf2898ab12e97a55dd8f1f3d78d903340bdc9e"
-	coreModuleVersion = "v1.260327.1-0.20260627131803-45cf2898ab12"
+	coreVersion       = "v26.11.9"
+	coreCommit        = "676eaf66f8f05d4d558ee7a74b4736623d3feeb9"
+	coreModuleVersion = "v1.260327.1-0.20261109052709-676eaf66f8f0"
 	formatVersion     = 1
 )
 
@@ -172,7 +172,7 @@ type enumOverlay struct {
 }
 
 var seedTypes = []string{
-	"Config", "OutboundDetourConfig", "StreamConfig", "ProxyConfig", "MuxConfig",
+	"Config", "OutboundDetourConfig", "StreamConfig", "MuxConfig",
 	"VLessOutboundConfig", "VLessOutboundVnext", "VLessReverseConfig",
 	"VMessOutboundConfig", "VMessOutboundTarget", "VMessAccount",
 	"TrojanClientConfig", "TrojanServerTarget",
@@ -181,26 +181,26 @@ var seedTypes = []string{
 	"HTTPClientConfig", "HTTPRemoteConfig", "HTTPAccount",
 	"WireGuardConfig", "WireGuardPeerConfig", "HysteriaClientConfig",
 	"FreedomConfig", "Fragment", "Noise", "FreedomFinalRuleConfig",
-	"BlackholeConfig", "NoneResponse", "HTTPResponse", "DNSOutboundConfig", "DNSOutboundRuleConfig", "LoopbackConfig",
+	"BlackholeConfig", "ResponseConfig", "DNSOutboundConfig", "DNSOutboundRuleConfig", "LoopbackConfig",
 	"KCPConfig", "TCPConfig", "WebSocketConfig", "HttpUpgradeConfig", "SplitHTTPConfig",
-	"XmuxConfig", "HysteriaConfig", "UdpHop", "Masquerade", "GRPCConfig",
+	"XmuxConfig", "HysteriaConfig", "UDPHop", "Masquerade", "GRPCConfig",
 	"TLSConfig", "TLSCertConfig", "REALITYConfig", "LimitFallback", "SocketConfig",
 	"CustomSockoptConfig", "HappyEyeballsConfig", "QuicParamsConfig", "FinalMask", "Mask",
 	"HeaderCustomTCP", "TCPItem", "FragmentMask", "HeaderCustomUDP", "UDPItem",
 	"NoOpConnectionAuthenticator", "Authenticator", "AuthenticatorRequest", "AuthenticatorResponse",
 	"CustomTransform", "CustomTransformArg", "MkcpLegacy", "NoiseMask", "NoiseItem",
-	"Salamander", "Sudoku", "Xdns", "Xicmp", "Realm",
+	"Salamander", "Sudoku", "XDNS", "Xicmp", "Realm", "Filter", "XMC", "MasqueClientConfig",
 	"DNSConfig", "NameServerConfig", "RouterConfig", "RawFieldRule", "RouterRule",
 	"WebhookRuleConfig", "BalancingRule", "StrategyConfig", "strategyEmptyConfig", "strategyLeastLoadConfig",
 	"PolicyConfig", "Policy", "SystemPolicy", "ObservatoryConfig", "BurstObservatoryConfig",
-	"healthCheckSettings", "FakeDNSPoolElementConfig", "VersionConfig", "GeodataConfig",
+	"HealthCheckSettings", "FakeDNSPoolElementConfig", "VersionConfig", "GeodataConfig",
 	"GeodataAssetConfig", "LogConfig", "StatsConfig",
 }
 
 var enumOverlays = map[string]enumOverlay{
 	"OutboundDetourConfig.targetStrategy": {Values: []string{"", "asis", "useip", "useipv4", "useipv6", "useipv4v6", "useipv6v4", "forceip", "forceipv4", "forceipv6", "forceipv4v6", "forceipv6v4"}},
 	"MuxConfig.xudpProxyUDP443":           {Values: []string{"", "reject", "allow", "skip"}},
-	"StreamConfig.network":                {Values: []string{"raw", "tcp", "xhttp", "splithttp", "kcp", "mkcp", "grpc", "ws", "websocket", "httpupgrade", "hysteria"}, Notes: []string{"h2, h3, http, and quic are parsed only to return a removed-feature error."}},
+	"StreamConfig.network":                {Values: []string{"raw", "tcp", "xhttp", "splithttp", "kcp", "mkcp", "grpc", "ws", "websocket", "httpupgrade", "hysteria", "masque", "xdrive"}, Notes: []string{"h2, h3, http, and quic are parsed only to return a removed-feature error."}},
 	"StreamConfig.security":               {Values: []string{"", "none", "tls", "reality"}, Notes: []string{"xtls is parsed only to return a removed-feature error."}},
 	"SplitHTTPConfig.mode":                {Values: []string{"", "auto", "packet-up", "stream-up", "stream-one"}},
 	"SplitHTTPConfig.xPaddingPlacement":   {Values: []string{"", "cookie", "header", "query", "queryInHeader"}},
@@ -219,7 +219,7 @@ var enumOverlays = map[string]enumOverlay{
 	"DNSConfig.queryStrategy":             {Values: []string{"UseIP", "UseIPv4", "UseIPv6", "UseSystem"}, Notes: []string{"Xray accepts documented spelling aliases case-insensitively."}},
 	"NameServerConfig.queryStrategy":      {Values: []string{"UseIP", "UseIPv4", "UseIPv6", "UseSystem"}, Notes: []string{"Xray accepts documented spelling aliases case-insensitively."}},
 	"DNSOutboundRuleConfig.action":        {Values: []string{"direct", "drop", "return", "hijack"}},
-	"WireGuardConfig.domainStrategy":      {Values: []string{"", "forceip", "forceipv4", "forceipv6", "forceipv4v6", "forceipv6v4"}},
+	"ResponseConfig.type":                 {Values: []string{"", "none", "http", "custom"}, Notes: []string{"Hop generates its own Reject outbound."}},
 	"QuicParamsConfig.congestion":         {Values: []string{"", "brutal", "force-brutal", "reno", "bbr"}},
 	"VLessOutboundConfig.flow":            {Values: []string{"", "xtls-rprx-vision", "xtls-rprx-vision-udp443"}},
 	"VMessAccount.security":               {Values: []string{"aes-128-gcm", "chacha20-poly1305", "auto", "none", "zero"}, Notes: []string{"Hop policy permits only auto, aes-128-gcm, and chacha20-poly1305."}},
@@ -229,28 +229,57 @@ var enumOverlays = map[string]enumOverlay{
 }
 
 var applicabilityOverlays = map[string]string{
-	"Config.transport":        "excluded-deprecated",
-	"Config.log":              "hop-managed",
-	"Config.routing":          "client-advanced",
-	"Config.dns":              "client-advanced",
-	"Config.inbounds":         "hop-managed-tun-only",
-	"Config.outbounds":        "client",
-	"Config.policy":           "client-advanced",
-	"Config.api":              "excluded-server-only",
-	"Config.metrics":          "excluded-server-only",
-	"Config.stats":            "excluded-app-telemetry",
-	"Config.reverse":          "excluded-server-only",
-	"Config.fakeDns":          "client-advanced",
-	"Config.observatory":      "client-advanced",
-	"Config.burstObservatory": "client-advanced",
-	"Config.version":          "client-advanced",
-	"Config.geodata":          "client-advanced-local-assets-only",
+	"UDPHop.remoteIPs":                               "excluded-unreviewed-destination",
+	"XDNS.extraPoll":                                 "excluded-resource-policy",
+	"XDNSDomain.lenLimit":                            "excluded-resource-policy",
+	"XDNSDomain.labelLimit":                          "excluded-resource-policy",
+	"XDNSDomain.edns0":                               "excluded-resource-policy",
+	"XDNSResolver.worker":                            "excluded-resource-policy",
+	"DNSConfig.script":                               "excluded-executable-script",
+	"RouterConfig.script":                            "excluded-executable-script",
+	"NoiseMask.script":                               "excluded-executable-script",
+	"NameServerConfig.id":                            "excluded-script-only",
+	"TLSConfig.useSystemCA":                          "excluded-hop-fixed",
+	"SplitHTTPConfig.h2Params":                       "excluded-unbounded-transport-parameters",
+	"StreamConfig.masqueSettings":                    "excluded-unsupported-protocol",
+	"StreamConfig.xdriveSettings":                    "excluded-unsupported-protocol",
+	"WireGuardConfig.remoteDNS":                      "excluded-unreviewed-destination",
+	"Realm.portMapping":                              "excluded-unreviewed-routing",
+	"Realm.ipMode":                                   "excluded-unreviewed-routing",
+	"RawFieldRule.localOS":                           "excluded-unsupported-matcher",
+	"FreedomFinalRuleConfig.delay":                   "excluded-hop-managed-routing",
+	"FreedomFinalRuleConfig.logLevel":                "excluded-hop-managed-logging",
+	"ResponseConfig.customResponseData":              "excluded-hop-managed-outbound",
+	"Masquerade.xForwarded":                          "server-only",
+	"QuicParamsConfig.brutalDisableLossCompensation": "excluded-unreviewed-transport",
+	"QuicParamsConfig.disableChromeParrot":           "excluded-unreviewed-transport",
+	"QuicParamsConfig.disableGSO":                    "excluded-unreviewed-transport",
+	"QuicParamsConfig.disableStatelessReset":         "excluded-unreviewed-transport",
+	"XDNSResolver.tlsConfig":                         "excluded-unreviewed-trust",
+	"XDNSResolver.quicConfig":                        "excluded-unbounded-transport-parameters",
+	"Config.env":                                     "excluded-client-unsafe",
+	"Config.transport":                               "excluded-deprecated",
+	"Config.log":                                     "hop-managed",
+	"Config.routing":                                 "client-advanced",
+	"Config.dns":                                     "client-advanced",
+	"Config.inbounds":                                "hop-managed-tun-only",
+	"Config.outbounds":                               "client",
+	"Config.policy":                                  "client-advanced",
+	"Config.api":                                     "excluded-server-only",
+	"Config.metrics":                                 "excluded-server-only",
+	"Config.stats":                                   "excluded-app-telemetry",
+	"Config.reverse":                                 "excluded-server-only",
+	"Config.fakeDns":                                 "client-advanced",
+	"Config.observatory":                             "client-advanced",
+	"Config.burstObservatory":                        "client-advanced",
+	"Config.version":                                 "client-advanced",
+	"Config.geodata":                                 "client-advanced-local-assets-only",
 
 	"OutboundDetourConfig.protocol":        "hop-typed",
 	"OutboundDetourConfig.tag":             "hop-typed",
 	"OutboundDetourConfig.settings":        "client-profile",
 	"OutboundDetourConfig.streamSettings":  "client-profile",
-	"OutboundDetourConfig.proxySettings":   "client-profile",
+	"OutboundDetourConfig.proxySettings":   "excluded-removed-feature",
 	"OutboundDetourConfig.mux":             "client-profile",
 	"VLessOutboundConfig.reverse":          "excluded-reverse-proxy",
 	"VLessOutboundConfig.seed":             "excluded-ignored-by-core",
@@ -282,6 +311,7 @@ var applicabilityOverlays = map[string]string{
 	"GRPCConfig.initial_windows_size":      "excluded-hop-fixed",
 	"QuicParamsConfig.maxIncomingStreams":  "excluded-hop-fixed",
 
+	"StreamConfig.method":   "excluded-hop-fixed",
 	"StreamConfig.address":  "hop-typed",
 	"StreamConfig.port":     "hop-typed",
 	"StreamConfig.network":  "hop-typed",
@@ -330,10 +360,6 @@ var applicabilityOverlays = map[string]string{
 	"Masquerade.headers":                    "server-only",
 	"Masquerade.statusCode":                 "server-only",
 	"HysteriaConfig.masquerade":             "server-only",
-	"HysteriaConfig.congestion":             "excluded-ignored-by-core",
-	"HysteriaConfig.up":                     "excluded-ignored-by-core",
-	"HysteriaConfig.down":                   "excluded-ignored-by-core",
-	"HysteriaConfig.udphop":                 "excluded-ignored-by-core",
 	"RawFieldRule.webhook":                  "excluded-unsupported-network-probe",
 	"RawFieldRule.process":                  "excluded-ios-unavailable",
 	"GeodataAssetConfig.url":                "excluded-network-download",
@@ -349,12 +375,21 @@ var applicabilityOverlays = map[string]string{
 	"SocketConfig.tcpMaxSeg":                "excluded-ios-unavailable",
 	"SocketConfig.tcpUserTimeout":           "excluded-ios-unavailable",
 	"SocketConfig.tcpMptcp":                 "excluded-ios-unavailable",
-	"Xdns.domain":                           "excluded-removed-feature",
-	"Xdns.domains":                          "server-only",
-	"Xdns.resolvers":                        "client",
 }
 
 var annotationOverlays = map[string][]string{
+	"TLSConfig.useSystemCA":                        {"security-critical"},
+	"MasqueConfig.user":                            {"secret"},
+	"MasqueConfig.pass":                            {"secret", "security-critical"},
+	"MasqueConfig.headers":                         {"secret"},
+	"MasqueWarpConfig.privateKey":                  {"secret", "security-critical"},
+	"XDriveConfig.secrets":                         {"secret", "security-critical"},
+	"XDriveConfig.template":                        {"secret"},
+	"XMC.password":                                 {"secret", "security-critical"},
+	"XDNSResolver.worker":                          {"memory-sensitive"},
+	"XDNS.extraPoll":                               {"memory-sensitive"},
+	"XDriveConfig.concurrency":                     {"memory-sensitive"},
+	"XDriveConfig.segmentBytes":                    {"memory-sensitive"},
 	"MuxConfig.concurrency":                        {"memory-sensitive"},
 	"MuxConfig.xudpConcurrency":                    {"memory-sensitive"},
 	"SplitHTTPConfig.xPaddingBytes":                {"memory-sensitive"},
@@ -602,6 +637,9 @@ func definitionFromAST(parsed parsedType, allTypes map[string]parsedType) defini
 			continue
 		}
 		for _, name := range field.Names {
+			if !name.IsExported() {
+				continue
+			}
 			fieldName := jsonName
 			if fieldName == "" {
 				if explicitlyEmpty {
@@ -853,7 +891,8 @@ func buildManifest(definitions map[string]definition) manifest {
 			"dns":         {Ref: ref("DNSOutboundConfig"), Applicability: "outbound-client"},
 			"freedom":     {Ref: ref("FreedomConfig"), Applicability: "outbound-client", Aliases: []string{"direct"}},
 			"http":        {Ref: ref("HTTPClientConfig"), Applicability: "outbound-client"},
-			"hysteria":    {Ref: ref("HysteriaClientConfig"), Applicability: "outbound-client", Notes: []string{"Authentication and QUIC controls are in streamSettings.hysteriaSettings."}},
+			"hysteria":    {Ref: ref("HysteriaClientConfig"), Applicability: "outbound-client", Notes: []string{"Authentication is in hysteriaSettings; QUIC tuning and port hopping use FinalMask."}},
+			"masque":      {Ref: ref("MasqueClientConfig"), Applicability: "excluded-unsupported-protocol"},
 			"loopback":    {Ref: ref("LoopbackConfig"), Applicability: "outbound-client-hop-internal"},
 			"shadowsocks": {Ref: ref("ShadowsocksClientConfig"), Applicability: "outbound-client", Notes: []string{"Includes Xray's registered Shadowsocks and SS2022 client config shape; Hop enforces the pinned secure cipher allowlist."}},
 			"socks":       {Ref: ref("SocksClientConfig"), Applicability: "outbound-client"},
@@ -863,6 +902,8 @@ func buildManifest(definitions map[string]definition) manifest {
 			"wireguard":   {Ref: ref("WireGuardConfig"), Applicability: "outbound-client", Notes: []string{"Hop forces noKernelTun=true."}},
 		},
 		Transports: map[string]transportSection{
+			"masque":      {SettingsField: "masqueSettings", Ref: ref("MasqueConfig"), Applicability: "excluded-unsupported-protocol"},
+			"xdrive":      {SettingsField: "xdriveSettings", Ref: ref("XDriveConfig"), Applicability: "excluded-unsupported-protocol"},
 			"raw":         {SettingsField: "rawSettings", Ref: ref("TCPConfig"), Applicability: "client", Aliases: []string{"tcp"}},
 			"websocket":   {SettingsField: "wsSettings", Ref: ref("WebSocketConfig"), Applicability: "client", Aliases: []string{"ws"}},
 			"grpc":        {SettingsField: "grpcSettings", Ref: ref("GRPCConfig"), Applicability: "client"},
@@ -876,30 +917,26 @@ func buildManifest(definitions map[string]definition) manifest {
 		FinalMask: finalMaskSection{
 			Ref: ref("FinalMask"),
 			TCP: map[string]finalMaskTypeSpec{
+				"filter":        {Ref: ref("Filter"), Applicability: "excluded-unreviewed-routing"},
+				"xmc":           {Ref: ref("XMC"), Applicability: "excluded-unsupported-protocol"},
 				"header-custom": {Ref: ref("HeaderCustomTCP"), Applicability: "client"},
 				"fragment":      {Ref: ref("FragmentMask"), Applicability: "client"},
 				"sudoku":        {Ref: ref("Sudoku"), Applicability: "client"},
 			},
 			UDP: map[string]finalMaskTypeSpec{
+				"filter":        {Ref: ref("Filter"), Applicability: "excluded-unreviewed-routing"},
+				"udphop":        {Ref: ref("UDPHop"), Applicability: "client-bounded"},
 				"header-custom": {Ref: ref("HeaderCustomUDP"), Applicability: "client"},
 				"mkcp-legacy":   {Ref: ref("MkcpLegacy"), Applicability: "client"},
 				"noise":         {Ref: ref("NoiseMask"), Applicability: "client"},
 				"salamander":    {Ref: ref("Salamander"), Applicability: "client"},
 				"sudoku":        {Ref: ref("Sudoku"), Applicability: "client"},
-				"xdns":          {Ref: ref("Xdns"), Applicability: "client"},
+				"xdns":          {Ref: ref("XDNS"), Applicability: "client"},
 				"xicmp":         {Ref: ref("Xicmp"), Applicability: "client"},
 				"realm":         {Ref: ref("Realm"), Applicability: "client"},
 			},
 		},
 		DynamicShapes: map[string]dynamicShape{
-			"blackholeResponse": {
-				Location:      "/outbounds/*/settings/response",
-				Discriminator: "type",
-				Variants: map[string]dynamicValue{
-					"none": {Ref: ref("NoneResponse"), Applicability: "client"},
-					"http": {Ref: ref("HTTPResponse"), Applicability: "client"},
-				},
-			},
 			"rawHeader": {
 				Location:      "/outbounds/*/streamSettings/rawSettings/header",
 				Discriminator: "type",
@@ -969,12 +1006,20 @@ func buildAnnotations() annotations {
 	sort.Strings(security)
 	sort.Strings(memory)
 	hopManaged := []string{
-		"/inbounds", "/log", "/outbounds/*/protocol", "/outbounds/*/tag",
+		"/inbounds", "/log", "/outbounds/*/streamSettings/tlsSettings/useSystemCA", "/outbounds/*/protocol", "/outbounds/*/tag",
 		"/outbounds/*/streamSettings/address", "/outbounds/*/streamSettings/network",
 		"/outbounds/*/streamSettings/port", "/outbounds/*/streamSettings/security",
 	}
 	sort.Strings(hopManaged)
 	rejected := []rejectedPath{
+		{Path: "/outbounds/*/proxySettings", Reason: "Removed upstream. Use a reviewed sockopt.dialerProxy configuration."},
+		{Path: "/dns/script", Reason: "Hop does not run configuration-supplied scripts."},
+		{Path: "/routing/script", Reason: "Hop does not run configuration-supplied scripts."},
+		{Path: "/outbounds/*/streamSettings/finalmask/udp/*/settings/script", Reason: "Hop permits bounded declarative noise settings only."},
+		{Path: "/outbounds/*/streamSettings/xdriveSettings", Reason: "Object-storage credentials, endpoints and buffer settings require typed review."},
+		{Path: "/outbounds/*/streamSettings/masqueSettings", Reason: "MASQUE and WARP credentials and transport settings have no Hop client profile."},
+		{Path: "/env", Reason: "The bridge owns process environment settings."},
+		{Path: "/outbounds/*/streamSettings/method", Reason: "Hop sets the transport through network. Its method alias would override this selection."},
 		{Path: "/api", Reason: "API listeners are outside Hop's client schema."},
 		{Path: "/inbounds", Reason: "Arbitrary listeners are forbidden; Hop generates exactly one TUN inbound."},
 		{Path: "/log/access", Reason: "The core may not write arbitrary files; extension logging is bounded and sanitized."},
@@ -1005,10 +1050,10 @@ func buildAnnotations() annotations {
 		{Path: "/outbounds/*/settings/seed", Reason: "The pinned core parses but ignores the VLESS seed field."},
 		{Path: "/outbounds/*/settings/level", Reason: "Hop enforces policy level 0 to preserve iOS memory limits."},
 		{Path: "/outbounds/*/streamSettings/realitySettings/show", Reason: "Debug output exposes handshake key material outside sanitized logging."},
-		{Path: "/outbounds/*/streamSettings/hysteriaSettings/congestion", Reason: "Ignored by the pinned core; use finalmask/quicParams/congestion."},
-		{Path: "/outbounds/*/streamSettings/hysteriaSettings/up", Reason: "Ignored by the pinned core; use finalmask/quicParams/brutalUp."},
-		{Path: "/outbounds/*/streamSettings/hysteriaSettings/down", Reason: "Ignored by the pinned core; use finalmask/quicParams/brutalDown."},
-		{Path: "/outbounds/*/streamSettings/hysteriaSettings/udphop", Reason: "Ignored by the pinned core; use finalmask/quicParams/udpHop."},
+		{Path: "/outbounds/*/streamSettings/hysteriaSettings/congestion", Reason: "Removed upstream; use finalmask/quicParams/congestion."},
+		{Path: "/outbounds/*/streamSettings/hysteriaSettings/up", Reason: "Removed upstream; use finalmask/quicParams/brutalUp."},
+		{Path: "/outbounds/*/streamSettings/hysteriaSettings/down", Reason: "Removed upstream; use finalmask/quicParams/brutalDown."},
+		{Path: "/outbounds/*/streamSettings/hysteriaSettings/udphop", Reason: "Removed upstream; use the typed Hysteria2 port-hopping options, compiled as a UDPHop mask."},
 		{Path: "/outbounds/*/streamSettings/tlsSettings/echSockopt", Reason: "Only used for resolver-based ECH; Hop permits inline ECH config only."},
 	}
 	for _, key := range []string{"mark", "tproxy", "tcpCongestion", "tcpWindowClamp", "tcpMaxSeg", "tcpUserTimeout", "tcpMptcp"} {
@@ -1050,6 +1095,12 @@ func canonicalPath(key string) string {
 		"WireGuardConfig":          "/outbounds/*/settings",
 		"WireGuardPeerConfig":      "/outbounds/*/settings/peers/*",
 		"StreamConfig":             "/outbounds/*/streamSettings",
+		"MasqueConfig":             "/outbounds/*/streamSettings/masqueSettings",
+		"MasqueWarpConfig":         "/outbounds/*/streamSettings/masqueSettings/warp",
+		"XDriveConfig":             "/outbounds/*/streamSettings/xdriveSettings",
+		"XMC":                      "/outbounds/*/streamSettings/finalmask/tcp/*/settings",
+		"XDNS":                     "/outbounds/*/streamSettings/finalmask/udp/*/settings",
+		"XDNSResolver":             "/outbounds/*/streamSettings/finalmask/udp/*/settings/resolvers/*",
 		"SplitHTTPConfig":          "/outbounds/*/streamSettings/xhttpSettings",
 		"XmuxConfig":               "/outbounds/*/streamSettings/xhttpSettings/xmux",
 		"GRPCConfig":               "/outbounds/*/streamSettings/grpcSettings",
@@ -1080,6 +1131,12 @@ func canonicalPath(key string) string {
 
 func definitionApplicability(name string) string {
 	switch name {
+	case "MasqueClientConfig", "MasqueConfig", "MasqueWarpConfig", "XDriveConfig", "XDriveS3Config", "XMC", "XMCProfile":
+		return "excluded-unsupported-protocol"
+	case "Filter":
+		return "excluded-unreviewed-routing"
+	case "UDPHop", "XDNS", "XDNSDomain", "XDNSResolver":
+		return "client-bounded"
 	case "TLSConfig", "TLSCertConfig", "REALITYConfig", "StreamConfig", "TCPConfig", "WebSocketConfig", "HttpUpgradeConfig", "Masquerade":
 		return "client-and-server-shared-struct"
 	default:

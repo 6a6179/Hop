@@ -12,6 +12,7 @@ extension ProxyImportService {
         var attemptedInventoryItem = false
         var wasTruncated = false
         var remainingGroupMembers = ImportPolicy.maxImportedGroupMembers
+        var groupFilters = GroupFilterCache()
 
         func parseLine(_ rawLine: Substring) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -32,10 +33,18 @@ extension ProxyImportService {
             switch section {
             case "proxy":
                 attemptedInventoryItem = true
+                let count = result.profiles.count
                 parseProxyLine(line, into: &result)
+                if result.profiles.count == count {
+                    result.incompleteSubscriptionInventory = true
+                }
             case "proxy group":
                 attemptedInventoryItem = true
-                parseProxyGroupLine(line, into: &result, remainingMembers: &remainingGroupMembers)
+                let count = result.groups.count
+                parseProxyGroupLine(line, into: &result, remainingMembers: &remainingGroupMembers, groupFilters: &groupFilters)
+                if result.groups.count == count {
+                    result.incompleteSubscriptionInventory = true
+                }
             case "rule":
                 parseProxyRuleLine(line, into: &result)
             default:
@@ -70,6 +79,11 @@ extension ProxyImportService {
         }
         if !wasTruncated, parsedLineCount < ImportPolicy.maxLines {
             parseLine(text[lineStart ..< scalars.endIndex])
+        }
+
+        if wasTruncated {
+            result.incompleteSubscriptionInventory = true
+            result.warnings.insert(ImportWarning(message: "The configuration exceeded the line limit; only the first part was read."), at: 0)
         }
 
         if sawInventorySection,
@@ -162,7 +176,7 @@ extension ProxyImportService {
                 transport: TransportOptions(type: .hysteria),
             )
         case "tuic":
-            result.warnings.append(ImportWarning(message: "Skipped \(name): TUIC is not supported by Xray-core v26.6.27."))
+            result.warnings.append(ImportWarning(message: "Skipped \(name): TUIC is not supported by Xray-core \(XrayAdvancedDocument.currentSchemaVersion)."))
             profile = nil
         case "http", "https":
             profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .http(HTTPOptions(username: values[safe: 2], password: values[safe: 3])), security: security)
@@ -182,7 +196,7 @@ extension ProxyImportService {
         }
     }
 
-    private func parseProxyGroupLine(_ line: String, into result: inout ImportResult, remainingMembers: inout Int) {
+    private func parseProxyGroupLine(_ line: String, into result: inout ImportResult, remainingMembers: inout Int, groupFilters: inout GroupFilterCache) {
         let parts = csvParts(line)
         guard let first = parts.first?.split(separator: "=", maxSplits: 1).map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }),
               first.count == 2
@@ -225,12 +239,10 @@ extension ProxyImportService {
                         // even conservative pattern checks miss ambiguous
                         // alternations such as `(a|aa)+$`. Treat the imported
                         // filter as a bounded literal substring instead.
-                        resolvedMembers = Array(result.profiles.lazy
-                            .filter { $0.name.count <= 256 && $0.name.localizedCaseInsensitiveContains(literalFilter) }
-                            .prefix(remainingMembers + 1)
-                            .map { .profile($0.id) })
-                        guard resolvedMembers.count <= remainingMembers else {
-                            result.warnings.append(ImportWarning(message: "Skipped group \(ImportPolicy.sanitizeImportedName(name)): group member limit exceeded."))
+                        do {
+                            resolvedMembers = try groupFilters.members(matching: literalFilter, in: result.profiles, limit: remainingMembers)
+                        } catch {
+                            result.warnings.append(ImportWarning(message: "Skipped group \(ImportPolicy.sanitizeImportedName(name)): \(error.rawValue)."))
                             return
                         }
                         remainingMembers -= resolvedMembers.count
@@ -374,7 +386,11 @@ extension ProxyImportService {
         case "websocket", "ws":
             TransportOptions(type: .websocket, path: keyed["path"] ?? keyed["obfs-uri"], host: keyed["host"] ?? keyed["obfs-host"], serviceName: nil)
         case "grpc":
-            TransportOptions(type: .grpc, serviceName: keyedValue(keyed, "service-name", "service_name", "servicename", "grpc-service-name", "grpc_service_name"))
+            TransportOptions(
+                type: .grpc,
+                host: keyedValue(keyed, "authority", "grpc-authority", "grpc_authority"),
+                serviceName: keyedValue(keyed, "service-name", "service_name", "servicename", "grpc-service-name", "grpc_service_name"),
+            )
         case "http", "httpupgrade", "http-upgrade":
             TransportOptions(type: .httpUpgrade, path: keyed["path"], host: keyed["host"], serviceName: nil)
         case "xhttp", "splithttp":
@@ -464,6 +480,41 @@ extension ProxyImportService {
             }
         }
         return nil
+    }
+}
+
+/// The inventory only grows during a parse. A repeated filter reuses matches
+/// from earlier sections and scans the newly appended profiles in order.
+private struct GroupFilterCache {
+    enum Limit: String, Error {
+        case work = "group filter work limit exceeded"
+        case members = "group member limit exceeded"
+    }
+
+    private var matches: [String: (scanned: Int, members: [OutboundTarget])] = [:]
+    private var remainingWork = ImportPolicy.maxGroupFilterComparisons
+
+    mutating func members(matching filter: String, in profiles: [ProxyProfile], limit: Int) throws(Limit) -> [OutboundTarget] {
+        let cached = matches[filter] ?? (scanned: 0, members: [])
+        guard cached.members.count <= limit else { throw .members }
+        guard cached.scanned < profiles.count else { return cached.members }
+        guard profiles.count - cached.scanned <= remainingWork else { throw .work }
+
+        var members = cached.members
+        for profile in profiles[cached.scanned...] {
+            // One comparison covers up to 256 bytes. Charge longer names
+            // proportionally, including multi-scalar grapheme clusters, before
+            // counting characters or invoking the localized substring search.
+            let cost = max(1, (profile.name.utf8.count + 255) / 256)
+            guard cost <= remainingWork else { throw .work }
+            remainingWork -= cost
+            if profile.name.count <= 256, profile.name.localizedCaseInsensitiveContains(filter) {
+                guard members.count < limit else { throw .members }
+                members.append(.profile(profile.id))
+            }
+        }
+        matches[filter] = (profiles.count, members)
+        return members
     }
 }
 

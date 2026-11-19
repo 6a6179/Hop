@@ -15,7 +15,7 @@ struct ProfilesView: View {
     /// A manual refresh held back because a matched node changed pinned TLS,
     /// REALITY, PQ, or VLESS authentication settings.
     @State private var pendingSecurityRefresh: PendingSecurityRefresh?
-    @State private var showSecurityRefreshConfirmation = false
+    @State private var applySecurityRefreshOnDismiss = false
     @State private var shareQRItem: ShareQRItem?
 
     private let importService = ProxyImportService()
@@ -69,7 +69,13 @@ struct ProfilesView: View {
                 }
             }
         }
-        .sheet(item: $activeSheet) { sheet in
+        .sheet(item: $activeSheet, onDismiss: {
+            guard applySecurityRefreshOnDismiss else { return }
+            applySecurityRefreshOnDismiss = false
+            // Recheck the approved snapshot after dismissal so SwiftUI can
+            // present the outcome, including a fresh review when needed.
+            applyPendingSecurityRefresh()
+        }) { sheet in
             switch sheet {
             case let .profile(profile):
                 ProfileEditorView(profile: profile, isNew: !store.profiles.contains(where: { $0.id == profile.id })) { updatedProfile in
@@ -100,6 +106,40 @@ struct ProfilesView: View {
                         saveImportedSubscription(subscription, result: result, addedTitle: "Subscription Added")
                     }
                 }
+            case .securityReview:
+                if let pending = pendingSecurityRefresh {
+                    NavigationStack {
+                        List {
+                            Section("\(pending.subscription.name) · \(pending.changes.count) changed nodes") {
+                                ForEach(pending.changes.indices, id: \.self) { index in
+                                    let change = pending.changes[index]
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(change.profileName).font(.headline)
+                                        Text(change.fields.map(\.rawValue).joined(separator: ", "))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                        .navigationTitle("Review Security Changes")
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Cancel") {
+                                    pendingSecurityRefresh = nil
+                                    activeSheet = nil
+                                }
+                            }
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Apply", role: .destructive) {
+                                    applySecurityRefreshOnDismiss = true
+                                    activeSheet = nil
+                                }
+                            }
+                        }
+                    }
+                    .interactiveDismissDisabled()
+                }
             case .scanner:
                 QRCodeScannerSheet { payload in
                     activeSheet = nil
@@ -124,34 +164,20 @@ struct ProfilesView: View {
         ) {
             applyPendingInsecureRefresh()
         }
-        .confirmationDialog(
-            "Apply Security Changes?",
-            isPresented: $showSecurityRefreshConfirmation,
-            titleVisibility: .visible,
-        ) {
-            Button("Apply Reviewed Changes", role: .destructive) {
-                applyPendingSecurityRefresh()
-            }
-            Button("Cancel", role: .cancel) {
-                pendingSecurityRefresh = nil
-            }
-        } message: {
-            Text(pendingSecurityRefresh?.confirmationMessage ?? "")
-        }
         .onAppear {
-            consumePendingExternalImport()
+            presentPendingSheet()
         }
         .onChange(of: store.pendingExternalImportText) {
-            consumePendingExternalImport()
+            presentPendingSheet()
         }
         // A payload that arrived while a sheet was up is consumed when the
         // presentation ends. The one-turn defer lets an already-scheduled
         // re-present (the scanner→import handoff) claim the sheet first;
-        // `consumePendingExternalImport` re-checks and keeps the payload.
-        .onChange(of: activeSheet == nil && shareQRItem == nil) { _, canPresent in
+        // Pending security reviews take priority once the sheet is available.
+        .onChange(of: canPresentPendingSheet) { _, canPresent in
             if canPresent {
                 DispatchQueue.main.async {
-                    consumePendingExternalImport()
+                    presentPendingSheet()
                 }
             }
         }
@@ -169,21 +195,21 @@ struct ProfilesView: View {
         )
     }
 
+    private var canPresentPendingSheet: Bool {
+        activeSheet == nil && shareQRItem == nil && !applySecurityRefreshOnDismiss
+            && !showInsecureRefreshConfirmation && importNotice == nil
+    }
+
     /// Routes a `hop://` URL payload into the standard import sheet: prefilled
     /// for review, never applied directly — external apps don't get to skip
     /// the preview or the allow-insecure confirmation.
-    private func consumePendingExternalImport() {
-        guard let text = store.pendingExternalImportText else {
+    private func presentPendingSheet() {
+        guard canPresentPendingSheet else { return }
+        if pendingSecurityRefresh != nil {
+            activeSheet = .securityReview
             return
         }
-        // A payload can arrive while another sheet is presented. Setting the
-        // sheet state mid-presentation can drop the import sheet entirely —
-        // losing the payload — and force-dismissing would destroy an edit in
-        // progress. Leave the payload in the store; the presentation observer
-        // retries once the current sheet closes.
-        guard activeSheet == nil, shareQRItem == nil else {
-            return
-        }
+        guard let text = store.pendingExternalImportText else { return }
         store.pendingExternalImportText = nil
         activeSheet = .importText(prefill: text)
     }
@@ -475,9 +501,6 @@ struct ProfilesView: View {
     /// Sheet flows already ran the allow-insecure confirmation before handing
     /// the result over; manual refreshes gate new insecure nodes separately.
     private func saveImportedSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
-        let result = result
-            .droppingRules()
-            .requiringSubscriptionGroupReview()
         if let existing = store.subscriptions.first(where: { normalizedSubscriptionURL($0.url) == normalizedSubscriptionURL(subscription.url) }) {
             var refreshedSubscription = subscription
             refreshedSubscription.id = existing.id
@@ -494,7 +517,7 @@ struct ProfilesView: View {
             } else {
                 importNotice = ProfileImportNotice(
                     title: "Subscription Not Updated",
-                    message: "Subscription storage limit exceeded.",
+                    message: result.incompleteSubscriptionInventory == true ? ImportResult.incompleteInventoryMessage : "Subscription storage limit exceeded.",
                 )
             }
         } else {
@@ -543,7 +566,7 @@ struct ProfilesView: View {
             return
         }
         if pendingSecurityRefresh != nil {
-            showSecurityRefreshConfirmation = true
+            presentPendingSheet()
             return
         }
         Task {
@@ -596,7 +619,7 @@ struct ProfilesView: View {
             // When this follows the allow-insecure alert, let that presentation
             // finish dismissing before presenting the security review.
             DispatchQueue.main.async {
-                showSecurityRefreshConfirmation = true
+                presentPendingSheet()
             }
         case let .failed(message):
             importNotice = ProfileImportNotice(title: "Refresh Failed", message: message)
@@ -641,6 +664,7 @@ private enum ProfilesSheet: Identifiable {
     case group(ProxyGroup)
     case importText(prefill: String)
     case scanner
+    case securityReview
 
     var id: String {
         switch self {
@@ -655,6 +679,8 @@ private enum ProfilesSheet: Identifiable {
             prefill.isEmpty ? "import-text" : "import-text-\(prefill.hashValue)"
         case .scanner:
             "scanner"
+        case .securityReview:
+            "security-review"
         }
     }
 }
@@ -675,12 +701,6 @@ private struct PendingSecurityRefresh {
     let subscription: SubscriptionSource
     let changes: [SubscriptionSecurityChange]
     let reviewedInsecureProfileNames: [String]
-
-    var confirmationMessage: String {
-        let shown = changes.prefix(6).map(\.summary).joined(separator: "\n")
-        let remainder = changes.count > 6 ? "\n…and \(changes.count - 6) more." : ""
-        return "Security changes on \(changes.count) node\(changes.count == 1 ? "" : "s"). Apply only if expected:\n\n\(shown)\(remainder)"
-    }
 }
 
 private struct ProfileImportNotice: Identifiable {

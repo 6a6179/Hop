@@ -2,10 +2,30 @@ import Foundation
 @preconcurrency import NetworkExtension
 import Observation
 
+struct InstalledTunnelConnection: Equatable {
+    let targetName: String
+    let routingMode: RoutingMode
+
+    init(targetName: String, routingMode: RoutingMode) {
+        self.targetName = routingMode == .direct ? "Direct" : targetName
+        self.routingMode = routingMode
+    }
+
+    init?(manager: NETunnelProviderManager?) {
+        guard let configuration = (manager?.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration,
+              let name = configuration["targetDisplayName"] as? String,
+              let mode = configuration["routingMode"] as? String,
+              let routingMode = RoutingMode(rawValue: mode)
+        else { return nil }
+        self.init(targetName: name, routingMode: routingMode)
+    }
+}
+
 @MainActor
 @Observable
 final class TunnelController {
     var state: TunnelConnectionState = .disconnected
+    private(set) var installedConnection: InstalledTunnelConnection?
     var logs: [String]
     var maximumLogEntries: Int
 
@@ -51,6 +71,7 @@ final class TunnelController {
             // A newer refresh or manual connection action wins this round-trip.
             guard statusRefreshID == refreshID, !Task.isCancelled else { return }
             manager = Self.existingManager(in: managers)
+            installedConnection = InstalledTunnelConnection(manager: manager)
             observeStatus(for: manager?.connection)
             updateState(from: manager?.connection.status ?? .disconnected, source: "saved VPN")
         } catch {
@@ -61,6 +82,7 @@ final class TunnelController {
 
     func connect(
         target: OutboundTarget,
+        targetName: String,
         profiles: [ProxyProfile],
         groups: [ProxyGroup],
         routingMode: RoutingMode,
@@ -203,6 +225,7 @@ final class TunnelController {
 
             let manager = try await configuredManager(
                 secretNonce: secretNonce,
+                connection: InstalledTunnelConnection(targetName: targetName, routingMode: routingMode),
                 onDemand: settings.connectOnDemand,
                 killSwitch: settings.killSwitch,
                 usesInlineResolvedConfig: useInlineResolvedConfig,
@@ -450,7 +473,7 @@ final class TunnelController {
         }
     }
 
-    private func configuredManager(secretNonce: String, onDemand: Bool, killSwitch: Bool, usesInlineResolvedConfig: Bool, configURL: URL, previousNonce: String?) async throws -> NETunnelProviderManager {
+    private func configuredManager(secretNonce: String, connection: InstalledTunnelConnection, onDemand: Bool, killSwitch: Bool, usesInlineResolvedConfig: Bool, configURL: URL, previousNonce: String?) async throws -> NETunnelProviderManager {
         let manager = try await loadManager()
         let tunnelProtocol = NETunnelProviderProtocol()
         tunnelProtocol.providerBundleIdentifier = RuntimeEnvironment.tunnelProviderBundleIdentifier
@@ -462,13 +485,18 @@ final class TunnelController {
         // kill-switch flag is mirrored here so an OS-initiated restart preserves
         // it without the app's start options.
         tunnelProtocol.providerConfiguration = [
-            "configPath": configURL.path,
             "appGroup": RuntimeEnvironment.appGroupIdentifier,
             "secretNonce": secretNonce,
+            "oneShot": usesInlineResolvedConfig,
+            "targetDisplayName": connection.targetName,
+            "routingMode": connection.routingMode.rawValue,
             "includeAllNetworks": killSwitch ? "true" : "false",
             "dnsServers": XrayTunnelNetworkDefaults.dnsServers.joined(separator: ","),
             "tunnelMTU": String(XrayTunnelNetworkDefaults.mtu),
         ]
+        if !usesInlineResolvedConfig {
+            tunnelProtocol.providerConfiguration?["configPath"] = configURL.path
+        }
         // Keep the previous installed snapshot while an in-flight OS restart
         // can still be resolving it. Older/abandoned snapshots are pruned.
         tunnelProtocol.providerConfiguration?["previousSecretNonce"] = previousNonce
@@ -493,6 +521,7 @@ final class TunnelController {
         try await save(manager)
         try await manager.loadFromPreferences()
         self.manager = manager
+        installedConnection = InstalledTunnelConnection(manager: manager)
         appendLog("Installed tunnel manager for \(RuntimeEnvironment.tunnelProviderBundleIdentifier)")
         appendLog("Manager enabled=\(manager.isEnabled), status=\(manager.connection.status.displayName)")
         return manager
@@ -671,12 +700,13 @@ private struct XrayConfigBuildSnapshot: @unchecked Sendable {
 
     func build(tokenizingSecretsWith nonce: String? = nil) throws -> String {
         try XrayConfigBuilder().build(
-            profiles: nonce.map { nonce in profiles.map { $0.tokenizingSecrets(nonce: nonce) } } ?? profiles,
+            profiles: profiles,
             groups: groups,
             selectedTarget: selectedTarget,
             routingMode: routingMode,
             rules: rules,
             settings: settings,
+            tokenizingSecretsWith: nonce,
         )
     }
 }
@@ -684,7 +714,7 @@ private struct XrayConfigBuildSnapshot: @unchecked Sendable {
 /// Performs secure-store and authenticated-file I/O without blocking the main
 /// actor. Inputs are immutable value snapshots; `SecretStore` wraps a Sendable
 /// backend and `SharedTunnelConfigurationStore` is stateless.
-private struct SharedTunnelConfigPreparation: @unchecked Sendable {
+struct SharedTunnelConfigPreparation: @unchecked Sendable {
     let config: String
     let nonce: String
     let profiles: [ProxyProfile]
@@ -696,24 +726,30 @@ private struct SharedTunnelConfigPreparation: @unchecked Sendable {
         // without accumulating another generation of credentials or files.
         try pruneSnapshots(keeping: existingNonces)
         do {
-            var missingKeys = SecretResolver.referencedKeys(in: config, nonce: nonce)
-            let keyPrefix = HopSecret.runtimeKeyPrefix(nonce: nonce)
-            for profile in profiles where !missingKeys.isEmpty {
-                for item in profile.keychainSecretItems where missingKeys.remove(item.key) != nil {
-                    guard secretStore.setValue(item.value, forKey: keyPrefix + item.key) else {
-                        throw TunnelSecretPreparationError.writeFailed
-                    }
-                }
-            }
-            guard missingKeys.isEmpty else {
-                throw TunnelSecretPreparationError.missingReference
-            }
+            try writeReferencedSecrets()
             // A fresh path keeps the installed config/signature usable even
             // if this write or the following manager save fails.
-            try configStore.writeConfig(config, to: configStore.snapshotURL(nonce: nonce))
+            try configStore.writeConfig(config, nonce: nonce)
         } catch {
             try? pruneSnapshots(keeping: existingNonces)
             throw error
+        }
+    }
+
+    func writeReferencedSecrets() throws {
+        var missingKeys = SecretResolver.referencedKeys(in: config, nonce: nonce)
+        let keyPrefix = HopSecret.runtimeKeyPrefix(nonce: nonce)
+        for profile in profiles where !missingKeys.isEmpty {
+            let passwordKey = HopSecret.key(profileID: profile.id, fieldRaw: ProfileSecretField.password.rawValue)
+            let runtime = try missingKeys.contains(passwordKey) ? profile.normalizingShadowsocks2022Keys() : profile
+            for item in runtime.keychainSecretItems where missingKeys.remove(item.key) != nil {
+                guard secretStore.setValue(item.value, forKey: keyPrefix + item.key) else {
+                    throw TunnelSecretPreparationError.writeFailed
+                }
+            }
+        }
+        guard missingKeys.isEmpty else {
+            throw TunnelSecretPreparationError.missingReference
         }
     }
 

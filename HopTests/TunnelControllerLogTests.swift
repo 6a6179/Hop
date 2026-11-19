@@ -4,6 +4,21 @@ import XCTest
 
 @MainActor
 final class TunnelControllerLogTests: XCTestCase {
+    func testRefreshReadsInstalledTargetAndModeFromPreferences() async throws {
+        let controller = TunnelController()
+        let saved = StatusTestTunnelManager(status: .connected)
+        let tunnelProtocol = try XCTUnwrap(saved.protocolConfiguration as? NETunnelProviderProtocol)
+        tunnelProtocol.providerConfiguration = ["targetDisplayName": "Office", "routingMode": RoutingMode.global.rawValue]
+        saved.protocolConfiguration = tunnelProtocol
+        await controller.refreshStatus { [saved] }
+        XCTAssertEqual(controller.installedConnection, InstalledTunnelConnection(targetName: "Office", routingMode: .global))
+        XCTAssertEqual(InstalledTunnelConnection(targetName: "Office", routingMode: .direct).targetName, "Direct")
+
+        let legacy = StatusTestTunnelManager(status: .connected)
+        await controller.refreshStatus { [legacy] }
+        XCTAssertNil(controller.installedConnection)
+    }
+
     func testRefreshRestoresSavedVPNWithoutRelyingOnItsDisplayName() async {
         let controller = TunnelController()
         let unrelated = StatusTestTunnelManager(status: .disconnected, provider: "other.tunnel")
@@ -42,6 +57,7 @@ final class TunnelControllerLogTests: XCTestCase {
         await controller.refreshStatus { [saved] }
         await controller.connect(
             target: .profile(UUID()),
+            targetName: "Missing Node",
             profiles: [],
             groups: [],
             routingMode: .rule,

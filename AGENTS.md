@@ -11,14 +11,14 @@ Guidance for AI coding agents working in this repository.
   - `HopTunnel`: Network Extension, Swift 6.2. Its LibXray/gomobile boundary is a versioned JSON request/response API, so Go-owned reference types never cross Swift concurrency domains.
   - `HopTests`: iOS unit tests.
 - Shared code lives in `Shared/` and is compiled into both app and extension.
-- `Frameworks/LibXray.xcframework` is a vendored static, client-only Xray-core bridge pinned to Xray `v26.6.27`. Its provenance is checked by `scripts/verify-libxray.sh` against `Frameworks/LibXray.xcframework.sha256`.
+- `Frameworks/LibXray.xcframework` is a vendored static, client-only Xray-core bridge pinned to Xray `v26.11.9`. Its provenance is checked by `scripts/verify-libxray.sh` against `Frameworks/LibXray.xcframework.sha256`.
 
 ## Before editing
 
 - Check this file and any more-specific `AGENTS.md` files before modifying files.
 - Prefer small, focused changes that preserve the current SwiftUI/XcodeGen structure.
 - Do not manually edit `Hop.xcodeproj/project.pbxproj` for durable project changes. Edit `project.yml`, then run `xcodegen generate`.
-- Do not replace or rebuild `Frameworks/LibXray.xcframework` unless explicitly asked. If it is rebuilt with `scripts/build-libxray.sh`, expect the checksum manifest to change too.
+- Do not replace or rebuild `Frameworks/LibXray.xcframework` unless explicitly asked. Ordinary rebuilds verify against the committed digest before installation. For an intentional engine update, use `scripts/build-libxray.sh --update-manifest`, then verify reproducibility with an ordinary rebuild.
 - The worktree may be dirty or uncommitted; do not revert unrelated user changes.
 
 ## Formatting and style
@@ -59,7 +59,7 @@ Security and consistency properties that code changes must not regress:
 - Tunnel-extension logging goes through `PacketTunnelProvider.writeTunnelLog`, and app-side logging through `TunnelController.appendLog`/`appendLogs` — both strip newlines so remote- or import-controlled text cannot forge log entries; keep new log writes on those paths.
 - A manual `disconnect()` clears `isOnDemandEnabled` (and saves the manager) before `stopVPNTunnel`, or iOS immediately relaunches the tunnel under the on-demand rule and the user's stop does not stick. The next `connect()` re-arms on-demand from settings.
 - Node share links (`ProxyShareLink`) embed credentials by design; they are only produced from the explicit context-menu actions, and pasteboard copies set an expiration. Don't add share/export paths that emit credentials implicitly.
-- The shared App Group tunnel config is authenticated with `TunnelConfigAuthenticator` before the extension resolves nonce-bound secret tokens from it. Config/signature files and credentials are immutable per nonce; runtime credentials live under nonce-prefixed accounts in `SecretStore.runtime`, never mutable profile aliases. Retain installed/previous snapshots while pruning abandoned ones. Pre-snapshot configurations require manual reconnect. Keep the HMAC key in `SecretStore.runtime` and fail closed if the signature/key is missing or invalid.
+- The shared App Group tunnel config is authenticated with `TunnelConfigAuthenticator` before the extension resolves nonce-bound secret tokens from it. The HMAC binds the format version, Xray core version, connection nonce, and config bytes. Config/signature files and credentials are immutable per nonce; runtime credentials live under nonce-prefixed accounts in `SecretStore.runtime`, never mutable profile aliases. Retain installed/previous snapshots while pruning abandoned ones. An upgrade from an earlier core or signature format requires one manual reconnect. Keep the HMAC key in `SecretStore.runtime` and fail closed if the signature/key is missing or invalid.
 - LibXray permits only one core instance. Bridge `start`, `stop`, and restart behavior must remain idempotent, and the app may call only `validate`/`version`; it must never start a core instance.
 - Xray service and watchdog state in `PacketTunnelProvider` is guarded by `serviceStateLock` and accessed from multiple queues. Never call into LibXray while holding the lock. Clear/copy state under the lock before stopping the core or cancelling timers.
 - Do not reintroduce extension-to-app telemetry, a command socket, per-connection streams, or connection-close controls; the extension retains only its local memory watchdog and bounded sanitized logs.

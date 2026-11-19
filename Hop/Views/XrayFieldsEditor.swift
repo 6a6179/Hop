@@ -21,11 +21,13 @@ struct XrayFieldsEditor: View {
 
 struct XrayFormSchema {
     static let shared: XrayFormSchema = {
-        guard let url = Bundle.main.url(forResource: "xray-client-schema-v26.6.27", withExtension: "json"),
+        guard let url = Bundle.main.url(forResource: "xray-client-schema-\(XrayAdvancedDocument.currentSchemaVersion)", withExtension: "json"),
               let data = try? Data(contentsOf: url),
-              let document = try? JSONDecoder().decode(JSONValue.self, from: data)
+              let document = try? JSONDecoder().decode(JSONValue.self, from: data).objectValue,
+              document["formatVersion"]?.integerValue == 1,
+              document["core"]?.objectValue?["version"]?.stringValue == XrayAdvancedDocument.currentSchemaVersion
         else { return XrayFormSchema(document: [:]) }
-        return XrayFormSchema(document: document.objectValue ?? [:])
+        return XrayFormSchema(document: document)
     }()
 
     let document: [String: JSONValue]
@@ -47,14 +49,29 @@ struct XrayFormSchema {
         let name = resolved["$ref"]?.stringValue?.split(separator: "/").last
         if name == "Mask" {
             let family = context.lowercased().contains(".tcp") ? "tcpTypes" : "udpTypes"
-            let variants = document["finalMask"]?.objectValue?[family]?.objectValue ?? [:]
+            let variants = (document["finalMask"]?.objectValue?[family]?.objectValue ?? [:]).filter {
+                $0.value.objectValue.map(Self.available) == true
+            }
             fields["type"] = .object(["jsonTypes": .array([.string("string")]), "enum": .array(variants.keys.sorted().map(JSONValue.string))])
             fields["settings"] = .object(["jsonTypes": .array([.string("object")])])
-            if let type = Self.lookup("type", in: value?.objectValue ?? [:])?.stringValue,
-               let ref = variants[type]?.objectValue?["settingsRef"]
-            {
-                fields["settings"] = .object(["$ref": ref, "jsonTypes": .array([.string("object")])])
+            if let type = Self.lookup("type", in: value?.objectValue ?? [:])?.stringValue {
+                if let ref = variants[type]?.objectValue?["settingsRef"] {
+                    fields["settings"] = .object(["$ref": ref, "jsonTypes": .array([.string("object")])])
+                } else {
+                    fields["settings"] = .object(["applicability": .string("excluded-unsupported-mask")])
+                }
             }
+        }
+        // The builder still accepts previously saved XDNS resolver strings.
+        // Keep them editable without silently materializing empty resolver objects.
+        if name == "XDNS",
+           let resolvers = Self.lookup("resolvers", in: value?.objectValue ?? [:])?.arrayValue,
+           !resolvers.isEmpty, resolvers.allSatisfy({ $0.stringValue != nil })
+        {
+            fields["resolvers"] = .object([
+                "jsonTypes": .array([.string("array")]),
+                "items": .object(["jsonTypes": .array([.string("string")])]),
+            ])
         }
         if name == "TCPConfig" {
             let variants = document["dynamicShapes"]?.objectValue?["rawHeader"]?.objectValue?["variants"]?.objectValue ?? [:]
@@ -203,7 +220,11 @@ struct XrayFormSchema {
 
     static func isSecret(_ key: String, schema: [String: JSONValue]) -> Bool {
         schema["annotations"]?.arrayValue?.contains(.string("secret")) == true ||
-            ["password", "pass", "privatekey", "secretkey", "presharedkey", "auth", "encryption", "authorization", "proxy-authorization", "cookie", "set-cookie"].contains(key.lowercased())
+            [
+                "password", "pass", "privatekey", "secretkey", "presharedkey", "auth", "encryption",
+                "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key",
+                "secrets", "template", "script", "texturesvalue", "texturessignature",
+            ].contains(key.lowercased())
     }
 
     static func label(_ key: String) -> String {

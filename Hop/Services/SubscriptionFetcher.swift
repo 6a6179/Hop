@@ -83,10 +83,19 @@ extension SubscriptionFetcher: URLSessionDataDelegate {
         didReceive response: URLResponse,
         completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void,
     ) {
-        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
-            fail(ProxyLinkParseError.subscriptionUnavailable)
-            completionHandler(.cancel)
-            return
+        if let http = response as? HTTPURLResponse {
+            guard (200 ..< 300).contains(http.statusCode) else {
+                fail(ProxyLinkParseError.subscriptionUnavailable)
+                completionHandler(.cancel)
+                return
+            }
+            // A valid prefix may contain complete proxy lines. Reconciling that
+            // prefix as a snapshot would remove the rest of the provider's nodes.
+            if http.statusCode == 206 || http.statusCode == 226 || http.value(forHTTPHeaderField: "Content-Range") != nil {
+                fail(ProxyLinkParseError.incompleteSubscriptionInventory)
+                completionHandler(.cancel)
+                return
+            }
         }
         if response.expectedContentLength > Int64(ImportPolicy.maxPayloadBytes) {
             fail(ProxyLinkParseError.payloadTooLarge)

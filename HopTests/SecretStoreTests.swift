@@ -363,6 +363,35 @@ final class SecretStoreTests: XCTestCase {
         XCTAssertTrue(tokenizedJSON.contains("##HOP_SECRET:advanced-nonce:"))
     }
 
+    func testImportedUnsupportedTransportCredentialsRoundTripInKeychain() throws {
+        let url = makeTempStateURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let dataStore = HopAppDataStore(url: url, secretStore: makeStore(), authenticationStore: .inMemory())
+        var profile = SampleData.vlessReality
+        profile.transport.xhttpExtra = .object(["downloadSettings": .object([
+            "masqueSettings": .object([
+                "pass": .string("masque-secret"), "warp": .object(["privateKey": .string("warp-secret")]),
+                "headers": .object(["X-Custom": .string("header-secret")]),
+            ]),
+            "xdriveSettings": .object([
+                "secrets": .array([.string("drive-secret")]),
+                "template": .object(["header": .string("template-secret")]),
+            ]),
+        ])])
+        profile.transport.finalMask = .object([
+            "udp": .array([.object(["type": .string("noise"), "settings": .object(["script": .string("script-secret")])])]),
+            "tcp": .array([.object(["type": .string("xmc"), "settings": .object([
+                "profiles": .array([.object(["texturesSignature": .string("profile-secret")])]),
+            ])])]),
+        ])
+        XCTAssertTrue(dataStore.save(HopAppData(profiles: [profile], groups: [], subscriptions: [], routingMode: .global, selectedTarget: .profile(profile.id), settings: .defaults, logs: [])))
+        let redacted = try String(decoding: persistedStatePayload(at: url), as: UTF8.self)
+        for credential in ["masque-secret", "warp-secret", "header-secret", "drive-secret", "template-secret", "script-secret", "profile-secret"] {
+            XCTAssertFalse(redacted.contains(credential))
+        }
+        XCTAssertEqual(try XCTUnwrap(dataStore.load()).profiles, [profile])
+    }
+
     func testLegacyPlaintextStateIsMigratedOnLoad() throws {
         let url = makeTempStateURL()
         let store = makeStore()

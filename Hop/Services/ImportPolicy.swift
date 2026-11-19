@@ -29,6 +29,9 @@ enum ImportPolicy {
     /// Aggregate group references, including members expanded from filters.
     static let maxImportedGroupMembers = 20000
 
+    /// Maximum candidate names examined while expanding literal group filters in a single import.
+    static let maxGroupFilterComparisons = 100_000
+
     /// Maximum encoded size retained across all subscription-owned profiles,
     /// groups, and source records. Manual objects are outside this remote-data
     /// budget and are never deleted to make room for a subscription.

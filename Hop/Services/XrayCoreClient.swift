@@ -62,6 +62,10 @@ enum XrayCoreClientError: LocalizedError {
             "Invalid Xray validation response."
         case let .unsupportedBridgeVersion(version):
             "Unsupported Xray bridge API version: \(version)."
+        case .validationFailed(code: "vless_transport_security_required"):
+            "Public VLESS servers require TLS, REALITY, or VLESS Encryption. Select the security settings supplied by your server."
+        case .validationFailed(code: "trojan_transport_security_required"):
+            "Public Trojan servers require transport security. Select the TLS or REALITY settings supplied by your server."
         case let .validationFailed(code):
             "Xray validation failed (\(XrayBridgeResponse.Failure.sanitizedCode(code))). Review node settings."
         }

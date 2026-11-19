@@ -1,7 +1,44 @@
+import CryptoKit
 @testable import Hop
 import XCTest
 
 final class RuntimeEnvironmentTests: XCTestCase {
+    func testSnapshotReaderRequiresTheInstalledNonceAndBoundedFiles() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("settings.json")
+        let signatureURL = TunnelConfigAuthenticator.signatureURL(forConfigURL: url)
+        let nonce = UUID().uuidString
+        let secret = "test-key"
+        let content = "{}"
+        let data = Data(content.utf8)
+        try data.write(to: url)
+        let signature = try XCTUnwrap(TunnelConfigAuthenticator.snapshotSignature(for: data, nonce: nonce, secret: secret))
+        try Data(signature.utf8).write(to: signatureURL)
+        XCTAssertEqual(try TunnelConfigAuthenticator.readSnapshot(at: url, nonce: nonce, secret: secret), content)
+        XCTAssertThrowsError(try TunnelConfigAuthenticator.readSnapshot(at: url, nonce: UUID().uuidString, secret: secret))
+
+        let legacy = try XCTUnwrap(TunnelConfigAuthenticator.signature(for: data, secret: secret))
+        try Data(legacy.utf8).write(to: signatureURL)
+        XCTAssertThrowsError(try TunnelConfigAuthenticator.readSnapshot(at: url, nonce: nonce, secret: secret))
+
+        for prefix in ["Hop tunnel snapshot v2\u{0}", "Hop tunnel snapshot v3\u{0}v26.7.28\u{0}"] {
+            let signedData = Data("\(prefix)\(nonce)\u{0}".utf8) + data
+            let oldMAC = HMAC<SHA256>.authenticationCode(for: signedData, using: SymmetricKey(data: Data(secret.utf8)))
+            try Data(oldMAC).base64EncodedData().write(to: signatureURL)
+            XCTAssertThrowsError(try TunnelConfigAuthenticator.readSnapshot(at: url, nonce: nonce, secret: secret))
+        }
+        try Data((signature + "\n").utf8).write(to: signatureURL)
+        XCTAssertThrowsError(try TunnelConfigAuthenticator.readSnapshot(at: url, nonce: nonce, secret: secret))
+
+        let oversized = Data(repeating: 0x20, count: TunnelMemoryPolicy.maximumConfigurationBytes + 1)
+        try oversized.write(to: url)
+        let oversizedMAC = try XCTUnwrap(TunnelConfigAuthenticator.snapshotSignature(for: oversized, nonce: nonce, secret: secret))
+        try Data(oversizedMAC.utf8).write(to: signatureURL)
+        XCTAssertThrowsError(try TunnelConfigAuthenticator.readSnapshot(at: url, nonce: nonce, secret: secret))
+    }
+
     func testBundleIdentityDiagnosticIncludesBundleAndBuildVersions() throws {
         let identity = try XCTUnwrap(RuntimeEnvironment.bundleIdentity(from: [
             "CFBundleIdentifier": "cat.string.hop.tunnel",

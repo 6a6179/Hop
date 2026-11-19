@@ -136,61 +136,55 @@ struct HopAppDataStore {
     }
 
     func load() -> HopAppData? {
-        guard let data = try? Data(contentsOf: url) else {
-            return nil
-        }
+        try? loadExisting()
+    }
 
+    /// Only an absent state file represents a new library. All other read,
+    /// authentication, and migration failures must preserve the existing library.
+    func loadExisting() throws -> HopAppData? {
+        guard let data = try Self.readIfPresent(url) else { return nil }
         let envelope = try? JSONDecoder().decode(AppStateEnvelope.self, from: data)
         let payload: Data
+        let key = try authenticationStore.readValue(forKey: SecretStore.appStateAuthenticationKey)
         if let envelope {
-            guard TunnelConfigAuthenticator.isValidSignature(
-                envelope.signature, for: envelope.payload,
-                secret: authenticationStore.appStateAuthenticationSecret(),
-            ) else {
-                NSLog("Hop: app state authentication failed")
-                return nil
+            guard let key, TunnelConfigAuthenticator.isValidSignature(envelope.signature, for: envelope.payload, secret: key) else {
+                throw CocoaError(.fileReadNoPermission)
             }
             payload = envelope.payload
         } else {
-            // Only genuinely unsigned legacy state may bootstrap a key. A
-            // sidecar with an unavailable key must not become unsigned input.
-            if FileManager.default.fileExists(atPath: signatureURL.path),
-               authenticationStore.appStateAuthenticationSecret().isEmpty
-            {
-                _ = try? prepareAuthenticationSecret()
-            }
-            guard authenticationStore.appStateAuthenticationSecret().isEmpty
-                && !FileManager.default.fileExists(atPath: signatureURL.path)
-                || isAuthenticated(data)
-            else {
-                NSLog("Hop: legacy app state authentication failed")
-                return nil
+            let sidecar = try Self.readIfPresent(signatureURL)
+            if let sidecar {
+                // Resume only a verified pending-key bootstrap.
+                let secret = try key ?? prepareAuthenticationSecret()
+                guard let signature = String(data: sidecar, encoding: .utf8),
+                      TunnelConfigAuthenticator.isValidSignature(signature, for: data, secret: secret)
+                else { throw CocoaError(.fileReadNoPermission) }
+            } else if key != nil {
+                throw CocoaError(.fileReadNoPermission)
             }
             payload = data
         }
 
-        guard var decoded = try? JSONDecoder.hop.decode(HopAppData.self, from: payload),
-              envelope == nil || (decoded.secretGeneration != nil && decoded.secretKeys != nil)
-        else {
-            return nil
+        var decoded = try JSONDecoder.hop.decode(HopAppData.self, from: payload)
+        guard envelope == nil || (decoded.secretGeneration != nil && decoded.secretKeys != nil) else {
+            throw CocoaError(.fileReadCorruptFile)
         }
 
         // Resolve exactly the committed generation, never the mutable runtime
         // aliases. Missing keys reject the snapshot instead of erasing secrets.
         var storedSecrets: [String: String] = [:]
-        if !decoded.profiles.isEmpty || !decoded.subscriptions.isEmpty {
-            let values = secretStore.allValues()
-            if let generation = decoded.secretGeneration, let keys = decoded.secretKeys {
+        if let generation = decoded.secretGeneration, let keys = decoded.secretKeys {
+            if !keys.isEmpty {
+                let values = try secretStore.allValues()
                 for key in keys {
                     guard let value = values[Self.snapshotKey(key, generation: generation)] else {
-                        NSLog("Hop: saved credentials are unavailable; leaving state unchanged")
-                        return nil
+                        throw CocoaError(.fileReadNoPermission)
                     }
                     storedSecrets[key] = value
                 }
-            } else {
-                storedSecrets = values
             }
+        } else if !decoded.profiles.isEmpty || !decoded.subscriptions.isEmpty {
+            storedSecrets = try secretStore.allValues()
         }
 
         let didMigrateToXray = migrateToXrayIfNeeded(&decoded)
@@ -215,7 +209,7 @@ struct HopAppDataStore {
             decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: storedSecrets) }
         }
         if envelope == nil || hadInlineProfileSecrets || hadInlineSubscriptionURLs || didMigrateToXray || didMigrateSubscriptionProvenance || didMigrateAdvancedTLS || didMigrateLegacyLogState {
-            save(decoded) // move secrets to the Keychain and rewrite the JSON without them
+            guard save(decoded) else { throw CocoaError(.fileWriteUnknown) }
         }
         return decoded
     }
@@ -732,6 +726,23 @@ struct HopAppDataStore {
 
     @discardableResult
     func save(_ data: HopAppData) -> Bool {
+        write(data, replacingUnreadableLibrary: false)
+    }
+
+    /// Invoked only after the user explicitly confirms replacement. Commit the
+    /// fresh envelope before pruning any credentials from the rejected library.
+    func resetUnreadableLibrary(legacyExtensionLogPurgePending: Bool) -> Bool {
+        secretWriteCache.invalidate()
+        return write(HopAppData(
+            profiles: [], groups: [], subscriptions: [], routingMode: .rule,
+            selectedTarget: nil, settings: .defaults, logs: [],
+            ruleConfigurations: RuleConfiguration.builtInConfigurations,
+            activeRuleConfigurationID: RuleConfiguration.defaultConfiguration.id,
+            legacyExtensionLogPurgePending: legacyExtensionLogPurgePending ? true : nil,
+        ), replacingUnreadableLibrary: true)
+    }
+
+    private func write(_ data: HopAppData, replacingUnreadableLibrary: Bool) -> Bool {
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let secretItems = Dictionary(data.profiles.flatMap(\.keychainSecretItems) + data.subscriptions.compactMap(\.keychainURLItem), uniquingKeysWith: { _, last in last })
@@ -742,7 +753,7 @@ struct HopAppDataStore {
             redacted.secretGeneration = snapshot.generation
             redacted.secretKeys = secretItems.keys.sorted()
             let encoded = try JSONEncoder.hop.encode(redacted)
-            let secret = try prepareAuthenticationSecret()
+            let secret = try prepareAuthenticationSecret(replacingUnreadableLibrary: replacingUnreadableLibrary)
             guard let signature = TunnelConfigAuthenticator.signature(for: encoded, secret: secret) else {
                 throw CocoaError(.fileWriteUnknown)
             }
@@ -789,26 +800,22 @@ struct HopAppDataStore {
     /// first authentication key and committing its replacement. A pending key
     /// lets the next launch finish an interrupted sidecar/key handoff.
     @discardableResult
-    private func prepareAuthenticationSecret() throws -> String {
-        let existing = authenticationStore.appStateAuthenticationSecret()
-        if !existing.isEmpty {
+    private func prepareAuthenticationSecret(replacingUnreadableLibrary: Bool = false) throws -> String {
+        if let existing = try authenticationStore.readValue(forKey: SecretStore.appStateAuthenticationKey), !existing.isEmpty {
             return existing
         }
-        let previous = try? Data(contentsOf: url)
-        let pending = authenticationStore.value(forKey: Self.pendingAuthenticationKey)
+        if replacingUnreadableLibrary {
+            return try storeAuthenticationSecret(SecretStore.randomSecret())
+        }
+        let previous = try Self.readIfPresent(url)
+        let pending = try authenticationStore.readValue(forKey: Self.pendingAuthenticationKey)
         let secret = pending ?? SecretStore.randomSecret()
         if let previous {
             guard (try? JSONDecoder.hop.decode(HopAppData.self, from: previous)) != nil else {
-                // An explicit replacement of undecodable legacy state needs no
-                // migration, but an envelope must never be re-signed without its key.
-                guard (try? JSONDecoder().decode(AppStateEnvelope.self, from: previous)) == nil,
-                      !FileManager.default.fileExists(atPath: signatureURL.path)
-                else {
-                    throw CocoaError(.fileReadNoPermission)
-                }
-                return try storeAuthenticationSecret(secret)
+                throw CocoaError(.fileReadNoPermission)
             }
-            if let signature = try? String(contentsOf: signatureURL, encoding: .utf8) {
+            if let sidecar = try Self.readIfPresent(signatureURL) {
+                let signature = String(decoding: sidecar, as: UTF8.self)
                 guard pending != nil, TunnelConfigAuthenticator.isValidSignature(signature, for: previous, secret: secret) else {
                     throw CocoaError(.fileReadNoPermission)
                 }
@@ -826,7 +833,7 @@ struct HopAppDataStore {
 
     private func storeAuthenticationSecret(_ secret: String) throws -> String {
         guard authenticationStore.setValue(secret, forKey: SecretStore.appStateAuthenticationKey),
-              authenticationStore.appStateAuthenticationSecret() == secret
+              try authenticationStore.readValue(forKey: SecretStore.appStateAuthenticationKey) == secret
         else {
             throw CocoaError(.fileWriteUnknown)
         }
@@ -834,14 +841,12 @@ struct HopAppDataStore {
         return secret
     }
 
-    private func isAuthenticated(_ data: Data) -> Bool {
-        let secret = authenticationStore.appStateAuthenticationSecret()
-        guard !secret.isEmpty,
-              let signature = try? String(contentsOf: signatureURL, encoding: .utf8)
-        else {
-            return false
+    private static func readIfPresent(_ url: URL) throws -> Data? {
+        do {
+            return try Data(contentsOf: url)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return nil
         }
-        return TunnelConfigAuthenticator.isValidSignature(signature, for: data, secret: secret)
     }
 }
 

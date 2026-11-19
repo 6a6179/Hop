@@ -1,0 +1,73 @@
+diff --git a/transport/internet/dialer.go b/transport/internet/dialer.go
+index 6d7b905..6df47e5 100644
+--- a/transport/internet/dialer.go
++++ b/transport/internet/dialer.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"fmt"
+ 	"strings"
++	"sync/atomic"
+ 
+ 	"github.com/xtls/xray-core/common"
+ 	"github.com/xtls/xray-core/common/dice"
+@@ -79,23 +80,28 @@ func DestIpAddress() net.IP {
+ 	return effectiveSystemDialer.DestIpAddress()
+ }
+ 
+-var (
++// Hop closes validation and runtime instances in the same process. Publish the
++// pair together so in-flight lookups can finish with their original snapshot.
++type systemDialerFeatures struct {
+ 	dnsClient dns.Client
+-	obm       outbound.Manager
+-)
++	outbounds outbound.Manager
++}
++
++var systemFeatures atomic.Pointer[systemDialerFeatures]
+ 
+ func LookupForIP(domain string, strategy DomainStrategy, localAddr net.Address) ([]net.IP, error) {
+-	if dnsClient == nil {
++	features := systemFeatures.Load()
++	if features == nil || features.dnsClient == nil {
+ 		return nil, errors.New("DNS client not initialized")
+ 	}
+ 
+-	ips, _, err := dnsClient.LookupIP(domain, dns.IPOption{
++	ips, _, err := features.dnsClient.LookupIP(domain, dns.IPOption{
+ 		IPv4Enable: (localAddr == nil && strategy.PreferIP4()) || (localAddr != nil && localAddr.Family().IsIPv4() && (strategy.PreferIP4() || strategy.FallbackIP4())),
+ 		IPv6Enable: (localAddr == nil && strategy.PreferIP6()) || (localAddr != nil && localAddr.Family().IsIPv6() && (strategy.PreferIP6() || strategy.FallbackIP6())),
+ 	})
+ 	{ // Resolve fallback
+ 		if (len(ips) == 0 || err != nil) && strategy.HasFallback() && localAddr == nil {
+-			ips, _, err = dnsClient.LookupIP(domain, dns.IPOption{
++			ips, _, err = features.dnsClient.LookupIP(domain, dns.IPOption{
+ 				IPv4Enable: strategy.FallbackIP4(),
+ 				IPv6Enable: strategy.FallbackIP6(),
+ 			})
+@@ -268,10 +274,11 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
+ 	}
+ 
+ 	if len(sockopt.DialerProxy) > 0 {
+-		if obm == nil {
++		features := systemFeatures.Load()
++		if features == nil || features.outbounds == nil {
+ 			return nil, errors.New("there is no outbound manager for dialerProxy")
+ 		}
+-		h := obm.GetHandler(sockopt.DialerProxy)
++		h := features.outbounds.GetHandler(sockopt.DialerProxy)
+ 		if h == nil {
+ 			return nil, errors.New("there is no outbound handler for dialerProxy")
+ 		}
+@@ -282,6 +289,9 @@ func DialSystem(ctx context.Context, dest net.Destination, sockopt *SocketConfig
+ }
+ 
+ func InitSystemDialer(dc dns.Client, om outbound.Manager) {
+-	dnsClient = dc
+-	obm = om
++	if dc == nil && om == nil {
++		systemFeatures.Store(nil)
++		return
++	}
++	systemFeatures.Store(&systemDialerFeatures{dnsClient: dc, outbounds: om})
+ }

@@ -7,7 +7,6 @@ import NetworkExtension
 #endif
 
 private enum TunnelRuntimeFiles {
-    static let configFileName = "hop-xray.json"
     static let tunnelLogFileName = "hop-tunnel.log"
 }
 
@@ -105,8 +104,8 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
                     nonce: request.secretNonce,
                     secretsAreResolved: request.configSecretsAreResolved,
                 )
-                let config = try configWithBoundedEngineLogging(resolved)
-                try startXray(config: config, request: request)
+                guard resolved.utf8.count <= Self.maxConfigBytes else { throw TunnelProviderError.configTooLarge }
+                try startXray(config: resolved, request: request)
             }
 
             // The bridge has copied the JSON and autoreleasepool released the
@@ -314,63 +313,20 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
         return config
     }
 
-    /// The current single-Invoke bridge has no bounded log callback. Disable
-    /// direct engine file/console logs and keep lifecycle/errors on Hop's
-    /// sanitized, rotating provider log instead.
-    private func configWithBoundedEngineLogging(_ config: String) throws -> String {
-        guard config.utf8.count <= Self.maxConfigBytes,
-              let data = config.data(using: .utf8),
-              var root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else {
-            throw TunnelProviderError.invalidConfig
-        }
-        let requestedLevel = (root["log"] as? [String: Any])?["loglevel"] as? String ?? "warning"
-        root["log"] = [
-            "access": "none",
-            "dnsLog": false,
-            "error": "none",
-            "loglevel": requestedLevel,
-        ]
-        let encoded = try JSONSerialization.data(
-            withJSONObject: root,
-            options: [.sortedKeys, .withoutEscapingSlashes],
-        )
-        guard encoded.count <= Self.maxConfigBytes,
-              let result = String(data: encoded, encoding: .utf8)
-        else {
-            throw TunnelProviderError.invalidConfig
-        }
-        return result
-    }
-
     private func loadConfig(request: TunnelStartRequest) throws -> String {
         if let content = request.optionConfigContent {
+            guard request.configSecretsAreResolved else { throw TunnelProviderError.invalidInlineConfig }
             writeTunnelLog("Using inline tunnel settings from start options")
             return try checkedInlineConfig(content)
         }
-        if let path = request.optionConfigPath {
+        if let path = request.optionConfigPath ?? request.providerConfigPath {
             guard isWithinAppGroupContainer(path, request: request) else {
                 throw TunnelProviderError.configPathOutsideContainer
             }
+            let secret = SecretStore.runtime.tunnelConfigAuthenticationSecret()
+            guard !secret.isEmpty else { throw TunnelProviderError.missingConfigAuthenticationSecret }
             writeTunnelLog("Reading tunnel settings from shared storage")
-            return try readAuthenticatedConfig(at: URL(fileURLWithPath: path))
-        }
-        if let content = request.providerConfigContent {
-            writeTunnelLog("Using inline tunnel settings from provider configuration")
-            return try checkedInlineConfig(content)
-        }
-        if let path = request.providerConfigPath {
-            guard isWithinAppGroupContainer(path, request: request) else {
-                throw TunnelProviderError.configPathOutsideContainer
-            }
-            writeTunnelLog("Reading tunnel settings from provider configuration")
-            return try readAuthenticatedConfig(at: URL(fileURLWithPath: path))
-        }
-        if let appGroup = request.appGroup,
-           let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup)
-        {
-            writeTunnelLog("Reading tunnel settings from App Group container")
-            return try readAuthenticatedConfig(at: container.appendingPathComponent(TunnelRuntimeFiles.configFileName))
+            return try TunnelConfigAuthenticator.readSnapshot(at: URL(fileURLWithPath: path), nonce: request.secretNonce, secret: secret)
         }
         throw TunnelProviderError.missingConfig
     }
@@ -378,31 +334,6 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private func checkedInlineConfig(_ config: String) throws -> String {
         guard config.utf8.count <= Self.maxConfigBytes else {
             throw TunnelProviderError.configTooLarge
-        }
-        return config
-    }
-
-    private func readAuthenticatedConfig(at url: URL) throws -> String {
-        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        if let size = attributes[.size] as? NSNumber, size.intValue > Self.maxConfigBytes {
-            throw TunnelProviderError.configTooLarge
-        }
-        let data = try Data(contentsOf: url)
-        guard data.count <= Self.maxConfigBytes else {
-            throw TunnelProviderError.configTooLarge
-        }
-        let secret = SecretStore.runtime.tunnelConfigAuthenticationSecret()
-        guard !secret.isEmpty else {
-            throw TunnelProviderError.missingConfigAuthenticationSecret
-        }
-        let signatureURL = TunnelConfigAuthenticator.signatureURL(forConfigURL: url)
-        guard let signature = try? String(contentsOf: signatureURL, encoding: .utf8),
-              TunnelConfigAuthenticator.isValidSignature(signature, for: data, secret: secret)
-        else {
-            throw TunnelProviderError.configAuthenticationFailed
-        }
-        guard let config = String(data: data, encoding: .utf8) else {
-            throw TunnelProviderError.invalidConfig
         }
         return config
     }
@@ -518,7 +449,6 @@ private struct TunnelStartRequest {
 
     let optionConfigContent: String?
     let optionConfigPath: String?
-    let providerConfigContent: String?
     let providerConfigPath: String?
     let appGroup: String?
     let secretNonce: String
@@ -531,11 +461,13 @@ private struct TunnelStartRequest {
     init(options: [String: NSObject]?, providerConfiguration: [String: Any]?) {
         optionConfigContent = options?["configContent"] as? String
         optionConfigPath = options?["configPath"] as? String
-        providerConfigContent = providerConfiguration?["configContent"] as? String
         providerConfigPath = providerConfiguration?["configPath"] as? String
         appGroup = (options?["appGroup"] as? String) ?? (providerConfiguration?["appGroup"] as? String)
-        secretNonce = (options?["secretNonce"] as? String) ?? (providerConfiguration?["secretNonce"] as? String) ?? ""
-        configSecretsAreResolved = ((options?["configSecrets"] as? String) ?? (providerConfiguration?["configSecrets"] as? String)) == "resolved"
+        secretNonce = providerConfiguration?["secretNonce"] as? String ?? ""
+        configSecretsAreResolved = optionConfigContent != nil
+            && (providerConfiguration?["oneShot"] as? Bool) == true
+            && (options?["secretNonce"] as? String) == secretNonce
+            && (options?["configSecrets"] as? String) == "resolved"
         includeAllNetworks = ((options?["includeAllNetworks"] as? String) ?? (providerConfiguration?["includeAllNetworks"] as? String)) == "true"
         dnsServers = Self.csv((options?["dnsServers"] as? String) ?? (providerConfiguration?["dnsServers"] as? String) ?? "")
         let mtu = Int((options?["tunnelMTU"] as? String) ?? (providerConfiguration?["tunnelMTU"] as? String) ?? "")
@@ -566,12 +498,11 @@ private struct TunnelStartRequest {
 
 private enum TunnelProviderError: LocalizedError {
     case missingConfig
+    case invalidInlineConfig
     case missingSecretNonce
     case configTooLarge
-    case invalidConfig
     case configPathOutsideContainer
     case missingConfigAuthenticationSecret
-    case configAuthenticationFailed
     case unresolvedSecrets(Int)
     case memoryBudgetExceeded(UInt64)
     case xrayUnavailable
@@ -580,19 +511,17 @@ private enum TunnelProviderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingConfig:
-            "Tunnel settings missing."
+            "Tunnel settings missing. Reconnect from Hop."
+        case .invalidInlineConfig:
+            "Invalid one-shot tunnel settings. Reconnect from Hop."
         case .missingSecretNonce:
             "Credential nonce missing. Reconnect from Hop."
         case .configTooLarge:
             "Tunnel config exceeds the 512 KiB limit."
-        case .invalidConfig:
-            "Tunnel config must be an Xray JSON object."
         case .configPathOutsideContainer:
             "Config rejected: path outside the shared App Group."
         case .missingConfigAuthenticationSecret:
             "Cannot read tunnel authentication key from shared Keychain."
-        case .configAuthenticationFailed:
-            "Tunnel settings rejected: integrity check failed."
         case let .unresolvedSecrets(count):
             "Cannot resolve \(count) credential references from shared Keychain."
         case let .memoryBudgetExceeded(bytes):

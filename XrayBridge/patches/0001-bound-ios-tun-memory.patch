@@ -1,280 +1,67 @@
-diff --git a/proxy/tun/stack_gvisor.go b/proxy/tun/stack_gvisor.go
-index 8584616..a0dc207 100644
---- a/proxy/tun/stack_gvisor.go
-+++ b/proxy/tun/stack_gvisor.go
-@@ -27,2 +27,2 @@ const (
--	tcpRXBufDefSize = tcp.DefaultSendBufferSize
--	tcpRXBufMaxSize = 8 << 20 // 8MiB
-+	tcpRXBufDefSize = 128 << 10 // 128KiB
-+	tcpRXBufMaxSize = 128 << 10 // 128KiB
-@@ -31,2 +31,4 @@ const (
--	tcpTXBufDefSize = tcp.DefaultReceiveBufferSize
--	tcpTXBufMaxSize = 6 << 20 // 6MiB
-+	tcpTXBufDefSize = 128 << 10 // 128KiB
-+	tcpTXBufMaxSize = 128 << 10 // 128KiB
+diff --git a/proxy/tun/handler.go b/proxy/tun/handler.go
+index 59b643b5d153a8bea0a57f334c9b38b8f3fa1e90..6b92aa4366bdb74698082196e8286d91f1eb242b 100644
+--- a/proxy/tun/handler.go
++++ b/proxy/tun/handler.go
+@@ -178,15 +178,13 @@ func (t *Handler) Start() error {
+ 
+ 	err = tunStack.Start()
+ 	if err != nil {
+-		_ = tunStack.Close()
+-		_ = tunInterface.Close()
++		_ = closeInbound(tunStack, tunInterface)
+ 		return err
+ 	}
+ 
+ 	err = tunInterface.Start()
+ 	if err != nil {
+-		_ = tunStack.Close()
+-		_ = tunInterface.Close()
++		_ = closeInbound(tunStack, tunInterface)
+ 		return err
+ 	}
+ 
+@@ -196,8 +194,7 @@ func (t *Handler) Start() error {
+ 		ConfigureSystemDNS(context.Context, string) error
+ 	}); ok {
+ 		if err := c.ConfigureSystemDNS(t.ctx, t.tag); err != nil {
+-			_ = tunStack.Close()
+-			_ = tunInterface.Close()
++			_ = closeInbound(tunStack, tunInterface)
+ 			return errors.New("unable to set the system DNS (remove autoSystemDnsToGateway to run without)").Base(err)
+ 		}
+ 	}
+@@ -265,7 +262,24 @@ func (t *Handler) HandleConnection(conn net.Conn, destination net.Destination) {
+ 
+ // Close implements common.Closable.
+ func (t *Handler) Close() error {
+-	return errors.Combine(common.CloseIfExists(t.stack), common.CloseIfExists(t.tun))
++	return closeInbound(t.stack, t.tun)
++}
 +
-+	tcpMaxInFlight = 128
-@@ -69 +71 @@ func (t *stackGVisor) Start() error {
--	tcpForwarder := tcp.NewForwarder(ipStack, 0, 65535, func(r *tcp.ForwarderRequest) {
-+	tcpForwarder := tcp.NewForwarder(ipStack, tcpRXBufDefSize, tcpMaxInFlight, func(r *tcp.ForwarderRequest) {
-@@ -104 +106 @@ func (t *stackGVisor) Start() error {
--		data := pkt.Clone().Data().AsRange().ToSlice()
-+		data := pkt.Data().AsRange().ToSlice()
-@@ -239 +241,3 @@ func createStack(ep stack.LinkEndpoint) (*stack.Stack, error) {
--	mOpt := tcpip.TCPModerateReceiveBufferOption(true)
-+	// iOS packet-tunnel extensions have a hard physical-footprint ceiling.
-+	// Keep receive auto-tuning disabled in addition to the fixed range below.
-+	mOpt := tcpip.TCPModerateReceiveBufferOption(false)
-diff --git a/proxy/tun/tun_darwin.go b/proxy/tun/tun_darwin.go
---- a/proxy/tun/tun_darwin.go
-+++ b/proxy/tun/tun_darwin.go
-@@ -45,4 +45,4 @@
--	tunFile *os.File
--	options *Config
--	tunFd   int
--	ownsFd  bool // true for macOS (we created the fd), false for iOS (fd from system)
-+	tunFile       *os.File
-+	options       *Config
-+	tunFd         int
-+	ownsInterface bool // true for macOS route setup; tunFile is always owned
-@@ -69,0 +70,7 @@
-+		// os.File owns its descriptor, including closing it from its finalizer.
-+		// Duplicate the system descriptor so Close can also wake blocked reads
-+		// without closing NetworkExtension's descriptor.
-+		fd, err = unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 3)
-+		if err != nil {
-+			return nil, err
-+		}
-@@ -70,0 +78 @@
-+			_ = unix.Close(fd)
-@@ -75,4 +83,4 @@
--			tunFile: os.NewFile(uintptr(fd), "utun"),
--			options: options,
--			tunFd:   fd,
--			ownsFd:  false,
-+			tunFile:       os.NewFile(uintptr(fd), "utun"),
-+			options:       options,
-+			tunFd:         fd,
-+			ownsInterface: false,
-@@ -95,4 +103,4 @@
--		tunFile: tunFile,
--		options: options,
--		tunFd:   int(tunFile.Fd()),
--		ownsFd:  true,
-+		tunFile:       tunFile,
-+		options:       options,
-+		tunFd:         int(tunFile.Fd()),
-+		ownsInterface: true,
-@@ -103 +111 @@
--	if !t.ownsFd {
-+	if !t.ownsInterface {
-@@ -129,6 +137,9 @@
--	routeErr := t.unsetSystemRoutes()
--	if t.ownsFd {
--		return xerrors.Combine(routeErr, t.tunFile.Close())
--	}
--	// iOS: don't close the fd, it's owned by NetworkExtension
--	return routeErr
-+	var routeErr error
-+	if t.ownsInterface {
-+		routeErr = t.unsetSystemRoutes()
++// Close the device before waiting on a reader or flow that may be blocked
++// writing to it. A WireGuard stack fed through Input owns no reader.
++func closeInbound(ipStack Stack, device Tun) error {
++	var done chan struct{}
++	if s, ok := ipStack.(*stack); ok {
++		s.mu.Lock()
++		s.closed = true
++		done = s.readerDone
++		s.mu.Unlock()
 +	}
-+	closeErr := t.tunFile.Close()
-+	if errors.Is(closeErr, os.ErrClosed) {
-+		closeErr = nil
++	err := common.CloseIfExists(device)
++	if done != nil {
++		<-done
 +	}
-+	return xerrors.Combine(routeErr, closeErr)
-@@ -227,0 +239,3 @@
-+	// MakeWithData owns a copy, so retaining the Xray buffer doubles every
-+	// queued packet's storage until gVisor releases it.
-+	b.Release()
-@@ -231,3 +244,0 @@
--		OnRelease: func() {
--			b.Release()
--		},
-diff --git a/proxy/tun/udp_fullcone.go b/proxy/tun/udp_fullcone.go
-index 1a1cb08..efe8eed 100644
---- a/proxy/tun/udp_fullcone.go
-+++ b/proxy/tun/udp_fullcone.go
-@@ -16 +16 @@ type packet struct {
--	dest *net.Destination
-+	dest net.Destination
-@@ -46 +46 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
--		case conn.egress <- &packet{
-+		case conn.egress <- packet{
-@@ -48 +48 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
--			dest: &dst,
-+			dest: dst,
-@@ -63 +63 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
--		egress := make(chan *packet, 1024)
-+		egress := make(chan packet, 32)
-@@ -72 +72 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
--	case conn.egress <- &packet{
-+	case conn.egress <- packet{
-@@ -74 +74 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
--		dest: &dst,
-+		dest: dst,
-@@ -95 +95 @@ type udpConn struct {
--	egress chan *packet
-+	egress chan packet
-@@ -113 +113,2 @@ func (c *udpConn) ReadMultiBuffer() (buf.MultiBuffer, error) {
--		b.UDP = e.dest
-+		dest := e.dest
-+		b.UDP = &dest
-diff --git a/proxy/wireguard/netstack.go b/proxy/wireguard/netstack.go
-index 22c42e3..1879e14 100644
---- a/proxy/wireguard/netstack.go
-+++ b/proxy/wireguard/netstack.go
-@@ -38,0 +39,7 @@ import (
-+const (
-+	netstackEndpointQueueSize = 64
-+	netstackTCPBufferSize     = 128 << 10 // 128KiB
-+	netstackTCPMaxInFlight    = 128
-+	netstackUDPQueueSize      = 32
-+)
-+
-@@ -57 +64 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int, handleLocal
--		ep:             channel.New(1024, uint32(mtu), ""),
-+		ep:             channel.New(netstackEndpointQueueSize, uint32(mtu), ""),
-@@ -68,0 +76,23 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int, handleLocal
-+	moderateReceiveBufferOpt := tcpip.TCPModerateReceiveBufferOption(false)
-+	tcpipErr = dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &moderateReceiveBufferOpt)
-+	if tcpipErr != nil {
-+		return nil, nil, nil, fmt.Errorf("could not disable TCP receive auto-tuning: %v", tcpipErr)
-+	}
-+	receiveBufferOpt := tcpip.TCPReceiveBufferSizeRangeOption{
-+		Min:     tcp.MinBufferSize,
-+		Default: netstackTCPBufferSize,
-+		Max:     netstackTCPBufferSize,
-+	}
-+	tcpipErr = dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &receiveBufferOpt)
-+	if tcpipErr != nil {
-+		return nil, nil, nil, fmt.Errorf("could not bound TCP receive buffers: %v", tcpipErr)
-+	}
-+	sendBufferOpt := tcpip.TCPSendBufferSizeRangeOption{
-+		Min:     tcp.MinBufferSize,
-+		Default: netstackTCPBufferSize,
-+		Max:     netstackTCPBufferSize,
-+	}
-+	tcpipErr = dev.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &sendBufferOpt)
-+	if tcpipErr != nil {
-+		return nil, nil, nil, fmt.Errorf("could not bound TCP send buffers: %v", tcpipErr)
-+	}
-@@ -130,0 +161 @@ func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
-+	defer view.Release()
-@@ -153,0 +185 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
-+			pkb.DecRef()
-@@ -155,0 +188 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
-+		pkb.DecRef()
-diff --git a/proxy/wireguard/tun.go b/proxy/wireguard/tun.go
-index 68bad3a..542fe67 100644
---- a/proxy/wireguard/tun.go
-+++ b/proxy/wireguard/tun.go
-@@ -56 +56 @@ func createForwarder(gstack *stack.Stack, handler func(conn net.Conn, dest net.D
--	tcpForwarder := tcp.NewForwarder(gstack, 0, 65535, func(r *tcp.ForwarderRequest) {
-+	tcpForwarder := tcp.NewForwarder(gstack, netstackTCPBufferSize, netstackTCPMaxInFlight, func(r *tcp.ForwarderRequest) {
-@@ -88 +88 @@ func createForwarder(gstack *stack.Stack, handler func(conn net.Conn, dest net.D
--		data := pkt.Clone().Data().AsRange().ToSlice()
-+		data := pkt.Data().AsRange().ToSlice()
-@@ -116 +116 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
--		case uc.queue <- &packet{
-+		case uc.queue <- packet{
-@@ -118 +118 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
--			dest: &dst,
-+			dest: dst,
-@@ -134 +134 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
--			queue: make(chan *packet, 1024),
-+			queue: make(chan packet, netstackUDPQueueSize),
-@@ -149 +149 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
--	case uc.queue <- &packet{
-+	case uc.queue <- packet{
-@@ -151 +151 @@ func (m *udpManager) feed(src net.Destination, dst net.Destination, data []byte)
--		dest: &dst,
-+		dest: dst,
-@@ -231 +231 @@ type packet struct {
--	dest *net.Destination
-+	dest net.Destination
-@@ -235 +235 @@ type udpConn struct {
--	queue     chan *packet
-+	queue     chan packet
-@@ -257 +257,2 @@ func (c *udpConn) ReadMultiBuffer() (buf.MultiBuffer, error) {
--		b.UDP = q.dest
-+		dest := q.dest
-+		b.UDP = &dest
-diff --git a/transport/internet/finalmask/xdns/client.go b/transport/internet/finalmask/xdns/client.go
-index 557347f..78acd73 100644
---- a/transport/internet/finalmask/xdns/client.go
-+++ b/transport/internet/finalmask/xdns/client.go
-@@ -107,2 +107,2 @@ func NewConnClient(c *Config, raw net.PacketConn) (net.PacketConn, error) {
--		readQueue:  make(chan *packet, 256),
--		writeQueue: make(chan *packet, 256),
-+		readQueue:  make(chan *packet, 64),
-+		writeQueue: make(chan *packet, 64),
-diff --git a/transport/internet/hysteria/config.go b/transport/internet/hysteria/config.go
-index bf87d60..942c3ae 100644
---- a/transport/internet/hysteria/config.go
-+++ b/transport/internet/hysteria/config.go
-@@ -25 +25 @@ const (
--	udpMessageChanSize        = 1024
-+	udpMessageChanSize        = 64
-diff --git a/transport/internet/hysteria/udphop/conn.go b/transport/internet/hysteria/udphop/conn.go
-index 8ab8339..f1de2e4 100644
---- a/transport/internet/hysteria/udphop/conn.go
-+++ b/transport/internet/hysteria/udphop/conn.go
-@@ -14 +14 @@ const (
--	packetQueueSize = 1024
-+	packetQueueSize = 64
-@@ -100 +100,5 @@ func (u *UdpHopPacketConn) recvLoop(conn net.PacketConn) {
--				u.recvQueue <- &udpPacket{nil, 0, nil, netErr}
-+				select {
-+				case u.recvQueue <- &udpPacket{nil, 0, nil, netErr}:
-+				case <-u.closeChan:
-+					return
-+				}
-diff --git a/transport/internet/kcp/dialer.go b/transport/internet/kcp/dialer.go
-index 175998e..b93285a 100644
---- a/transport/internet/kcp/dialer.go
-+++ b/transport/internet/kcp/dialer.go
-@@ -23 +23 @@ func fetchInput(_ context.Context, input io.Reader, reader PacketReader, conn *C
--	cache := make(chan *buf.Buffer, 1024)
-+	cache := make(chan *buf.Buffer, 64)
-diff --git a/proxy/tun/stack_gvisor_endpoint.go b/proxy/tun/stack_gvisor_endpoint.go
---- a/proxy/tun/stack_gvisor_endpoint.go
-+++ b/proxy/tun/stack_gvisor_endpoint.go
-@@ -5,0 +6 @@
-+	"sync"
-@@ -25,0 +27 @@
-+	dispatcherMu     sync.Mutex
-@@ -53,0 +56,2 @@
-+	e.dispatcherMu.Lock()
-+	defer e.dispatcherMu.Unlock()
-@@ -60,0 +65 @@
-+		e.dispatcherCancel = cancel
-@@ -62 +66,0 @@
--		e.dispatcherCancel = cancel
-@@ -66,0 +71,2 @@
-+	e.dispatcherMu.Lock()
-+	defer e.dispatcherMu.Unlock()
-@@ -86,4 +92 @@
--	if e.dispatcherCancel != nil {
--		e.dispatcherCancel()
--		e.dispatcherCancel = nil
--	}
-+	e.Attach(nil)
-@@ -129 +132,7 @@
--				e.Attach(nil)
-+				e.dispatcherMu.Lock()
-+				// A canceled reader must not detach its replacement.
-+				if ctx.Err() == nil {
-+					e.dispatcherCancel()
-+					e.dispatcherCancel = nil
-+				}
-+				e.dispatcherMu.Unlock()
-diff --git a/proxy/tun/tun_darwin_hop_test.go b/proxy/tun/tun_darwin_hop_test.go
++	return errors.Combine(err, common.CloseIfExists(ipStack))
+ }
+ 
+ // Network implements proxy.Inbound
+diff --git a/proxy/tun/hop_borrowed_lifetime_darwin_test.go b/proxy/tun/hop_borrowed_lifetime_darwin_test.go
 new file mode 100644
+index 0000000000000000000000000000000000000000..e8214a6cfc168c05ce4199ede079f28e2eb73fd6
 --- /dev/null
-+++ b/proxy/tun/tun_darwin_hop_test.go
-@@ -0,0 +1,109 @@
++++ b/proxy/tun/hop_borrowed_lifetime_darwin_test.go
+@@ -0,0 +1,114 @@
 +//go:build darwin
 +
 +package tun
@@ -284,6 +71,7 @@ new file mode 100644
 +	"os"
 +	"runtime"
 +	"strconv"
++	"sync"
 +	"testing"
 +	"time"
 +
@@ -323,18 +111,14 @@ new file mode 100644
 +		if _, err := unix.Write(fds[1], []byte{0, 0, 0, unix.AF_INET, 0x45, 0, 0, 0}); err != nil {
 +			t.Fatal(err)
 +		}
-+		version, packet, err := tun.ReadPacket()
-+		if err != nil || packet == nil || version != 4 {
-+			t.Fatalf("restarted TUN cannot read: version=%d err=%v", version, err)
++		packet, err := tun.ReadPacket(make([]byte, 1284))
++		if err != nil || len(packet) != 4 || packet[0]>>4 != 4 {
++			t.Fatalf("restarted TUN cannot read: packet=%x err=%v", packet, err)
 +		}
-+		packet.DecRef()
 +
 +		readDone := make(chan error, 1)
 +		go func() {
-+			_, packet, err := tun.ReadPacket()
-+			if packet != nil {
-+				packet.DecRef()
-+			}
++			_, err := tun.ReadPacket(make([]byte, 1284))
 +			readDone <- err
 +		}()
 +		select {
@@ -342,9 +126,17 @@ new file mode 100644
 +			t.Fatalf("empty socket read returned before close: %v", err)
 +		case <-time.After(20 * time.Millisecond):
 +		}
-+		if err := tun.Close(); err != nil {
-+			t.Fatal(err)
++		var closing sync.WaitGroup
++		for range 8 {
++			closing.Add(1)
++			go func() {
++				defer closing.Done()
++				if err := tun.Close(); err != nil {
++					t.Error(err)
++				}
++			}()
 +		}
++		closing.Wait()
 +		select {
 +		case err := <-readDone:
 +			if !errors.Is(err, os.ErrClosed) {
@@ -384,91 +176,798 @@ new file mode 100644
 +		t.Fatal("accepted an invalid borrowed descriptor")
 +	}
 +}
-diff --git a/proxy/tun/stack_gvisor_endpoint_hop_test.go b/proxy/tun/stack_gvisor_endpoint_hop_test.go
+diff --git a/proxy/tun/hop_budget_test.go b/proxy/tun/hop_budget_test.go
 new file mode 100644
+index 0000000000000000000000000000000000000000..71d8ff8fa2e50d07b246ce8b5ba5a54417ad9948
 --- /dev/null
-+++ b/proxy/tun/stack_gvisor_endpoint_hop_test.go
-@@ -0,0 +1,83 @@
++++ b/proxy/tun/hop_budget_test.go
+@@ -0,0 +1,191 @@
 +package tun
 +
 +import (
-+	"errors"
++	"bytes"
++	"context"
++	"net/netip"
 +	"sync"
 +	"testing"
 +	"time"
 +
-+	"gvisor.dev/gvisor/pkg/tcpip"
-+	"gvisor.dev/gvisor/pkg/tcpip/stack"
++	"github.com/xtls/xray-core/common/buf"
++	"github.com/xtls/xray-core/common/net"
 +)
 +
-+type hopReadDevice struct{ reads chan chan error }
-+
-+func (d *hopReadDevice) ReadPacket() (byte, *stack.PacketBuffer, error) {
-+	result := make(chan error, 1)
-+	d.reads <- result
-+	return 0, nil, <-result
-+}
-+func (*hopReadDevice) WritePacket(*stack.PacketBuffer) tcpip.Error { return nil }
-+func (*hopReadDevice) Wait()                                       {}
-+
-+type hopDispatcher struct{}
-+
-+func (hopDispatcher) DeliverNetworkPacket(tcpip.NetworkProtocolNumber, *stack.PacketBuffer) {}
-+func (hopDispatcher) DeliverLinkPacket(tcpip.NetworkProtocolNumber, *stack.PacketBuffer)    {}
-+
-+func hopRead(t *testing.T, d *hopReadDevice) chan error {
-+	t.Helper()
-+	select {
-+	case result := <-d.reads:
-+		return result
-+	case <-time.After(time.Second):
-+		t.Fatal("dispatcher did not start reading")
-+		return nil
-+	}
-+}
-+
-+func TestHopLinkEndpointConcurrentCloseAndReadError(t *testing.T) {
-+	for i := 0; i < 64; i++ {
-+		d := &hopReadDevice{reads: make(chan chan error, 2)}
-+		e := &LinkEndpoint{deviceMTU: 1280, device: d}
-+		e.Attach(hopDispatcher{})
-+		read := hopRead(t, d)
-+		var wg sync.WaitGroup
-+		wg.Add(3)
-+		gate := make(chan struct{})
-+		go func() { defer wg.Done(); <-gate; e.Close() }()
-+		go func() { defer wg.Done(); <-gate; read <- errors.New("read closed") }()
-+		go func() { defer wg.Done(); <-gate; _ = e.IsAttached() }()
-+		close(gate)
-+		wg.Wait()
-+		e.Close()
-+		if e.IsAttached() {
-+			t.Fatal("closed endpoint is still attached")
++// A large stream from an outbound must pass through a small send window in order.
++func TestHopTCPBudgetAndStream(t *testing.T) {
++	for _, asBuffers := range []bool{true, false} {
++		conns := make(chan accepted, 1)
++		peer, link := newPeer(t, "10.0.0.1:1234", "10.0.0.2:80")
++		newTestStack(t, link, accept(conns))
++		peer.connect([]byte{2, 4, 5, 180, 1, 3, 3, tcpWindowShift})
++		conn := take(t, conns).conn.(*tcpConn)
++		payload := bytes.Repeat([]byte("Hop transfer test"), 32768)
++		done := make(chan error, 1)
++		go func() {
++			var err error
++			if asBuffers {
++				err = conn.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes(payload)})
++			} else {
++				_, err = conn.Write(payload)
++			}
++			done <- err
++		}()
++		received := 0
++		for received < len(payload) {
++			seg := peer.receive()
++			if seg.seq != peer.ack || len(seg.payload) == 0 {
++				continue
++			}
++			end := received + len(seg.payload)
++			if end > len(payload) || !bytes.Equal(payload[received:end], seg.payload) {
++				t.Fatal("unexpected stream contents")
++			}
++			received = end
++			conn.mu.Lock()
++			allocated := conn.sndBytes
++			conn.mu.Unlock()
++			if allocated > tcpWindow {
++				t.Fatalf("retransmission queue retained %d bytes", allocated)
++			}
++			peer.ack += uint32(len(seg.payload))
++			peer.send(peer.seq, tcpAck, nil, nil)
++		}
++		if err := <-done; err != nil {
++			t.Fatal(err)
 +		}
 +	}
-+	// The fake device can signal its read returning, not the enclosing worker
-+	// returning. Let its final error cleanup run under the race detector too.
-+	time.Sleep(10 * time.Millisecond)
 +}
 +
-+func TestHopLinkEndpointOldReadErrorDoesNotDetachReplacement(t *testing.T) {
-+	d := &hopReadDevice{reads: make(chan chan error, 2)}
-+	e := &LinkEndpoint{deviceMTU: 1280, device: d}
-+	e.Attach(hopDispatcher{})
-+	oldRead := hopRead(t, d)
-+	e.Attach(hopDispatcher{})
-+	newRead := hopRead(t, d)
-+	oldRead <- errors.New("old reader closed")
-+	// Observe for long enough to let the deliberately delayed old error run;
-+	// a stale detach can otherwise silently stop a newly attached worker.
-+	until := time.Now().Add(25 * time.Millisecond)
-+	for time.Now().Before(until) {
-+		if !e.IsAttached() {
-+			t.Error("old reader detached replacement")
-+			break
++func TestHopTCPDialLimitAndClose(t *testing.T) {
++	l := newLink()
++	sent := make(chan struct{}, 2*tcpOpening)
++	l.out = func([]byte) {
++		select {
++		case sent <- struct{}{}:
++		default:
 +		}
-+		time.Sleep(time.Millisecond)
 +	}
-+	e.Close()
-+	newRead <- errors.New("new reader closed")
++	result, err := NewStack(context.Background(), StackOptions{Tun: l, MTU: 1500, Addresses: []netip.Addr{netip.MustParseAddr("10.0.0.2")}, Remote: true}, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := result.(*stack)
++	if s.window != 128<<10 {
++		t.Fatal("WireGuard window", s.window)
++	}
++	dst := netip.MustParseAddrPort("10.0.0.1:80")
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	var dials sync.WaitGroup
++	for range tcpOpening {
++		dials.Add(1)
++		go func() { defer dials.Done(); _, _ = s.DialTCP(ctx, dst) }()
++	}
++	for range tcpOpening {
++		select {
++		case <-sent:
++		case <-time.After(2 * time.Second):
++			t.Fatal("SYN not emitted")
++		}
++	}
++	if _, err := s.DialTCP(context.Background(), dst); err == nil {
++		t.Fatal("over-budget dial admitted")
++	}
++	if err := s.Close(); err != nil {
++		t.Fatal(err)
++	}
++	dials.Wait()
++	if s.opening.Load() != 0 || s.tcpFlows != 0 {
++		t.Fatal("closed dials retained")
++	}
 +}
++
++func TestHopUDPQueueBudgetAndShutdown(t *testing.T) {
++	incoming := make(chan net.Conn, udpFlowLimit)
++	handler := handler(func(c net.Conn, _ net.Destination) { incoming <- c })
++	ip, err := NewStack(context.Background(), StackOptions{Tun: newLink(), MTU: 1500}, handler)
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := ip.(*stack)
++	dst := net.UDPDestination(net.ParseAddress("10.0.0.2"), 53)
++	for i := 0; i < udpFlowLimit+1; i++ {
++		src := net.UDPDestination(net.ParseAddress("10.0.0.1"), net.Port(1024+i))
++		for range 2 {
++			b := buf.NewWithSize(60000)
++			b.Extend(60000)
++			s.udp.HandlePacket(src, dst, b)
++		}
++	}
++	if len(s.udp.udpConns) != udpFlowLimit || s.udpBytes.Load() != udpStackBytes {
++		t.Fatalf("flows=%d, queued bytes=%d", len(s.udp.udpConns), s.udpBytes.Load())
++	}
++	for _, c := range s.udp.udpConns {
++		if c.queue.bytes > udpQueueBytes || len(c.queue.items) > 1 {
++			t.Fatal("per-flow budget exceeded")
++		}
++	}
++	if err := s.Close(); err != nil {
++		t.Fatal(err)
++	}
++	if s.udpBytes.Load() != 0 {
++		t.Fatal("queued buffers retained after close")
++	}
++	for range udpFlowLimit {
++		c := <-incoming
++		if _, err := c.Read(make([]byte, 1)); err == nil {
++			t.Fatal("closed UDP flow still readable")
++		}
++		c.Close()
++	}
++	s.udp.HandlePacket(dst, dst, buf.New())
++	if len(s.udp.udpConns) != 0 {
++		t.Fatal("flow admitted after shutdown")
++	}
++}
++
++// Close must join the exact reader started on this device before a replacement takes over.
++func TestHopReaderCloseUnderTraffic(t *testing.T) {
++	for range 8 {
++		p, l := newPeer(t, "10.0.0.1:1234", "10.0.0.2:80")
++		made, err := NewStack(context.Background(), StackOptions{Tun: l, MTU: 1500}, handler(echo))
++		if err != nil {
++			t.Fatal(err)
++		}
++		s := made.(*stack)
++		if err := s.Start(); err != nil {
++			t.Fatal(err)
++		}
++		first := s.readerDone
++		if err := s.Start(); err != nil || s.readerDone != first {
++			t.Fatal("second reader started")
++		}
++		p.udp(p.src, p.dst, "before close")
++		p.packet()
++		pkt := p.bytes(p.seq, tcpSyn, nil, nil)
++		sending := make(chan struct{})
++		go func() {
++			defer close(sending)
++			for {
++				select {
++				case <-l.done:
++					return
++				case l.in <- pkt:
++				}
++			}
++		}()
++		if err := closeInbound(s, l); err != nil {
++			t.Fatal(err)
++		}
++		<-sending
++		select {
++		case <-first:
++		default:
++			t.Fatal("reader still running")
++		}
++		if s.Start() == nil {
++			t.Fatal("started a closed stack")
++		}
++	}
++}
+diff --git a/proxy/tun/packet.go b/proxy/tun/packet.go
+index 697d20eb7f87b359fd5a7b17e2ce40554847ca73..d0530021be514c2d9b5820afc832b13871ddb218 100644
+--- a/proxy/tun/packet.go
++++ b/proxy/tun/packet.go
+@@ -33,7 +33,7 @@ const (
+ 	protoFragment      = 44
+ 	// fragmentsMost is how many packets can be waiting for the rest of their fragments,
+ 	// fragmentsTime how long they are waited for at most
+-	fragmentsMost = 64
++	fragmentsMost = 16
+ 	fragmentsTime = 30 * time.Second
+ )
+ 
+diff --git a/proxy/tun/stack.go b/proxy/tun/stack.go
+index 5048ae94c3fee705c4983e267ba7a8f82eb6e96b..447fde737916ac37336d5d4fef4107dfe439f52b 100644
+--- a/proxy/tun/stack.go
++++ b/proxy/tun/stack.go
+@@ -79,8 +79,11 @@ type stack struct {
+ 	mu    sync.Mutex
+ 	conns map[flow]*tcpConn
+ 	// sockets are the ports that DialUDP has opened
+-	sockets map[netip.AddrPort]*udpSocket
+-	closed  bool
++	sockets              map[netip.AddrPort]*udpSocket
++	closed               bool
++	readerDone           chan struct{}
++	tcpFlows, udpSockets int
++	udpBytes             atomic.Int32 // queued receive buffers across sockets and forwarded flows
+ 	// opening is how many of conns wait for the answer to their SYN or SYN-ACK
+ 	opening atomic.Int32
+ 	// fragments are the packets that are larger than a link on their way and come in parts.
+@@ -117,13 +120,23 @@ func NewStack(ctx context.Context, options StackOptions, handler ConnectionHandl
+ 	if handler != nil {
+ 		s.handle = handler.HandleConnection
+ 		s.udp = newUdpConnectionHandler(s.handle, s.writeUDP)
++		s.udp.budget = &s.udpBytes
+ 	}
+ 	return s, nil
+ }
+ 
+ // Start is called by Handler to bring stack to life
+ func (s *stack) Start() error {
+-	go s.read()
++	s.mu.Lock()
++	defer s.mu.Unlock()
++	if s.closed {
++		return io.ErrClosedPipe
++	}
++	if s.readerDone == nil {
++		done := make(chan struct{})
++		s.readerDone = done
++		go func() { defer close(done); s.read() }()
++	}
+ 	return nil
+ }
+ 
+@@ -137,7 +150,11 @@ func (s *stack) Close() error {
+ 	}
+ 	sockets := s.sockets
+ 	s.sockets = nil
++	s.udpSockets = 0
+ 	s.mu.Unlock()
++	if s.udp != nil {
++		s.udp.close()
++	}
+ 	for _, c := range conns {
+ 		c.mu.Lock()
+ 		if c.err == nil {
+@@ -332,20 +349,19 @@ func (s *stack) handleTCP(p packet) {
+ 		return
+ 	}
+ 
+-	if s.opening.Load() >= tcpOpening {
+-		return
+-	}
+-	c = newTCPConn(s, f)
+-	c.synchronize(seg)
+ 	s.mu.Lock()
+-	if s.closed {
++	if s.closed || s.tcpFlows >= tcpFlowLimit || s.opening.Load() >= tcpOpening || s.conns[f] != nil {
+ 		s.mu.Unlock()
+ 		return
+ 	}
++	c = newTCPConn(s, f)
++	c.synchronize(seg)
++	// Initialize the connection before publishing it to Close and Input.
++	c.mu.Lock()
+ 	s.conns[f] = c
+-	s.mu.Unlock()
++	s.tcpFlows++
+ 	s.opening.Add(1)
+-	c.mu.Lock()
++	s.mu.Unlock()
+ 	c.sendSyn()
+ 	c.arm(tcpTick)
+ 	c.mu.Unlock()
+@@ -383,6 +399,7 @@ func (s *stack) remove(c *tcpConn) {
+ 	s.mu.Lock()
+ 	if s.conns[c.flow] == c {
+ 		delete(s.conns, c.flow)
++		s.tcpFlows--
+ 	}
+ 	s.mu.Unlock()
+ }
+@@ -467,11 +484,15 @@ func (s *stack) write(header, payload []byte) error {
+ // DialUDP implements Stack
+ func (s *stack) DialUDP() (net.PacketConn, error) {
+ 	u := &udpSocket{stack: s, queue: newPacketQueue(udpQueueLimit)}
++	u.queue.budget = &s.udpBytes
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+ 	if s.closed {
+ 		return nil, io.ErrClosedPipe
+ 	}
++	if s.udpSockets >= udpFlowLimit {
++		return nil, errors.New("TUN UDP socket limit reached")
++	}
+ 	port, ok := ephemeral(func(port uint16) bool {
+ 		for _, a := range s.addresses {
+ 			if s.sockets[netip.AddrPortFrom(a, port)] != nil {
+@@ -484,6 +505,7 @@ func (s *stack) DialUDP() (net.PacketConn, error) {
+ 		return nil, errors.New("no port left on ", s.addresses)
+ 	}
+ 	u.port = port
++	s.udpSockets++
+ 	for _, a := range s.addresses {
+ 		s.sockets[netip.AddrPortFrom(a, port)] = u
+ 	}
+@@ -524,11 +546,16 @@ func (u *udpSocket) WriteTo(p []byte, addr net.Addr) (int, error) {
+ 
+ func (u *udpSocket) Close() error {
+ 	u.stack.mu.Lock()
++	removed := false
+ 	for _, a := range u.stack.addresses {
+ 		if local := netip.AddrPortFrom(a, u.port); u.stack.sockets[local] == u {
+ 			delete(u.stack.sockets, local)
++			removed = true
+ 		}
+ 	}
++	if removed {
++		u.stack.udpSockets--
++	}
+ 	u.stack.mu.Unlock()
+ 	u.queue.close()
+ 	return nil
+diff --git a/proxy/tun/stack_test.go b/proxy/tun/stack_test.go
+index e6b7b312c7e2da1fe80d518e01bdb9246b2b2d48..3718e810383bbf92a47cd8ebf95415b8e865b28b 100644
+--- a/proxy/tun/stack_test.go
++++ b/proxy/tun/stack_test.go
+@@ -486,7 +486,7 @@ func TestTCPLargeSegment(t *testing.T) {
+ 		p, l := newPeer(t, "10.0.0.1:1234", "10.0.0.2:80")
+ 		l.segments = segments
+ 		s := newTestStack(t, l, accept(conns))
+-		sent := make([]byte, 200000)
++		sent := make([]byte, 128000)
+ 		rand.Read(sent)
+ 		// one of no connection is refused as a whole
+ 		p.send(p.seq, tcpPsh, nil, sent[:20000])
+@@ -498,7 +498,7 @@ func TestTCPLargeSegment(t *testing.T) {
+ 
+ 		// one that waits for the one before it, that one, one with a part that came already, small ones around
+ 		// one that fits a buffer, and the rest
+-		for _, part := range [][2]int{{60000, 90000}, {0, 60000}, {80000, 110000}, {110000, 110100}, {110100, 115100}, {115100, 118100}, {118100, 170000}, {170000, 200000}} {
++		for _, part := range [][2]int{{60000, 90000}, {0, 60000}, {80000, 110000}, {110000, 110100}, {110100, 115100}, {115100, 118100}, {118100, 128000}} {
+ 			p.send(p.seq+uint32(part[0]), tcpAck|tcpPsh, nil, sent[part[0]:part[1]])
+ 		}
+ 		// all of it is taken before anything is read, for the buffers to be as the stack put it in them
+diff --git a/proxy/tun/tcp_lightweight.go b/proxy/tun/tcp_lightweight.go
+index efef58b9748722399a826d1bc5e2e983ba73bb8b..c35adbad7e3e58d2fa81cccf38d57cef12552fa3 100644
+--- a/proxy/tun/tcp_lightweight.go
++++ b/proxy/tun/tcp_lightweight.go
+@@ -28,21 +28,22 @@ const (
+ 	// tcpWindow is what a connection takes from the system before its reader has to take it,
+ 	// and the most that it sends to the system before that is acknowledged. More than that, for several
+ 	// connections at once, is more packets than the queue of a tun holds (500 on Linux)
+-	tcpWindow = 256 << 10
+-	// tcpLargeWindow is the same for a tun that takes and gives segments that are larger than its MTU: those are
+-	// few, and a way with a longer round trip, as a router has to what is behind it, is not held back by it
+-	tcpLargeWindow = 1 << 20
++	tcpWindow = 128 << 10
++	// Remote WireGuard stacks share the extension budget with the local TUN.
++	tcpLargeWindow = tcpWindow
+ 	// tcpWindowShift makes them fit the 16 bits of a window
+ 	tcpWindowShift = 5
+ 	// tcpHeld is how many segments wait for one that was lost before them,
+ 	// and of how many parts what the system says it has is known
+-	tcpHeld = 1024
++	tcpHeld = 32
+ 	// tcpSmallest is the smallest mss that the system is believed, the one of Linux
+ 	tcpSmallest = 48
+ 	// tcpStamps is what the times of both sides take of the options of every segment that carries them (RFC 7323)
+ 	tcpStamps = 12
+ 	// tcpOpening is how many connections that the other side opens can be waiting for the answer to their SYN-ACK
+-	tcpOpening = 65535
++	tcpOpening    = 32
++	tcpFlowLimit  = 64
++	tcpWriteBatch = 32 << 10
+ 	// tcpStart is how many segments are sent before any of them is acknowledged
+ 	tcpStart = 10
+ 	// tcpSegment is the largest payload of a segment that the tun splits by itself,
+@@ -140,6 +141,7 @@ type tcpConn struct {
+ 	stamps               bool
+ 	stampBase, stampSent uint32
+ 
++	writeMu  sync.Mutex // serializes net.Conn writers across backpressure waits
+ 	mu       sync.Mutex
+ 	readable sync.Cond
+ 	writable sync.Cond
+@@ -174,6 +176,7 @@ type tcpConn struct {
+ 	sndWnd         uint32
+ 	// sndQueue is what was sent and is not acknowledged
+ 	sndQueue buf.MultiBuffer
++	sndBytes int32 // backing storage retained for retransmission
+ 	// sndBase is the sequence number of the first byte of sndQueue
+ 	sndBase uint32
+ 	sndFin  bool
+@@ -272,6 +275,10 @@ func (s *stack) DialTCP(ctx context.Context, remote netip.AddrPort) (net.Conn, e
+ 		s.mu.Unlock()
+ 		return nil, io.ErrClosedPipe
+ 	}
++	if s.tcpFlows >= tcpFlowLimit || s.opening.Load() >= tcpOpening {
++		s.mu.Unlock()
++		return nil, errors.New("TUN TCP connection limit reached")
++	}
+ 	f := flow{src: remote}
+ 	port, ok := ephemeral(func(port uint16) bool {
+ 		f.dst = netip.AddrPortFrom(local, port)
+@@ -286,8 +293,9 @@ func (s *stack) DialTCP(ctx context.Context, remote netip.AddrPort) (net.Conn, e
+ 	// what the SYN offers, until the answer says what of it is taken
+ 	c.sack, c.stamps, c.rcvShift, c.opened = true, s.stamps, tcpWindowShift, opened
+ 	s.conns[f] = c
+-	s.mu.Unlock()
++	s.tcpFlows++
+ 	s.opening.Add(1)
++	s.mu.Unlock()
+ 	c.mu.Lock()
+ 	if c.err == nil {
+ 		c.sendSyn()
+@@ -839,7 +847,9 @@ func (c *tcpConn) release() {
+ 		if int32(c.sndUna-end) < 0 {
+ 			break
+ 		}
++		c.sndBytes -= c.sndQueue[0].Cap()
+ 		c.sndQueue[0].Release()
++		c.writable.Signal()
+ 		c.sndQueue[0] = nil
+ 		c.sndQueue = c.sndQueue[1:]
+ 		c.sndBase = end
+@@ -1112,14 +1122,43 @@ func (c *tcpConn) Read(p []byte) (int, error) {
+ 	return n, nil
+ }
+ 
+-// WriteMultiBuffer implements buf.Writer. It is not called again before it returns
++// WriteMultiBuffer consumes bounded batches so an upstream read burst cannot
++// become one oversized retransmission queue. Keep ordinary buffers zero-copy.
+ func (c *tcpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
++	c.writeMu.Lock()
++	defer c.writeMu.Unlock()
++	for len(mb) > 0 {
++		end, capacity := 0, int32(0)
++		for end < len(mb) && end < 32 && mb[end].Cap() <= tcpWriteBatch-capacity {
++			capacity += mb[end].Cap()
++			end++
++		}
++		var err error
++		if end == 0 {
++			_, err = c.writeBytes(mb[0].Bytes())
++			mb[0].Release()
++			end = 1
++		} else {
++			err = c.writeBatch(mb[:end], capacity)
++		}
++		clear(mb[:end])
++		mb = mb[end:]
++		if err != nil {
++			buf.ReleaseMulti(mb)
++			return err
++		}
++	}
++	return nil
++}
++
++func (c *tcpConn) writeBatch(mb buf.MultiBuffer, capacity int32) error {
+ 	c.mu.Lock()
+ 	defer c.mu.Unlock()
+ 	// without the empty ones
+ 	n, size := 0, uint32(0)
+ 	for _, b := range mb {
+ 		if b.IsEmpty() {
++			capacity -= b.Cap()
+ 			b.Release()
+ 			continue
+ 		}
+@@ -1128,11 +1167,15 @@ func (c *tcpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
+ 		size += uint32(b.Len())
+ 	}
+ 	mb = mb[:n]
++	for c.err == nil && !c.closed && c.sndBytes+capacity > tcpWindow {
++		c.writable.Wait()
++	}
+ 	if c.err != nil || c.closed {
+ 		buf.ReleaseMulti(mb)
+ 		return io.ErrClosedPipe
+ 	}
+ 	// what is written is in sndQueue until it is acknowledged, and is not released before all of it is sent
++	c.sndBytes += capacity
+ 	c.sndQueue = append(c.sndQueue, mb...)
+ 	c.writing = len(mb)
+ 	// a segment is one part of a Buffer, or as much as there is to send if the tun splits it by itself
+@@ -1182,11 +1225,12 @@ func (c *tcpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
+ 		c.arm(tcpTick)
+ 		// segments that come in the meantime are taken while this one is written, and acknowledged after it
+ 		c.sending = true
++		mss := c.mss
+ 		c.mu.Unlock()
+ 		if s := c.stack.segmenter; s != nil {
+ 			t := h[c.ipSize:]
+ 			binary.BigEndian.PutUint16(t[16:], ^checksum(pseudoSum(h[:c.ipSize], protoTCP, len(t)+n)))
+-			_ = s.WriteSegment(h, p, c.mss)
++			_ = s.WriteSegment(h, p, mss)
+ 		} else {
+ 			c.write(h, p[0])
+ 		}
+@@ -1208,10 +1252,24 @@ func (c *tcpConn) WriteMultiBuffer(mb buf.MultiBuffer) error {
+ 
+ // Write implements net.Conn
+ func (c *tcpConn) Write(p []byte) (int, error) {
+-	if err := c.WriteMultiBuffer(buf.MergeBytes(nil, p)); err != nil {
+-		return 0, err
++	c.writeMu.Lock()
++	defer c.writeMu.Unlock()
++	return c.writeBytes(p)
++}
++
++func (c *tcpConn) writeBytes(p []byte) (int, error) {
++	written := 0
++	for len(p) > 0 {
++		n := min(len(p), tcpWriteBatch)
++		b := buf.NewWithSize(int32(n))
++		b.Write(p[:n])
++		if err := c.writeBatch(buf.MultiBuffer{b}, b.Cap()); err != nil {
++			return written, err
++		}
++		written += n
++		p = p[n:]
+ 	}
+-	return len(p), nil
++	return written, nil
+ }
+ 
+ // Close implements net.Conn
+@@ -1222,6 +1280,7 @@ func (c *tcpConn) Close() error {
+ 		return nil
+ 	}
+ 	c.closed = true
++	c.writable.Broadcast()
+ 	unread := c.rcvLen > 0
+ 	c.rcvQueue, c.rcvLen = buf.ReleaseMulti(c.rcvQueue), 0
+ 	if c.err != nil {
+diff --git a/proxy/tun/tun_darwin.go b/proxy/tun/tun_darwin.go
+index a005681f47562138309350e56417c09df8528671..f51b970edcbb5dcb5a6301f31dc08e137aab3249 100644
+--- a/proxy/tun/tun_darwin.go
++++ b/proxy/tun/tun_darwin.go
+@@ -54,10 +54,11 @@ type DarwinTun struct {
+ 	// comment for why this is a dedicated type rather than a bare fd.
+ 	waitKq *waitKqueue
+ 
+-	routeMonitor     *os.File
+-	routeMonitorOnce sync.Once
+-	systemRoutes     []netip.Prefix
+-	gateway          netip.Prefix
++	routeMonitor *os.File
++	closeOnce    sync.Once
++	closeErr     error
++	systemRoutes []netip.Prefix
++	gateway      netip.Prefix
+ }
+ 
+ // waitKqueue owns a kqueue fd used by DarwinTun.Wait() to block on
+@@ -156,7 +157,7 @@ func NewTun(options *Config) (Tun, error) {
+ 
+ 		// duplicate NetworkExtension fd so Xray can close its own handle
+ 		// without closing the original.
+-		fd, err := unix.FcntlInt(uintptr(providedFd), unix.F_DUPFD_CLOEXEC, 0)
++		fd, err := unix.FcntlInt(uintptr(providedFd), unix.F_DUPFD_CLOEXEC, 3)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -166,12 +167,18 @@ func NewTun(options *Config) (Tun, error) {
+ 			return nil, err
+ 		}
+ 
++		// The Go poller waits for the borrowed interface and wakes readers and
++		// writers when its owned duplicate closes. Fail early if it cannot poll.
++		file := os.NewFile(uintptr(fd), "utun")
++		if err := file.SetReadDeadline(time.Time{}); err != nil {
++			_ = file.Close()
++			return nil, err
++		}
+ 		return &DarwinTun{
+-			tunFile: os.NewFile(uintptr(fd), "utun"),
++			tunFile: file,
+ 			options: options,
+ 			tunFd:   fd,
+ 			ownsFd:  false,
+-			waitKq:  newWaitKqueue(fd),
+ 		}, nil
+ 	}
+ 
+@@ -225,16 +232,19 @@ func (t *DarwinTun) Start() error {
+ }
+ 
+ func (t *DarwinTun) Close() error {
+-	t.routeMonitorOnce.Do(func() {
++	t.closeOnce.Do(func() {
+ 		if t.routeMonitor != nil {
+ 			_ = t.routeMonitor.Close()
+ 		}
++		if t.waitKq != nil {
++			t.waitKq.close()
++		}
++		if t.ownsFd {
++			t.closeErr = t.unsetSystemRoutes()
++		}
++		t.closeErr = xerrors.Combine(t.closeErr, t.tunFile.Close())
+ 	})
+-	if t.waitKq != nil {
+-		t.waitKq.close()
+-	}
+-	routeErr := t.unsetSystemRoutes()
+-	return xerrors.Combine(routeErr, t.tunFile.Close())
++	return t.closeErr
+ }
+ 
+ func (t *DarwinTun) monitorRouteChanges() {
+@@ -295,6 +305,15 @@ func (t *DarwinTun) WritePacket(header, payload []byte) error {
+ func (t *DarwinTun) ReadPacket(b []byte) ([]byte, error) {
+ 	for {
+ 		n, err := t.tunFile.Read(b)
++		if !t.ownsFd {
++			if err != nil {
++				return nil, err
++			}
++			if n <= utunHeaderSize {
++				continue
++			}
++			return b[utunHeaderSize:n], nil
++		}
+ 		if errors.Is(err, unix.EAGAIN) || errors.Is(err, unix.EINTR) || err == nil && n <= utunHeaderSize {
+ 			// nothing on the line, or an empty packet
+ 			t.Wait()
+@@ -334,7 +353,6 @@ func (t *DarwinTun) Wait() {
+ 		// this kqueue for the rest of this DarwinTun's lifetime instead of
+ 		// re-attempting a syscall that's already shown it won't succeed.
+ 		t.waitKq.close()
+-		t.waitKq = nil
+ 	}
+ 	// Reviewer feedback (XTLS/Xray-core#6580): procyield here is the same
+ 	// busy-spin this whole change exists to remove, just gated behind an
+diff --git a/proxy/tun/udp_fullcone.go b/proxy/tun/udp_fullcone.go
+index 6a71f4b735ec4e696e87d542a0d42bde9da29215..eff0e5b5ea09364302347b1c7803c8e0f4372ef6 100644
+--- a/proxy/tun/udp_fullcone.go
++++ b/proxy/tun/udp_fullcone.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"io"
+ 	"sync"
++	"sync/atomic"
+ 	"time"
+ 
+ 	"github.com/xtls/xray-core/common/buf"
+@@ -16,6 +17,7 @@ type udpConnectionHandler struct {
+ 	sync.RWMutex
+ 
+ 	udpConns map[net.Destination]*udpConn
++	budget   *atomic.Int32
+ 
+ 	handleConnection func(conn net.Conn, dest net.Destination)
+ 	writePacket      func(data []byte, src net.Destination, dst net.Destination) error
+@@ -53,7 +55,12 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+ 
+ 	conn, found = u.udpConns[src]
+ 	if !found {
++		if u.udpConns == nil || len(u.udpConns) >= udpFlowLimit {
++			data.Release()
++			return
++		}
+ 		conn = &udpConn{handler: u, queue: newPacketQueue(udpQueueLimit), src: src, dst: dst}
++		conn.queue.budget = u.budget
+ 		u.udpConns[src] = conn
+ 
+ 		go u.handleConnection(conn, dst)
+@@ -76,6 +83,16 @@ func (u *udpConnectionHandler) connectionFinished(conn *udpConn) {
+ 	u.Unlock()
+ }
+ 
++// Wake the dispatcher for every source and stop admitting new flows during shutdown.
++func (u *udpConnectionHandler) close() {
++	u.Lock()
++	defer u.Unlock()
++	for _, c := range u.udpConns {
++		c.queue.close()
++	}
++	u.udpConns = nil
++}
++
+ // udp connection abstraction
+ type udpConn struct {
+ 	handler *udpConnectionHandler
+@@ -165,7 +182,13 @@ func (c *udpConn) SetWriteDeadline(t time.Time) error {
+ }
+ 
+ // udpQueueLimit bounds the packets waiting for one UDP flow; more are dropped.
+-const udpQueueLimit = 1024
++const (
++	udpQueueLimit = 32
++	udpFlowLimit  = 64
++	// A full-size UDP datagram resides in a 128 KiB pool buffer.
++	udpQueueBytes = 128 << 10
++	udpStackBytes = 2 << 20
++)
+ 
+ // packetQueue holds the packets waiting for one UDP flow. Unlike a buffered
+ // channel of the same bound it only allocates for packets actually queued, so
+@@ -174,6 +197,8 @@ type packetQueue struct {
+ 	mu     sync.Mutex
+ 	items  []*buf.Buffer
+ 	limit  int
++	bytes  int32
++	budget *atomic.Int32
+ 	notify chan struct{}
+ 	closed bool
+ }
+@@ -186,10 +211,15 @@ func newPacketQueue(limit int) *packetQueue {
+ func (q *packetQueue) push(b *buf.Buffer) bool {
+ 	q.mu.Lock()
+ 	defer q.mu.Unlock()
+-	if q.closed || len(q.items) >= q.limit {
++	if q.closed || len(q.items) >= q.limit || b.Cap() > udpQueueBytes-q.bytes {
++		return false
++	}
++	if q.budget != nil && q.budget.Add(b.Cap()) > udpStackBytes {
++		q.budget.Add(-b.Cap())
+ 		return false
+ 	}
+ 	q.items = append(q.items, b)
++	q.bytes += b.Cap()
+ 	select {
+ 	case q.notify <- struct{}{}:
+ 	default:
+@@ -197,12 +227,16 @@ func (q *packetQueue) push(b *buf.Buffer) bool {
+ 	return true
+ }
+ 
+-// pop blocks until a packet is queued or the queue is closed and drained.
++// pop blocks until a packet is queued or the queue is closed.
+ func (q *packetQueue) pop() (*buf.Buffer, bool) {
+ 	for {
+ 		q.mu.Lock()
+ 		if len(q.items) > 0 {
+ 			b := q.items[0]
++			q.bytes -= b.Cap()
++			if q.budget != nil {
++				q.budget.Add(-b.Cap())
++			}
+ 			q.items[0] = nil
+ 			q.items = q.items[1:]
+ 			if len(q.items) == 0 {
+@@ -225,6 +259,12 @@ func (q *packetQueue) close() {
+ 	defer q.mu.Unlock()
+ 	if !q.closed {
+ 		q.closed = true
++		buf.ReleaseMulti(q.items)
++		if q.budget != nil {
++			q.budget.Add(-q.bytes)
++		}
++		q.items = nil
++		q.bytes = 0
+ 		close(q.notify)
+ 	}
+ }
+diff --git a/proxy/tun/udp_fullcone_test.go b/proxy/tun/udp_fullcone_test.go
+index f764830d146982f3efaaaa58cf83ad01298beb8c..859f222f3a49e9dfb46214870ff544f88b132e1a 100644
+--- a/proxy/tun/udp_fullcone_test.go
++++ b/proxy/tun/udp_fullcone_test.go
+@@ -79,10 +79,10 @@ func TestPacketQueueCloseUnblocksReader(t *testing.T) {
+ 
+ func TestPacketQueueDropsDrainedStorage(t *testing.T) {
+ 	q := newPacketQueue(udpQueueLimit)
+-	for i := 0; i < 100; i++ {
++	for i := 0; i < udpQueueLimit; i++ {
+ 		q.push(&buf.Buffer{})
+ 	}
+-	for i := 0; i < 100; i++ {
++	for i := 0; i < udpQueueLimit; i++ {
+ 		q.pop()
+ 	}
+ 	if q.items != nil {

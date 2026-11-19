@@ -28,7 +28,7 @@ env:
   # scripts/build-libxray.sh verifies this exact toolchain before running any
   # upstream code. Go's built-in toolchain manager supplies it from the
   # bootstrap Go installation on the runner.
-  GOTOOLCHAIN: go1.26.5
+  GOTOOLCHAIN: go1.27.4
 
 jobs:
   unsigned-ipa:
@@ -41,7 +41,7 @@ jobs:
       # mutable tags can be repointed. The build job has read-only contents
       # permissions and checkout does not persist credentials into .git.
       - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
@@ -72,7 +72,7 @@ jobs:
           xcodegen --version
 
       - name: Cache Go build artifacts
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/Library/Caches/go-build
@@ -81,31 +81,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-libxray-
 
-      - name: Record committed LibXray provenance
-        run: |
-          set -euo pipefail
-          # Snapshot the reviewed, repo-committed engine digest BEFORE
-          # build-libxray.sh rebuilds the engine and refreshes the manifest —
-          # otherwise the later verify pass only compares the fresh build
-          # against itself and the committed provenance never gates anything.
-          cp Frameworks/LibXray.xcframework.sha256 /tmp/libxray-committed.sha256
-
-      - name: Build pinned Xray engine
+      - name: Rebuild and verify pinned Xray engine
         run: scripts/build-libxray.sh
-
-      - name: Compare engine digest against committed provenance
-        run: |
-          set -euo pipefail
-          committed="$(awk '{print $1}' /tmp/libxray-committed.sha256)"
-          rebuilt="$(awk '{print $1}' Frameworks/LibXray.xcframework.sha256)"
-          {
-            echo "### LibXray provenance"
-            echo
-            echo "- Committed manifest digest: \`${committed}\`"
-            echo "- CI-rebuilt engine digest: \`${rebuilt}\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-          test "$committed" = "$rebuilt"
-          echo "- Digests match: the CI build reproduced the committed engine." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Verify generated inputs and Go bridge
         run: |
@@ -220,7 +197,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload IPA artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Hop-unsigned.ipa
           path: build/UnsignedIPA/Hop-unsigned.ipa
@@ -229,7 +206,7 @@ jobs:
           retention-days: 14
 
       - name: Upload checksum artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Hop-unsigned.ipa.sha256
           path: build/UnsignedIPA/Hop-unsigned.ipa.sha256

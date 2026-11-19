@@ -1,6 +1,14 @@
 import Foundation
 
 enum ProfileImportPayloadDetector {
+    /// Fields emitted by Hop's pathless HTTPS node links. A token or other
+    /// subscription parameter still goes to the subscription preview.
+    private static let proxyQueryFields: Set<String> = [
+        "security", "sni", "alpn", "fp", "pcs", "vcn", "ech", "curves", "minver", "maxver",
+        "ciphers", "sessionresumption", "pbk", "sid", "spx", "pqv", "type", "path", "host",
+        "servicename", "authority", "mode", "xhttpextra", "kcp", "finalmask", "mux", "sockopt",
+    ]
+
     enum Payload: Equatable {
         case importText(String)
         case subscription(URL)
@@ -30,9 +38,16 @@ enum ProfileImportPayloadDetector {
         }
 
         let path = components.percentEncodedPath
-        let hasSubscriptionPathOrQuery = (!path.isEmpty && path != "/") || components.percentEncodedQuery != nil
-        if components.port != nil, !hasSubscriptionPathOrQuery {
-            return nil
+        if components.port != nil, path.isEmpty || path == "/" {
+            if components.percentEncodedQuery == nil {
+                return nil
+            }
+            if components.fragment != nil,
+               let items = components.queryItems, !items.isEmpty,
+               items.allSatisfy({ proxyQueryFields.contains($0.name.lowercased()) })
+            {
+                return nil
+            }
         }
 
         return components.url ?? URL(string: value)

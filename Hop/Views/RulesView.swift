@@ -180,7 +180,7 @@ private struct ConfigurationEditorView: View {
                 }
             }
             .sheet(item: $ruleEditor) { state in
-                RuleEditorView(state: state) { rule in
+                RuleEditorView(state: state, hasOtherFinal: draft.rules.contains { $0.kind == .final && $0.id != state.id }) { rule in
                     draft.saveRule(rule)
                 }
             }
@@ -235,10 +235,12 @@ private struct RuleEditorView: View {
     @State private var validationError: String?
 
     let state: RuleEditorState
+    let hasOtherFinal: Bool
     let onSave: (RoutingRule) -> Void
 
-    init(state: RuleEditorState, onSave: @escaping (RoutingRule) -> Void) {
+    init(state: RuleEditorState, hasOtherFinal: Bool, onSave: @escaping (RoutingRule) -> Void) {
         self.state = state
+        self.hasOtherFinal = hasOtherFinal
         self.onSave = onSave
         _draft = State(initialValue: RuleEditorDraft(rule: state.rule))
     }
@@ -252,6 +254,7 @@ private struct RuleEditorView: View {
                     Picker("Type", selection: $draft.kind) {
                         ForEach(RoutingRuleKind.allCases, id: \.self) { kind in
                             Text(kind.displayName).tag(kind)
+                                .disabled(kind == .final && hasOtherFinal)
                         }
                     }
                     .onChange(of: draft.kind) { _, newKind in
@@ -293,7 +296,7 @@ private struct RuleEditorView: View {
                 } header: {
                     Text("Rule")
                 } footer: {
-                    Text(draft.kind.footerText)
+                    Text(draft.kind == .final && hasOtherFinal ? "Edit the existing Final rule to change the fallback." : draft.kind.footerText)
                 }
 
                 if let validationError {
@@ -335,7 +338,7 @@ private struct RuleEditorView: View {
                             }
                         }
                     }
-                    .disabled(!draft.isValid || isSaving)
+                    .disabled(!draft.isValid || isSaving || (draft.kind == .final && hasOtherFinal))
                 }
             }
             .interactiveDismissDisabled(isSaving)

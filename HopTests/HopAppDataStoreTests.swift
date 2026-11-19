@@ -293,8 +293,22 @@ final class HopAppDataStoreTests: XCTestCase {
                 host: "explicit.example.com",
                 password: "new-secret",
             )
-            store.addProfile(explicitProfile)
-            store.flushPendingPersists()
+            var editableStore = store
+            if invalidState != .missing {
+                XCTAssertTrue(store.libraryLoadFailed)
+                store.settings.appearance = .dark
+                store.addProfile(explicitProfile)
+                store.flushPendingPersists()
+                XCTAssertEqual(try Data(contentsOf: stateURL), rejectedState)
+                XCTAssertEqual(profileSecretStore.value(forKey: sentinelKey), "preserve-me")
+                XCTAssertTrue(store.resetUnreadableLibrary())
+                editableStore = HopStore(dataStore: dataStore)
+                XCTAssertNil(profileSecretStore.value(forKey: sentinelKey))
+            }
+            XCTAssertFalse(editableStore.libraryLoadFailed)
+            XCTAssertFalse(editableStore.resetUnreadableLibrary())
+            editableStore.addProfile(explicitProfile)
+            editableStore.flushPendingPersists()
             let explicitlyReplaced = try XCTUnwrap(dataStore.load())
             XCTAssertEqual(explicitlyReplaced.schemaVersion, HopAppData.currentSchemaVersion)
             XCTAssertEqual(explicitlyReplaced.profiles.map(\.id), [explicitProfile.id])

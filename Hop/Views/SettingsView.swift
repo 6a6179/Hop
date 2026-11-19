@@ -18,7 +18,6 @@ struct SettingsView: View {
 
             Section {
                 Toggle("Protocol Sniffing", isOn: $store.settings.sniffTraffic)
-                Toggle("Strict Route", isOn: $store.settings.strictRoute)
                 Toggle(isOn: $store.settings.killSwitch) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Kill Switch")
@@ -124,7 +123,7 @@ struct SettingsView: View {
 
             Section("About") {
                 LabeledContent("Mode", value: "Packet tunnel")
-                LabeledContent("Engine", value: "Xray-core v26.6.27")
+                LabeledContent("Engine", value: "Xray-core \(XrayAdvancedDocument.currentSchemaVersion)")
             }
         }
         .navigationTitle("Settings")
@@ -141,10 +140,13 @@ private struct XrayAdvancedSettingsView: View {
     @Environment(HopStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var json = "{}"
+    @State private var schemaVersion = XrayAdvancedDocument.currentSchemaVersion
     @State private var didLoad = false
+    @State private var validated: (input: AdvancedSettingsInput, document: XrayAdvancedDocument?, error: String?)?
 
     var body: some View {
-        let validation = advancedValidation
+        let input = AdvancedSettingsInput(json: json, schemaVersion: schemaVersion, settings: store.settings)
+        let current = validated?.input == input ? validated : nil
 
         Form {
             Section {
@@ -157,7 +159,7 @@ private struct XrayAdvancedSettingsView: View {
                 Text("Client overrides only. Hop manages listeners and logging.")
             }
 
-            if let errorMessage = validation.errorMessage {
+            if let errorMessage = current?.error {
                 Section {
                     Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -169,28 +171,42 @@ private struct XrayAdvancedSettingsView: View {
         .toolbar {
             ToolbarItem(placement: .confirmationAction) {
                 Button("Save") {
-                    // Revalidate on the explicit save action so a stale
-                    // rendered button can never admit changed JSON.
-                    guard let document = advancedValidation.document else { return }
+                    guard let validated, validated.input == AdvancedSettingsInput(json: json, schemaVersion: schemaVersion, settings: store.settings),
+                          let document = validated.document else { return }
                     var settings = store.settings
                     settings.xrayAdvanced = document.isEmpty ? nil : document
                     store.settings = settings
                     dismiss()
                 }
-                .disabled(validation.document == nil)
+                .disabled(current?.document == nil)
             }
         }
         .onAppear {
             guard !didLoad else { return }
             didLoad = true
+            schemaVersion = store.settings.xrayAdvanced?.schemaVersion ?? XrayAdvancedDocument.currentSchemaVersion
             json = store.settings.xrayAdvanced?.jsonString ?? "{}"
         }
+        .task(id: input) {
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            let result = await Task.detached(priority: .userInitiated) {
+                input.validate()
+            }.value
+            guard !Task.isCancelled else { return }
+            validated = (input, result.document, result.error)
+        }
     }
+}
 
-    private var advancedValidation: (document: XrayAdvancedDocument?, errorMessage: String?) {
+struct AdvancedSettingsInput: Hashable {
+    let json: String
+    let schemaVersion: String
+    let settings: AppSettings
+
+    func validate() -> (document: XrayAdvancedDocument?, error: String?) {
         do {
-            let document = try XrayAdvancedDocument(jsonString: json)
-            var candidateSettings = store.settings
+            let document = try XrayAdvancedDocument(jsonString: json, schemaVersion: schemaVersion)
+            var candidateSettings = settings
             candidateSettings.xrayAdvanced = document.isEmpty ? nil : document
             if let issue = XrayConfigBuilder().validationIssues(
                 profiles: [],

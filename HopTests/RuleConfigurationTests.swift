@@ -18,12 +18,26 @@ final class RuleConfigurationTests: XCTestCase {
         XCTAssertEqual(configuration.rules, [edited, added, final])
 
         let newFinal = RoutingRule(kind: .final, value: "*", target: .direct)
-        configuration.saveRule(newFinal)
-        XCTAssertEqual(configuration.rules, [edited, added, final, newFinal])
+        XCTAssertFalse(configuration.saveRule(newFinal))
+        XCTAssertEqual(configuration.rules, [edited, added, final])
 
         var noFinal = RuleConfiguration(name: "Append", rules: [first])
         noFinal.saveRule(added)
         XCTAssertEqual(noFinal.rules, [first, added])
+        var converted = first
+        converted.kind = .final
+        XCTAssertTrue(noFinal.saveRule(converted))
+        XCTAssertEqual(noFinal.rules, [added, converted])
+    }
+
+    func testImportedFallbackRunsAfterExistingMatchers() {
+        let local = RoutingRule(kind: .domain, value: "blocked.example", target: .reject)
+        let oldFinal = RoutingRule(kind: .final, value: "*", target: .reject)
+        let incoming = RoutingRule(kind: .domain, value: "service.example", target: .selectedProxy)
+        let newFinal = RoutingRule(kind: .final, value: "*", target: .direct)
+        var config = RuleConfiguration(name: "Local", rules: [local, oldFinal])
+        config.prependImportedRules([incoming, newFinal, oldFinal])
+        XCTAssertEqual(config.rules, [incoming, local, newFinal])
     }
 
     func testRuleEditorValidatesMatchersWithThePinnedCoreBeforeSaving() async throws {
@@ -96,7 +110,7 @@ final class RuleConfigurationTests: XCTestCase {
         let directRules = rules.filter { ($0["outboundTag"] as? String) == "direct" }
 
         XCTAssertTrue(directRules.contains { ($0["ip"] as? [String])?.contains("geoip:cn") == true })
-        XCTAssertEqual(routing["domainStrategy"] as? String, "IPIfNonMatch")
+        XCTAssertEqual(routing["domainStrategy"] as? String, "IPOnDemand")
 
         let directDomains = directRules.flatMap { $0["domain"] as? [String] ?? [] }
         XCTAssertTrue(directDomains.contains("domain:push.apple.com"))
@@ -104,6 +118,31 @@ final class RuleConfigurationTests: XCTestCase {
 
         // Exact pinned-core parsing proves the pruned asset also includes the
         // PRIVATE entry used by the China preset.
+        try await XrayCoreClient.validate(configJSON: json)
+    }
+
+    func testCIDRRegexAndOpenPortRangesCompileForThePinnedRouter() async throws {
+        let pattern = #"^cdn[0-9]{1,3}\.example$"#
+        let json = try builder.build(
+            profiles: [], groups: [], selectedTarget: .direct, routingMode: .rule,
+            rules: [
+                RoutingRule(kind: .ipCIDR, value: "192.0.2.0/24", target: .reject),
+                RoutingRule(kind: .domainRegex, value: pattern, target: .reject),
+                RoutingRule(kind: .portRange, value: ":3000,4000:", target: .reject),
+                RoutingRule(kind: .sourcePortRange, value: ":42", target: .reject),
+            ],
+        )
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+        let routing = try XCTUnwrap(root["routing"] as? [String: Any])
+        let rules = try XCTUnwrap(routing["rules"] as? [[String: Any]])
+        XCTAssertEqual(routing["domainStrategy"] as? String, "IPOnDemand")
+        XCTAssertTrue(rules.contains { $0["domain"] as? [String] == ["regexp:" + pattern] })
+        XCTAssertTrue(rules.contains { $0["port"] as? String == "0-3000,4000-65535" })
+        XCTAssertTrue(rules.contains { $0["sourcePort"] as? String == "0-42" })
+        for invalid in [":", "42:41", "65536:", "80:90:100"] {
+            let rule = RoutingRule(kind: .portRange, value: invalid, target: .reject)
+            XCTAssertThrowsError(try builder.build(profiles: [], groups: [], selectedTarget: .direct, routingMode: .rule, rules: [rule]))
+        }
         try await XrayCoreClient.validate(configJSON: json)
     }
 
@@ -208,6 +247,14 @@ final class RuleConfigurationTests: XCTestCase {
             "deleting a group must drop rules that target it",
         )
         XCTAssertTrue(rules.contains { $0.target == .direct }, "unrelated rules must survive the repair")
+    }
+
+    @MainActor
+    func testDisabledGroupPreservesSelectedTarget() {
+        let store = HopStore(dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()))
+        store.selectedTarget = .direct
+        store.addGroup(ProxyGroup(name: "Inactive", type: .select, members: [.direct], isEnabled: false))
+        XCTAssertEqual(store.selectedTarget, .direct)
     }
 
     // MARK: - Legacy migration

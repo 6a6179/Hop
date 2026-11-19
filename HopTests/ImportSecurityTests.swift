@@ -19,6 +19,39 @@ final class ImportSecurityTests: XCTestCase {
         XCTAssertTrue(result.groups.allSatisfy { $0.members.count == nodeCount }, "Reject whole groups rather than silently changing their routing")
         XCTAssertEqual(result.groups.count, groupCount - 1)
         XCTAssertTrue(result.warnings.contains { $0.message.contains("group member limit exceeded") })
+        XCTAssertEqual(result.incompleteSubscriptionInventory, true)
+    }
+
+    func testRepeatedGroupFilterScansNewProfilesAndKeepsUnicodeMatching() throws {
+        let nodeCount = 400
+        let nodes = (0 ..< nodeCount).map { "Edge\($0) = trojan, edge.example.net, 443, password=secret" }
+        let groupCount = ImportPolicy.maxGroupFilterComparisons / nodeCount + 1
+        let groups = (0 ..< groupCount).map { "Group\($0) = url-test, policy-regex-filter=café" }
+        let additionalSections = [
+            "[Proxy]", "CAFE\u{301} 2 = trojan, another.example.net, 443, password=secret",
+            "[Proxy Group]", "Both = url-test, policy-regex-filter=café",
+        ]
+        let lines = ["[Proxy]", "Café 1 = trojan, one.example.net, 443, password=secret"] + nodes
+            + ["[Proxy Group]"] + groups + additionalSections
+        let result = try importService.importText(lines.joined(separator: "\n"))
+        let first = try XCTUnwrap(result.profiles.first)
+        let last = try XCTUnwrap(result.profiles.last)
+        XCTAssertEqual(result.groups.count, groupCount + 1)
+        XCTAssertTrue(result.groups.dropLast().allSatisfy { $0.members == [.profile(first.id)] })
+        XCTAssertEqual(result.groups.last?.members, [.profile(first.id), .profile(last.id)])
+        XCTAssertNotEqual(result.incompleteSubscriptionInventory, true)
+    }
+
+    func testDistinctNoMatchFiltersExhaustCumulativeBudget() throws {
+        let nodeCount = 400
+        let nodes = (0 ..< nodeCount).map { "Edge\($0) = trojan, edge.example.net, 443, password=secret" }
+        let groupCount = ImportPolicy.maxGroupFilterComparisons / nodeCount + 1
+        let groups = (0 ..< groupCount).map { "Group\($0) = url-test, policy-regex-filter=missing\($0)" }
+        let result = try importService.importText((["[Proxy]"] + nodes + ["[Proxy Group]"] + groups).joined(separator: "\n"))
+        XCTAssertEqual(result.groups.count, groupCount - 1)
+        XCTAssertTrue(result.groups.allSatisfy(\.members.isEmpty))
+        XCTAssertEqual(result.incompleteSubscriptionInventory, true)
+        XCTAssertTrue(result.warnings.contains { $0.message.contains("group filter work limit exceeded") })
     }
 
     func testReservedIPv4RangesDoNotBlockAdjacentPublicSubnets() {

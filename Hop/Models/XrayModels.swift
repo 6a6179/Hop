@@ -17,7 +17,7 @@ enum XrayAdvancedDocumentError: LocalizedError {
 /// A schema-pinned advanced override. `jsonString` intentionally represents
 /// only the editable Xray object; schema metadata remains in persisted Codable.
 struct XrayAdvancedDocument: Hashable, Codable, Sendable {
-    static let currentSchemaVersion = "v26.6.27"
+    static let currentSchemaVersion = XrayBridgeRequest.coreVersion
 
     var schemaVersion: String
     var values: [String: JSONValue]
@@ -28,6 +28,20 @@ struct XrayAdvancedDocument: Hashable, Codable, Sendable {
     ) {
         self.schemaVersion = schemaVersion
         self.values = values
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let storedVersion = try container.decode(String.self, forKey: .schemaVersion)
+        // Only these released schemas have a reviewed compatibility path in
+        // the builder. A future core bump must explicitly review November.
+        switch storedVersion {
+        case "v26.6.27", "v26.7.28":
+            schemaVersion = "v26.11.9"
+        default:
+            schemaVersion = storedVersion
+        }
+        values = try container.decode([String: JSONValue].self, forKey: .values)
     }
 
     init(

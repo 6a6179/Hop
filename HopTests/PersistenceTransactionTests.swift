@@ -25,7 +25,7 @@ final class PersistenceTransactionTests: XCTestCase {
         let original = sampleState()
         XCTAssertTrue(store.save(original))
         let committedFile = try Data(contentsOf: stateURL)
-        let committedSecrets = backend.allValues()
+        let committedSecrets = try backend.allValues()
 
         // Accept one immutable entry, then fail another: even partial staging
         // must leave both edited credentials and newly added nodes uncommitted.
@@ -48,7 +48,7 @@ final class PersistenceTransactionTests: XCTestCase {
         let store = makeStore(backend, authentication: authentication)
         let original = sampleState()
         XCTAssertTrue(store.save(original))
-        let committedSecrets = backend.allValues()
+        let committedSecrets = try backend.allValues()
         let backupURL = directory.appendingPathComponent("committed-state.json")
 
         // A directory at the destination fails the atomic file replacement,
@@ -58,7 +58,7 @@ final class PersistenceTransactionTests: XCTestCase {
         try FileManager.default.createDirectory(at: stateURL, withIntermediateDirectories: false)
         let changed = changedState(original)
         XCTAssertFalse(store.save(changed))
-        XCTAssertGreaterThan(backend.allValues().count, committedSecrets.count,
+        XCTAssertGreaterThan(try backend.allValues().count, committedSecrets.count,
                              "the failure must happen after staging new snapshot entries")
         for (key, value) in committedSecrets {
             XCTAssertEqual(backend.value(forKey: key), value)
@@ -93,6 +93,78 @@ final class PersistenceTransactionTests: XCTestCase {
         XCTAssertEqual(backend.value(forKey: stableKey), "changed-password")
         XCTAssertNil(backend.value(forKey: originalSnapshotKey))
         try assertRestores(makeStore(backend, authentication: authentication), changed)
+    }
+
+    @MainActor
+    func testUnavailableLegacyCredentialsPreserveStateUntilRetry() throws {
+        let backend = PersistenceFaultBackend()
+        let dataStore = makeStore(backend, authentication: .inMemory())
+        let original = sampleState()
+        for item in original.profiles.flatMap(\.keychainSecretItems) + original.subscriptions.compactMap(\.keychainURLItem) {
+            XCTAssertTrue(backend.setValue(item.value, forKey: item.key))
+        }
+        var legacy = original
+        legacy.profiles = legacy.profiles.map { $0.redactingSecrets() }
+        legacy.subscriptions = legacy.subscriptions.map { $0.redactingSecrets() }
+        let savedFile = try encode(legacy)
+        try savedFile.write(to: stateURL)
+        let savedSecrets = try backend.allValues()
+        backend.failNextBulkRead()
+
+        let blocked = HopStore(dataStore: dataStore)
+        XCTAssertTrue(blocked.libraryLoadFailed)
+        blocked.settings.appearance = .dark
+        blocked.persist()
+        blocked.flushPendingPersists()
+        XCTAssertEqual(try Data(contentsOf: stateURL), savedFile)
+        XCTAssertEqual(try backend.allValues(), savedSecrets)
+
+        let retried = HopStore(dataStore: dataStore)
+        XCTAssertFalse(retried.libraryLoadFailed)
+        XCTAssertEqual(retried.profiles, original.profiles)
+        XCTAssertEqual(retried.subscriptions, original.subscriptions)
+        retried.flushPendingPersists()
+    }
+
+    @MainActor
+    func testRetryRestoresCommittedLibraryAfterTemporaryCredentialFailure() throws {
+        let backend = PersistenceFaultBackend()
+        let dataStore = makeStore(backend, authentication: .inMemory())
+        let original = sampleState()
+        XCTAssertTrue(dataStore.save(original))
+        let committedFile = try Data(contentsOf: stateURL)
+        let committedSecrets = try backend.allValues()
+        backend.failNextBulkRead()
+
+        let blocked = HopStore(dataStore: dataStore)
+        XCTAssertTrue(blocked.libraryLoadFailed)
+        blocked.settings.appearance = .dark
+        blocked.flushPendingPersists()
+        XCTAssertEqual(try Data(contentsOf: stateURL), committedFile)
+        XCTAssertEqual(try backend.allValues(), committedSecrets)
+
+        let retried = HopStore(dataStore: dataStore)
+        XCTAssertFalse(retried.libraryLoadFailed)
+        XCTAssertEqual(retried.profiles, original.profiles)
+        XCTAssertEqual(retried.subscriptions, original.subscriptions)
+        XCTAssertEqual(retried.settings, original.settings)
+        retried.flushPendingPersists()
+    }
+
+    func testFailedKeyEnumerationRetriesPruningOnUnchangedSave() throws {
+        let backend = PersistenceFaultBackend()
+        let store = makeStore(backend, authentication: .inMemory())
+        let original = sampleState()
+        XCTAssertTrue(store.save(original))
+        let oldGeneration = try XCTUnwrap(readPayload().secretGeneration)
+        let key = HopAppDataStore.snapshotKey(original.profiles[0].keychainSecretItems[0].key, generation: oldGeneration)
+        let changed = changedState(original)
+        backend.failNextKeyEnumeration()
+        XCTAssertFalse(store.save(changed))
+        XCTAssertNotNil(backend.value(forKey: key))
+        XCTAssertTrue(store.save(changed))
+        XCTAssertNil(backend.value(forKey: key))
+        try assertRestores(store, changed)
     }
 
     func testRuntimeAliasChangesCannotChangeSavedCredentials() throws {
@@ -175,7 +247,7 @@ final class PersistenceTransactionTests: XCTestCase {
             // cannot accidentally hide a failure to authenticate its identity.
             XCTAssertTrue(backend.setValue("alternate-secret", forKey: HopAppDataStore.snapshotKey(key, generation: alternateGeneration)))
         }
-        let secretsBeforeTampering = backend.allValues()
+        let secretsBeforeTampering = try backend.allValues()
 
         for tamperGeneration in [true, false] {
             var tamperedPayload = payload
@@ -191,7 +263,7 @@ final class PersistenceTransactionTests: XCTestCase {
 
             XCTAssertNil(makeStore(backend, authentication: authentication).load())
             XCTAssertEqual(try Data(contentsOf: stateURL), tamperedFile)
-            XCTAssertEqual(backend.allValues(), secretsBeforeTampering)
+            XCTAssertEqual(try backend.allValues(), secretsBeforeTampering)
         }
     }
 
@@ -228,9 +300,8 @@ final class PersistenceTransactionTests: XCTestCase {
         try legacyFile.write(to: stateURL)
         authenticationBackend.rejectNextWrite { $0 == SecretStore.appStateAuthenticationKey }
 
-        // Loading still returns the intact legacy values, but its migration
-        // stops after writing the pending-key-backed sidecar, before commit.
-        try assertRestores(makeStore(backend, authentication: authentication), original)
+        // The partially migrated library stays read-only until retry.
+        XCTAssertThrowsError(try makeStore(backend, authentication: authentication).loadExisting())
         XCTAssertEqual(try Data(contentsOf: stateURL), legacyFile)
         XCTAssertTrue(authentication.appStateAuthenticationSecret().isEmpty)
         let signatureURL = TunnelConfigAuthenticator.signatureURL(forConfigURL: stateURL)
@@ -256,10 +327,10 @@ final class PersistenceTransactionTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: stateURL), legacyFile)
         XCTAssertEqual(try String(contentsOf: signatureURL, encoding: .utf8), signature)
         XCTAssertTrue(authentication.appStateAuthenticationSecret().isEmpty)
-        XCTAssertTrue(backend.allValues().isEmpty)
+        XCTAssertTrue(try backend.allValues().isEmpty)
     }
 
-    func testReplaceAllDoesNotPruneAfterFailedUpsertAndPreservesSnapshotKeys() {
+    func testReplaceAllDoesNotPruneAfterFailedUpsertAndPreservesSnapshotKeys() throws {
         let backend = PersistenceFaultBackend()
         let store = SecretStore(backend: backend)
         XCTAssertTrue(store.setValue("old-value", forKey: "old"))
@@ -267,9 +338,9 @@ final class PersistenceTransactionTests: XCTestCase {
         backend.rejectNextWrite { $0 == "new" }
 
         XCTAssertFalse(store.replaceAll(with: [("new", "new-value")], preservingKeys: ["snapshot"]))
-        XCTAssertEqual(backend.allValues(), ["old": "old-value", "snapshot": "saved-value"])
+        XCTAssertEqual(try backend.allValues(), ["old": "old-value", "snapshot": "saved-value"])
         XCTAssertTrue(store.replaceAll(with: [("new", "new-value")], preservingKeys: ["snapshot"]))
-        XCTAssertEqual(backend.allValues(), ["new": "new-value", "snapshot": "saved-value"])
+        XCTAssertEqual(try backend.allValues(), ["new": "new-value", "snapshot": "saved-value"])
     }
 
     @MainActor
@@ -468,6 +539,16 @@ private final class PersistenceFaultBackend: SecretBackend, @unchecked Sendable 
     private let lock = NSLock()
     private var failurePredicate: (@Sendable (String) -> Bool)?
     private var matchesUntilFailure = 0
+    private var rejectBulkRead = false
+    private var rejectKeyEnumeration = false
+
+    func failNextBulkRead() {
+        lock.withLock { rejectBulkRead = true }
+    }
+
+    func failNextKeyEnumeration() {
+        lock.withLock { rejectKeyEnumeration = true }
+    }
 
     func rejectNextWrite(afterMatches: Int = 0, matching: @escaping @Sendable (String) -> Bool) {
         lock.withLock {
@@ -493,8 +574,14 @@ private final class PersistenceFaultBackend: SecretBackend, @unchecked Sendable 
         storage.value(forKey: key)
     }
 
-    func allValues() -> [String: String] {
-        storage.allValues()
+    func allValues() throws -> [String: String] {
+        try lock.withLock {
+            if rejectBulkRead {
+                rejectBulkRead = false
+                throw CocoaError(.fileReadNoPermission)
+            }
+        }
+        return storage.allValues()
     }
 
     func removeValue(forKey key: String) -> Bool {
@@ -505,7 +592,13 @@ private final class PersistenceFaultBackend: SecretBackend, @unchecked Sendable 
         storage.removeAll()
     }
 
-    func allKeys() -> [String] {
-        storage.allKeys()
+    func allKeys() throws -> [String] {
+        try lock.withLock {
+            if rejectKeyEnumeration {
+                rejectKeyEnumeration = false
+                throw CocoaError(.fileReadNoPermission)
+            }
+        }
+        return storage.allKeys()
     }
 }

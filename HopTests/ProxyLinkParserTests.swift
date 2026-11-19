@@ -254,7 +254,8 @@ final class ProxyLinkParserTests: XCTestCase {
         let result = try importService.importText(payload)
 
         XCTAssertEqual(result.profiles.map(\.name), ["One"])
-        XCTAssertTrue(result.warnings.isEmpty)
+        XCTAssertEqual(result.incompleteSubscriptionInventory, true)
+        XCTAssertTrue(result.warnings.contains { $0.message.contains("line or token limit") })
     }
 
     func testPlainImportScannerPreservesLineBudgetBoundary() throws {

@@ -6,8 +6,19 @@ struct HopApp: App {
 
     var body: some Scene {
         WindowGroup {
-            AppShellView()
-                .environment(store)
+            if store.libraryLoadFailed {
+                LibraryRecoveryView(
+                    retry: { store = HopStore() },
+                    reset: {
+                        guard store.resetUnreadableLibrary() else { return false }
+                        store = HopStore()
+                        return !store.libraryLoadFailed
+                    },
+                )
+            } else {
+                AppShellView()
+                    .environment(store)
+            }
         }
     }
 }

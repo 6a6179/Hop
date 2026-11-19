@@ -148,6 +148,10 @@ struct ImportResult: Hashable, Codable {
     /// inventory. `nil` keeps older encoded values compatible and prevents an
     /// arbitrary empty/rules-only result from deleting a subscription snapshot.
     var validatedEmptySubscriptionSnapshot: Bool?
+    /// A parser omitted inventory records, so this result cannot replace a source snapshot.
+    var incompleteSubscriptionInventory: Bool?
+
+    static let incompleteInventoryMessage = "Some subscription records were skipped. A complete inventory is required to update this source."
 
     init(
         profiles: [ProxyProfile] = [],
@@ -275,6 +279,13 @@ struct ImportResult: Hashable, Codable {
         markingSubscriptionOwnership(subscriptionID: subscriptionID)
     }
 
+    func preparedForSubscription(_ id: SubscriptionSource.ID) -> ImportResult {
+        sanitizingNames()
+            .markingSubscriptionOwnership(subscriptionID: id)
+            .droppingRules()
+            .requiringSubscriptionGroupReview()
+    }
+
     func droppingRules() -> ImportResult {
         guard !rules.isEmpty else {
             return self
@@ -359,15 +370,14 @@ struct ImportResult: Hashable, Codable {
         budget -= keptGroups.count
         let keptRules = Array(rules.prefix(max(0, budget)))
 
-        var trimmedWarnings = warnings
-        trimmedWarnings.append(ImportWarning(message: "Import truncated to \(maxItems) items; \(total - maxItems) dropped."))
-
-        return ImportResult(
-            profiles: keptProfiles,
-            groups: keptGroups,
-            rules: keptRules,
-            warnings: trimmedWarnings,
-            validatedEmptySubscriptionSnapshot: validatedEmptySubscriptionSnapshot,
-        )
+        var result = self
+        result.profiles = keptProfiles
+        result.groups = keptGroups
+        result.rules = keptRules
+        if keptProfiles.count != profiles.count || keptGroups.count != groups.count {
+            result.incompleteSubscriptionInventory = true
+        }
+        result.warnings.insert(ImportWarning(message: "Import truncated to \(maxItems) items; \(total - maxItems) dropped."), at: 0)
+        return result
     }
 }

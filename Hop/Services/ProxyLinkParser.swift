@@ -11,6 +11,7 @@ enum ProxyLinkParseError: LocalizedError {
     case disallowedSubscriptionHost
     case payloadTooLarge
     case subscriptionUnavailable
+    case incompleteSubscriptionInventory
 
     var errorDescription: String? {
         switch self {
@@ -32,6 +33,8 @@ enum ProxyLinkParseError: LocalizedError {
             "Local, private, and metadata subscription addresses are blocked."
         case .payloadTooLarge:
             "Import exceeds the size limit."
+        case .incompleteSubscriptionInventory:
+            ImportResult.incompleteInventoryMessage
         case .subscriptionUnavailable:
             "Subscription download failed."
         }
@@ -52,9 +55,10 @@ struct ProxyImportService {
 
     /// Parses bounded local/subscription payloads away from UI actors. The
     /// parser is value-only; the sendable box never escapes this await.
-    func importTextOffMain(_ rawValue: String) async throws -> ImportResult {
+    func importTextOffMain(_ rawValue: String, subscriptionID: SubscriptionSource.ID? = nil) async throws -> ImportResult {
         let snapshot = try await Task.detached(priority: .userInitiated) {
-            try SendableImportResult(ProxyImportService().importText(rawValue))
+            let parsed = try ProxyImportService().importText(rawValue)
+            return SendableImportResult(subscriptionID.map { parsed.preparedForSubscription($0) } ?? parsed)
         }.value
         return snapshot.value
     }
@@ -74,10 +78,19 @@ struct ProxyImportService {
             return parseProxyConfiguration(decoded).sanitizingNames().truncated(to: ImportPolicy.maxImportedItems)
         }
 
-        let lines = importLines(from: decoded ?? trimmed)
+        let scan = importLines(from: decoded ?? trimmed)
         var result = ImportResult()
+        if scan.truncated {
+            result.incompleteSubscriptionInventory = true
+            result.warnings.append(ImportWarning(message: "The import exceeded the line or token limit; only the first part was read."))
+        }
 
-        for line in lines {
+        if scan.skippedTokens {
+            result.incompleteSubscriptionInventory = true
+            result.warnings.append(ImportWarning(message: "Skipped text that could not be read as a proxy link."))
+        }
+
+        for line in scan.links {
             do {
                 let profile = try parseProfileLink(line)
                 result.profiles.append(profile)
@@ -88,6 +101,7 @@ struct ProxyImportService {
                     ))
                 }
             } catch {
+                result.incompleteSubscriptionInventory = true
                 result.warnings.append(ImportWarning(
                     message: "\(ImportPolicy.redactForLog(line)): \(error.localizedDescription)",
                 ))
@@ -105,7 +119,7 @@ struct ProxyImportService {
         return result.sanitizingNames().truncated(to: ImportPolicy.maxImportedItems)
     }
 
-    func importSubscription(url: URL) async throws -> ImportResult {
+    func importSubscription(url: URL, subscriptionID: SubscriptionSource.ID? = nil) async throws -> ImportResult {
         try ImportPolicy.validateSubscriptionURL(url)
 
         var request = URLRequest(url: url)
@@ -120,7 +134,11 @@ struct ProxyImportService {
         guard let text = String(data: data, encoding: .utf8) else {
             throw ProxyLinkParseError.invalidURL
         }
-        return try await importTextOffMain(text)
+        let result = try await importTextOffMain(text, subscriptionID: subscriptionID)
+        if subscriptionID != nil, result.incompleteSubscriptionInventory == true {
+            throw ProxyLinkParseError.incompleteSubscriptionInventory
+        }
+        return result
     }
 
     private func parseProfileLink(_ rawValue: String) throws -> ProxyProfile {
@@ -137,7 +155,7 @@ struct ProxyImportService {
         case "hysteria2", "hy2":
             return try parseHysteria2(components: components)
         case "tuic":
-            throw ProxyLinkParseError.unsupportedScheme("TUIC is not supported by Xray-core v26.6.27")
+            throw ProxyLinkParseError.unsupportedScheme("TUIC is not supported by Xray-core \(XrayAdvancedDocument.currentSchemaVersion)")
         case "ss":
             return try parseShadowsocks(rawValue: trimmed, components: components)
         case "vmess":
@@ -149,7 +167,7 @@ struct ProxyImportService {
         case "wireguard", "wg":
             return try parseWireGuard(components: components)
         case "ssr", "snell":
-            throw ProxyLinkParseError.unsupportedScheme("\(scheme) is not supported by Xray-core v26.6.27")
+            throw ProxyLinkParseError.unsupportedScheme("\(scheme) is not supported by Xray-core \(XrayAdvancedDocument.currentSchemaVersion)")
         default:
             throw ProxyLinkParseError.unsupportedScheme(scheme)
         }
@@ -523,7 +541,7 @@ struct ProxyImportService {
         case "ws", "websocket":
             TransportOptions(type: .websocket, path: query["path"], host: query["host"], serviceName: nil)
         case "grpc":
-            TransportOptions(type: .grpc, path: nil, host: nil, serviceName: query["serviceName"] ?? query["service_name"])
+            TransportOptions(type: .grpc, host: query["authority"], serviceName: query["serviceName"] ?? query["service_name"])
         case "httpupgrade", "http-upgrade":
             TransportOptions(type: .httpUpgrade, path: query["path"], host: query["host"], serviceName: nil)
         case "xhttp", "splithttp":
@@ -554,7 +572,7 @@ struct ProxyImportService {
         case "ws", "websocket":
             TransportOptions(type: .websocket, path: path, host: host, serviceName: nil)
         case "grpc":
-            TransportOptions(type: .grpc, path: nil, host: nil, serviceName: path)
+            TransportOptions(type: .grpc, host: host, serviceName: path)
         case "h2", "http":
             TransportOptions(type: .xhttp, path: path, host: host, serviceName: nil, xhttpMode: "stream-up")
         case "httpupgrade", "http-upgrade":
@@ -650,7 +668,7 @@ struct ProxyImportService {
         throw ProxyLinkParseError.missingCredentials
     }
 
-    private func importLines(from text: String) -> [String] {
+    private func importLines(from text: String) -> (links: [String], truncated: Bool, skippedTokens: Bool) {
         // `components(...).prefix(...)` is still eager: a 5 MiB payload made
         // only of newlines or spaces can allocate millions of tiny Strings
         // before `prefix` applies. Scan once and stop as soon as either budget
@@ -663,13 +681,21 @@ struct ProxyImportService {
         var lineCount = 1
         var componentCount = 0
         var reachedLimit = false
+        var skippedTokens = false
+        var inComment = false
 
         func finishComponent(at end: String.Index) {
             componentCount += 1
             let token = text[componentStart ..< end]
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !token.isEmpty, URLComponents(string: token)?.scheme != nil {
-                imported.append(token)
+            if token.hasPrefix("#") || token.hasPrefix(";") || token.hasPrefix("//") {
+                inComment = true
+            } else if !inComment, !token.isEmpty {
+                if URLComponents(string: token)?.scheme != nil {
+                    imported.append(token)
+                } else {
+                    skippedTokens = true
+                }
             }
             reachedLimit = componentCount >= ImportPolicy.maxLines
         }
@@ -686,6 +712,7 @@ struct ProxyImportService {
                 }
                 componentStart = nextIndex
                 if isNewline {
+                    inComment = false
                     if lineCount >= ImportPolicy.maxLines {
                         reachedLimit = true
                         break
@@ -696,10 +723,11 @@ struct ProxyImportService {
             index = nextIndex
         }
 
-        if !reachedLimit {
-            finishComponent(at: scalars.endIndex)
+        if reachedLimit {
+            return (imported, true, skippedTokens)
         }
-        return imported
+        finishComponent(at: scalars.endIndex)
+        return (imported, false, skippedTokens)
     }
 
     private func looksLikeProxyConfiguration(_ text: String) -> Bool {
