@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// How a subscription refresh handles settings that authenticate the remote
@@ -33,15 +34,122 @@ struct SubscriptionSecurityChange: Hashable, Identifiable {
         case wireGuardPeerPolicy = "WireGuard peers and routing"
     }
 
-    let profileName: String
-    let fields: [Field]
+    struct Detail: Hashable {
+        let field: Field
+        let before: String
+        let after: String
+    }
 
-    var id: String {
-        profileName + "\u{0}" + fields.map(\.rawValue).joined(separator: "\u{0}")
+    let id: UUID
+    let profileName: String
+    let details: [Detail]
+    var fields: [Field] {
+        details.map(\.field)
+    }
+
+    // Include the original and proposed snapshots in equality. A second edit
+    // to the very same field while the sheet is open requires a fresh review.
+    // Digests never go into the displayed text or persistent logs.
+    private let originalDigest: Data
+    private let proposedDigest: Data
+
+    init(existing: ProxyProfile, imported: ProxyProfile, fields: [Field]) {
+        id = existing.id
+        profileName = ImportPolicy.sanitizeImportedName(imported.name, fallback: "Imported Node")
+        originalDigest = Self.snapshotDigest(existing)
+        proposedDigest = Self.snapshotDigest(imported)
+        details = fields.map { field in
+            let old = Self.description(of: field, in: existing)
+            var new = Self.description(of: field, in: imported, replacing: existing)
+            if new == "Configured", old == new {
+                new = "Replaced"
+            }
+            return Detail(field: field, before: old, after: new)
+        }
     }
 
     var summary: String {
         "\(profileName): \(fields.map(\.rawValue).joined(separator: ", "))"
+    }
+
+    private static func snapshotDigest(_ profile: ProxyProfile) -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(positiveInfinity: "Infinity", negativeInfinity: "-Infinity", nan: "NaN")
+        guard let data = try? encoder.encode(profile) else {
+            // If the model gains an unencodable value, invalidate the review
+            // on recheck rather than treating two encoding failures as equal.
+            return Data(UUID().uuidString.utf8)
+        }
+        return Data(SHA256.hash(data: data))
+    }
+
+    private static func safeText(_ text: String?) -> String {
+        guard let text, !text.isEmpty else { return "Not set" }
+        let collapsed = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let scalars = collapsed.unicodeScalars.filter {
+            ![.control, .format, .surrogate, .privateUse, .unassigned].contains($0.properties.generalCategory)
+        }
+        return String(String.UnicodeScalarView(scalars))
+    }
+
+    private static func publicFingerprint(_ value: String?, acceptsHex: Bool = false) -> String {
+        guard let value, !value.isEmpty else { return "Not set" }
+        var base64 = value.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        let bytes: Data
+        if acceptsHex, value.utf8.count == 64, value.utf8.allSatisfy({ (48 ... 57).contains($0) || (65 ... 70).contains($0) || (97 ... 102).contains($0) }) {
+            let hex = Array(value.utf8)
+            bytes = Data(stride(from: 0, to: hex.count, by: 2).compactMap { offset in
+                UInt8(String(decoding: hex[offset ... offset + 1], as: UTF8.self), radix: 16)
+            })
+        } else {
+            bytes = Data(base64Encoded: base64) ?? Data(value.utf8)
+        }
+        return "SHA-256 " + SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func description(of field: Field, in profile: ProxyProfile, replacing previous: ProxyProfile? = nil) -> String {
+        let tls = profile.security.tls
+        switch field {
+        case .securityLayer: return profile.security.layer.displayName
+        case .tlsServerName:
+            return safeText(profile.security.reality?.serverName ?? SubscriptionRefreshMerger.effectiveTLSServerName(profile))
+        case .tlsClientFingerprint: return safeText(profile.security.reality?.utlsFingerprint ?? tls?.utlsFingerprint)
+        case .tlsMinimumVersion: return safeText(tls?.minVersion)
+        case .tlsMaximumVersion: return safeText(tls?.maxVersion)
+        case .tlsCipherSuites: return safeText(tls?.cipherSuites)
+        case .certificatePins: return safeText(tls?.pinnedPeerCertSHA256)
+        case .verificationNames: return safeText(tls?.verifyPeerCertByName)
+        case .postQuantumCurves: return safeText(tls?.curvePreferences.joined(separator: ", "))
+        case .realityPublicKey: return publicFingerprint(profile.security.reality?.publicKey)
+        case .realityMLDSA: return publicFingerprint(profile.security.reality?.mldsa65Verify)
+        case .ech: return tls?.echConfigList?.isEmpty == false ? "Configured" : "Not set"
+        case .finalMaskTransportPolicy: return profile.transport.finalMask == nil ? "Not set" : "Configured"
+        case .vlessEncryption:
+            guard case let .vless(options) = profile.options, let encryption = options.normalizedEncryption, encryption != "none" else { return "Not set" }
+            return "Configured"
+        case .wireGuardPeerPolicy:
+            guard case let .wireGuard(options) = profile.options else { return "Not set" }
+            var previousPeers: [WireGuardPeer] = []
+            if case let .wireGuard(old) = previous?.options {
+                previousPeers = old.effectivePeers
+            }
+            return options.effectivePeers.enumerated().map { index, peer in
+                let endpoint = peer.endpoint ?? profile.endpoint
+                let ranges = peer.allowedIPs ?? ["0.0.0.0/0", "::/0"]
+                let psk = if peer.preSharedKey?.isEmpty != false {
+                    "Not set"
+                } else if let old = previousPeers.first(where: { $0.publicKey == peer.publicKey }), old.preSharedKey?.isEmpty == false, old.preSharedKey != peer.preSharedKey {
+                    "Replaced"
+                } else {
+                    "Configured"
+                }
+                let host = endpoint.host.contains(":") ? "[\(safeText(endpoint.host))]" : safeText(endpoint.host)
+                let routes = ranges.isEmpty ? "None" : safeText(ranges.joined(separator: ", "))
+                return "Peer \(index + 1) · \(host):\(endpoint.port)\nPublic key: \(publicFingerprint(peer.publicKey, acceptsHex: true))\nAllowed IPs: \(routes)\nPre-shared key: \(psk)"
+            }.joined(separator: "\n\n")
+        }
     }
 }
 
@@ -50,10 +158,9 @@ struct SubscriptionSecurityChange: Hashable, Identifiable {
 /// group members, routing rules, and the selected target stay valid — instead
 /// of appending duplicates.
 ///
-/// Matching is two-tier: exact identity (everything but the ID) first, then
-/// same-subscription name + protocol, so a node whose host or credentials
-/// changed is still recognized as the same logical node without letting a
-/// provider overwrite unrelated/manual nodes. When several existing items
+/// Exact records take precedence. Remaining records match within the same
+/// subscription, name and protocol, preferring the same endpoint before a
+/// changed endpoint. Every old record can supply only one surviving ID. When several existing items
 /// match, the selected one is preferred, then one referenced by a group, and
 /// surviving duplicates are collapsed with their references remapped.
 ///
@@ -100,64 +207,92 @@ struct SubscriptionRefreshMerger {
         )
     }
 
-    /// Detects manual-review fields using the same match-preference rules as
-    /// the merge. New nodes are not "changes"; their separate allow-insecure
-    /// gate remains responsible for legacy insecure imports.
-    func securityCriticalChanges(in importedProfiles: [ProxyProfile]) -> [SubscriptionSecurityChange] {
-        let referencedProfileIDs = referencedProfileIDs()
-        let exactIdentities = Set(profiles.map(SubscriptionProfileRefreshIdentity.init))
-        var indicesByNameAndProtocol: [NameAndProtocol: [Int]] = [:]
-        for index in profiles.indices where profiles[index].subscriptionID != nil {
-            indicesByNameAndProtocol[NameAndProtocol(profiles[index]), default: []].append(index)
-        }
-        var preferredByNameAndProtocol: [NameAndProtocol: Int] = [:]
-        for (key, indices) in indicesByNameAndProtocol {
-            preferredByNameAndProtocol[key] = preferredProfileIndex(
-                from: indices,
-                referencedProfileIDs: referencedProfileIDs,
-            )
-        }
-        return importedProfiles.compactMap { importedProfile in
-            guard !exactIdentities.contains(SubscriptionProfileRefreshIdentity(importedProfile)),
-                  importedProfile.subscriptionID != nil,
-                  let profileIndex = preferredByNameAndProtocol[NameAndProtocol(importedProfile)]
-            else {
-                return nil
-            }
+    /// Every consumer uses the same inventory plan. Reserving exact records and
+    /// then endpoints before name matches keeps a rotated sibling from stealing
+    /// a stable ID from an unchanged node later in the response.
+    private struct ProfileMatch {
+        let imported: ProxyProfile
+        var importedIDs: [UUID]
+        var existingIndex: Int?
+        var exactDuplicates: [Int] = []
+        var isExact = false
+    }
 
-            let fields = Self.securityCriticalFields(
-                existing: profiles[profileIndex],
-                imported: importedProfile,
-            )
-            guard !fields.isEmpty else { return nil }
-            return SubscriptionSecurityChange(
-                profileName: ImportPolicy.sanitizeImportedName(importedProfile.name, fallback: "Imported Node"),
-                fields: fields,
-            )
+    private struct NamedEndpoint: Hashable {
+        let name: NameAndProtocol
+        let host: String
+        let port: Int
+        init(_ profile: ProxyProfile) {
+            name = NameAndProtocol(profile)
+            host = profile.endpoint.host.lowercased()
+            port = profile.endpoint.port
         }
     }
 
-    /// Names of imported nodes that would *newly* disable TLS certificate
-    /// verification if this refresh were applied: allow-insecure nodes with no
-    /// exact or same-subscription name+protocol match among the existing
-    /// profiles. A matched node is never newly insecure — if the existing
-    /// profile is already insecure nothing changes, and if it is secure
-    /// the merge security policy blocks the flip (and logs the refusal).
-    /// Only genuinely new nodes are inserted verbatim, so refresh flows must
-    /// run the blocking insecure-TLS confirmation for these, same as initial
-    /// imports (see the AGENTS.md import-gate invariant).
-    static func newInsecureProfileNames(existing: [ProxyProfile], imported: [ProxyProfile]) -> [String] {
-        let exactIdentities = Set(existing.map(SubscriptionProfileRefreshIdentity.init))
-        let ownedNamesAndProtocols = Set(existing.compactMap {
-            $0.subscriptionID == nil ? nil : NameAndProtocol($0)
-        })
-        return imported
-            .filter { $0.security.tls?.allowInsecure == true }
-            .filter { profile in
-                !exactIdentities.contains(SubscriptionProfileRefreshIdentity(profile)) &&
-                    (profile.subscriptionID == nil || !ownedNamesAndProtocols.contains(NameAndProtocol(profile)))
+    private func profileMatches(_ imported: [ProxyProfile]) -> [ProfileMatch] {
+        guard !imported.isEmpty else { return [] }
+        let owners = Set(imported.map(\.subscriptionID))
+        let candidates = profiles.indices.filter { owners.contains(profiles[$0].subscriptionID) }
+        var matches: [ProfileMatch] = []
+        var importedIndices: [SubscriptionProfileRefreshIdentity: Int] = [:]
+        var exactIndices = Dictionary(grouping: candidates) { SubscriptionProfileRefreshIdentity(profiles[$0]) }
+        let referenced = referencedProfileIDs()
+        var claimed: Set<Int> = []
+        for profile in imported {
+            let identity = SubscriptionProfileRefreshIdentity(profile)
+            if let index = importedIndices[identity] {
+                matches[index].importedIDs.append(profile.id)
+                continue
             }
-            .map { ImportPolicy.sanitizeImportedName($0.name, fallback: "Imported Node") }
+            importedIndices[identity] = matches.count
+            let exact = exactIndices.removeValue(forKey: identity) ?? []
+            let preferred = preferredProfileIndex(from: exact, referencedProfileIDs: referenced)
+            claimed.formUnion(exact)
+            matches.append(ProfileMatch(imported: profile, importedIDs: [profile.id], existingIndex: preferred,
+                                        exactDuplicates: exact.filter { $0 != preferred }, isExact: preferred != nil))
+        }
+
+        /// Within each bucket prefer the selected or referenced ID, then the
+        /// first library entry. Pop from the end to avoid quadratic removals.
+        func priority(_ index: Int) -> Int {
+            let id = profiles[index].id
+            if selectedTarget == .profile(id) {
+                return 0
+            }
+            return referenced.contains(id) ? 1 : 2
+        }
+        let available = candidates.filter { !claimed.contains($0) && profiles[$0].subscriptionID != nil }
+            .sorted { (priority($0), $0) > (priority($1), $1) }
+        var byEndpoint = Dictionary(grouping: available) { NamedEndpoint(profiles[$0]) }
+        for index in matches.indices where matches[index].existingIndex == nil && matches[index].imported.subscriptionID != nil {
+            if let old = byEndpoint[NamedEndpoint(matches[index].imported)]?.popLast() {
+                matches[index].existingIndex = old
+                claimed.insert(old)
+            }
+        }
+        var byName = Dictionary(grouping: available.filter { !claimed.contains($0) }) { NameAndProtocol(profiles[$0]) }
+        for index in matches.indices where matches[index].existingIndex == nil && matches[index].imported.subscriptionID != nil {
+            matches[index].existingIndex = byName[NameAndProtocol(matches[index].imported)]?.popLast()
+        }
+        return matches
+    }
+
+    func securityCriticalChanges(in importedProfiles: [ProxyProfile]) -> [SubscriptionSecurityChange] {
+        profileMatches(importedProfiles).compactMap { match in
+            guard let index = match.existingIndex, !match.isExact else { return nil }
+            let existing = profiles[index]
+            let fields = Self.securityCriticalFields(existing: existing, imported: match.imported)
+            guard !fields.isEmpty else { return nil }
+            return SubscriptionSecurityChange(existing: existing, imported: match.imported, fields: fields)
+        }
+    }
+
+    static func newInsecureProfileNames(existing: [ProxyProfile], imported: [ProxyProfile]) -> [String] {
+        guard imported.contains(where: { $0.security.tls?.allowInsecure == true }) else { return [] }
+        return SubscriptionRefreshMerger(profiles: existing, groups: [], selectedTarget: nil)
+            .profileMatches(imported)
+            .filter { $0.existingIndex == nil && $0.imported.security.tls?.allowInsecure == true }
+            .map { ImportPolicy.sanitizeImportedName($0.imported.name, fallback: "Imported Node") }
     }
 
     // MARK: - Profiles
@@ -166,110 +301,34 @@ struct SubscriptionRefreshMerger {
         _ importedProfiles: [ProxyProfile],
         securityPolicy: SubscriptionRefreshSecurityPolicy,
     ) -> [ProxyProfile.ID: ProxyProfile.ID] {
-        var importedProfileIDMap: [ProxyProfile.ID: ProxyProfile.ID] = [:]
-        var indicesByIdentity: [SubscriptionProfileRefreshIdentity: [Int]] = [:]
-        var indicesByNameAndProtocol: [NameAndProtocol: [Int]] = [:]
-        var insertedProfileIDs: Set<ProxyProfile.ID> = []
-        var removedIndices: Set<Int> = []
-        // Groups don't change while profiles merge, so the set of
-        // group-referenced profile IDs is computed once for all candidates.
-        let referencedProfileIDs = referencedProfileIDs()
-        for index in profiles.indices {
-            indicesByIdentity[SubscriptionProfileRefreshIdentity(profiles[index]), default: []].append(index)
-            if profiles[index].subscriptionID != nil {
-                indicesByNameAndProtocol[NameAndProtocol(profiles[index]), default: []].append(index)
-            }
-        }
-        var preferredByNameAndProtocol: [NameAndProtocol: Int] = [:]
-        for (key, indices) in indicesByNameAndProtocol {
-            preferredByNameAndProtocol[key] = preferredProfileIndex(
-                from: indices,
-                referencedProfileIDs: referencedProfileIDs,
-            )
-        }
-
-        for importedProfile in importedProfiles {
-            let importedIdentity = SubscriptionProfileRefreshIdentity(importedProfile)
-            let nameAndProtocol = NameAndProtocol(importedProfile)
-            let exactMatches = indicesByIdentity[importedIdentity] ?? []
-            let profileIndex = exactMatches.isEmpty
-                ? (importedProfile.subscriptionID == nil ? nil : preferredByNameAndProtocol[nameAndProtocol])
-                : preferredProfileIndex(from: exactMatches, referencedProfileIDs: referencedProfileIDs)
-
-            if let profileIndex {
-                let existingProfile = profiles[profileIndex]
-                var updatedProfile = importedProfile
-                updatedProfile.id = existingProfile.id
-                // Advanced JSON is a local expert override, not subscription
-                // data. A matched refresh may update typed provider fields but
-                // must never erase or replace the user's local overlay.
-                updatedProfile.xrayAdvanced = existingProfile.xrayAdvanced
-                // A name-matched update comes from the subscription server.
-                // Automatic/unreviewed merges keep every security-critical
-                // value; a manual confirmation may opt into the reviewed
-                // values. allowInsecure is never allowed to flip on.
-                if exactMatches.isEmpty {
-                    updatedProfile = applyingSecurityPolicy(
-                        existing: existingProfile,
-                        imported: updatedProfile,
-                        policy: securityPolicy,
-                    )
+        var importedProfileIDMap: [UUID: UUID] = [:]
+        var inserted: [ProxyProfile] = []
+        for match in profileMatches(importedProfiles) {
+            var updated = match.imported
+            if let index = match.existingIndex {
+                let existing = profiles[index]
+                updated.id = existing.id
+                updated.xrayAdvanced = existing.xrayAdvanced
+                if !match.isExact {
+                    updated = applyingSecurityPolicy(existing: existing, imported: updated, policy: securityPolicy)
                 }
-
-                let existingIdentity = SubscriptionProfileRefreshIdentity(existingProfile)
-                let updatedIdentity = SubscriptionProfileRefreshIdentity(updatedProfile)
-                if existingIdentity != updatedIdentity {
-                    indicesByIdentity[existingIdentity]?.removeAll { $0 == profileIndex }
-                    indicesByIdentity[updatedIdentity, default: []].append(profileIndex)
-                }
-                profiles[profileIndex] = updatedProfile
-                importedProfileIDMap[importedProfile.id] = updatedProfile.id
-                preferredByNameAndProtocol[nameAndProtocol] = profileIndex
-
-                if !exactMatches.isEmpty {
-                    let duplicateIndices = exactMatches.filter { $0 != profileIndex }
-                    for duplicateIndex in duplicateIndices {
-                        profileIDReplacements[profiles[duplicateIndex].id] = updatedProfile.id
-                    }
-                    removedIndices.formUnion(duplicateIndices)
-                    indicesByIdentity[importedIdentity] = [profileIndex]
-                    indicesByNameAndProtocol[nameAndProtocol]?.removeAll { removedIndices.contains($0) }
+                profiles[index] = updated
+                for duplicate in match.exactDuplicates {
+                    profileIDReplacements[profiles[duplicate].id] = existing.id
                 }
             } else {
-                let index = profiles.endIndex
-                profiles.append(importedProfile)
-                insertedProfileIDs.insert(importedProfile.id)
-                indicesByIdentity[importedIdentity, default: []].append(index)
-                if importedProfile.subscriptionID != nil {
-                    indicesByNameAndProtocol[nameAndProtocol, default: []].append(index)
-                    preferredByNameAndProtocol[nameAndProtocol] = index
-                }
-                importedProfileIDMap[importedProfile.id] = importedProfile.id
+                inserted.append(updated)
+            }
+            for id in match.importedIDs {
+                importedProfileIDMap[id] = updated.id
             }
         }
-
         if !profileIDReplacements.isEmpty {
-            for id in Array(profileIDReplacements.keys) {
-                profileIDReplacements[id] = resolvedReplacement(
-                    for: profileIDReplacements[id] ?? id,
-                    in: profileIDReplacements,
-                )
-            }
             let removedIDs = Set(profileIDReplacements.keys)
             profiles.removeAll { removedIDs.contains($0.id) }
             replaceTargetReferences(profileIDMap: profileIDReplacements)
         }
-        for id in Array(importedProfileIDMap.keys) {
-            importedProfileIDMap[id] = resolvedReplacement(
-                for: importedProfileIDMap[id] ?? id,
-                in: profileIDReplacements,
-            )
-        }
-        if !insertedProfileIDs.isEmpty {
-            let inserted = profiles.filter { insertedProfileIDs.contains($0.id) }
-            profiles = Array(inserted.reversed()) + profiles.filter { !insertedProfileIDs.contains($0.id) }
-        }
-
+        profiles.insert(contentsOf: inserted.reversed(), at: 0)
         return importedProfileIDMap
     }
 
@@ -302,8 +361,14 @@ struct SubscriptionRefreshMerger {
                 "\(imported.name): \(existing.security.layer.displayName) → \(security.layer.displayName) blocked pending review.",
             )
             security = existing.security
+            // Keeping the old TLS layer also keeps its endpoint-derived name.
+            if security.layer == .tls, Self.normalizedOptional(security.tls?.serverName) == nil,
+               existing.endpoint.host != imported.endpoint.host
+            {
+                security.tls?.serverName = Self.effectiveTLSServerName(existing)
+            }
         } else {
-            preserveSecurityCriticalTLS(existing: existing, importedName: imported.name, security: &security)
+            preserveSecurityCriticalTLS(existing: existing, imported: imported, security: &security)
             preserveSecurityCriticalReality(existing: existing, importedName: imported.name, security: &security)
         }
 
@@ -340,7 +405,7 @@ struct SubscriptionRefreshMerger {
 
     private mutating func preserveSecurityCriticalTLS(
         existing: ProxyProfile,
-        importedName: String,
+        imported: ProxyProfile,
         security: inout ProxySecurity,
     ) {
         let existingTLS = existing.security.tls
@@ -348,7 +413,7 @@ struct SubscriptionRefreshMerger {
             guard existingTLS != nil else { return }
             security.tls = existingTLS
             securityDowngradeWarnings.append(
-                "\(importedName): TLS verification removal blocked pending review.",
+                "\(imported.name): TLS verification removal blocked pending review.",
             )
             return
         }
@@ -361,29 +426,36 @@ struct SubscriptionRefreshMerger {
             guard Self.normalizedOptional(existingValue) != Self.normalizedOptional(importedValue) else { return }
             importedValue = existingValue
             securityDowngradeWarnings.append(
-                "\(importedName): kept \(label); refresh change needs review.",
+                "\(imported.name): kept \(label); refresh change needs review.",
             )
         }
 
         preservingString(existingTLS?.pinnedPeerCertSHA256, &importedTLS.pinnedPeerCertSHA256, label: "certificate pins")
         preservingString(existingTLS?.verifyPeerCertByName, &importedTLS.verifyPeerCertByName, label: "certificate verification names")
         preservingString(existingTLS?.echConfigList, &importedTLS.echConfigList, label: "ECH")
-        preservingString(existingTLS?.serverName, &importedTLS.serverName, label: "TLS server name")
+        if existing.security.layer == .tls {
+            if Self.effectiveTLSServerName(existing) != Self.effectiveTLSServerName(imported) {
+                importedTLS.serverName = Self.effectiveTLSServerName(existing)
+                securityDowngradeWarnings.append("\(imported.name): kept TLS server name; refresh change needs review.")
+            }
+        } else {
+            preservingString(existingTLS?.serverName, &importedTLS.serverName, label: "TLS server name")
+        }
         preservingString(existingTLS?.utlsFingerprint, &importedTLS.utlsFingerprint, label: "TLS client fingerprint")
         preservingString(existingTLS?.maxVersion, &importedTLS.maxVersion, label: "maximum TLS version")
         preservingString(existingTLS?.cipherSuites, &importedTLS.cipherSuites, label: "TLS cipher suites")
 
-        if Self.postQuantumCurves(existingTLS?.curvePreferences ?? []) != Self.postQuantumCurves(importedTLS.curvePreferences) {
+        if Self.changedPostQuantumPolicy(existingTLS?.curvePreferences ?? [], importedTLS.curvePreferences) {
             importedTLS.curvePreferences = existingTLS?.curvePreferences ?? []
             securityDowngradeWarnings.append(
-                "\(importedName): kept post-quantum TLS curves; refresh change needs review.",
+                "\(imported.name): kept post-quantum TLS curves; refresh change needs review.",
             )
         }
 
         if Self.normalizedOptional(importedTLS.minVersion) != Self.normalizedOptional(existingTLS?.minVersion) {
             importedTLS.minVersion = existingTLS?.minVersion
             securityDowngradeWarnings.append(
-                "\(importedName): kept minimum TLS version; refresh change needs review.",
+                "\(imported.name): kept minimum TLS version; refresh change needs review.",
             )
         }
         security.tls = importedTLS
@@ -442,7 +514,7 @@ struct SubscriptionRefreshMerger {
             }
         }
 
-        appendTLSChange(existing.security.tls?.serverName, imported.security.tls?.serverName, field: .tlsServerName)
+        appendTLSChange(effectiveTLSServerName(existing), effectiveTLSServerName(imported), field: .tlsServerName)
         appendTLSChange(existing.security.tls?.utlsFingerprint, imported.security.tls?.utlsFingerprint, field: .tlsClientFingerprint)
         appendTLSChange(existing.security.tls?.minVersion, imported.security.tls?.minVersion, field: .tlsMinimumVersion)
         appendTLSChange(existing.security.tls?.maxVersion, imported.security.tls?.maxVersion, field: .tlsMaximumVersion)
@@ -456,7 +528,7 @@ struct SubscriptionRefreshMerger {
         if normalizedOptional(existing.security.tls?.echConfigList) != normalizedOptional(imported.security.tls?.echConfigList) {
             fields.append(.ech)
         }
-        if postQuantumCurves(existing.security.tls?.curvePreferences ?? []) != postQuantumCurves(imported.security.tls?.curvePreferences ?? []) {
+        if changedPostQuantumPolicy(existing.security.tls?.curvePreferences ?? [], imported.security.tls?.curvePreferences ?? []) {
             fields.append(.postQuantumCurves)
         }
         if existing.transport.finalMask != imported.transport.finalMask {
@@ -509,10 +581,13 @@ struct SubscriptionRefreshMerger {
         return value.contains("mlkem") || value.contains("kyber")
     }
 
-    private static func postQuantumCurves(_ values: [String]) -> [String] {
-        values
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            .filter { isPostQuantumCurve($0) }
+    fileprivate static func effectiveTLSServerName(_ profile: ProxyProfile) -> String? {
+        normalizedOptional(profile.security.tls?.serverName) ?? (profile.security.layer == .tls ? profile.endpoint.host : nil)
+    }
+
+    private static func changedPostQuantumPolicy(_ old: [String], _ new: [String]) -> Bool {
+        guard old.contains(where: isPostQuantumCurve) || new.contains(where: isPostQuantumCurve) else { return false }
+        return old.map { $0.lowercased() } != new.map { $0.lowercased() }
     }
 
     private static func normalizedOptional(_ value: String?) -> String? {
@@ -1001,24 +1076,30 @@ private struct NameAndProtocol: Hashable {
 /// Everything that identifies a subscription node except its stable ID; two
 /// profiles with equal identities are the same imported node.
 private struct SubscriptionProfileRefreshIdentity: Hashable {
-    var subscriptionID: UUID?
-    var name: String
-    var host: String
-    var port: Int
-    var proto: ProxyProtocol
-    var options: ProtocolOptions
-    var security: ProxySecurity
-    var transport: TransportOptions
+    private static let canonicalID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+    let bytes: Data
 
     init(_ profile: ProxyProfile) {
-        subscriptionID = profile.subscriptionID
-        name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        host = profile.endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        port = profile.endpoint.port
-        proto = profile.proto
-        options = profile.options
-        security = profile.security
-        transport = profile.transport
+        var canonical = profile
+        canonical.id = Self.canonicalID
+        canonical.xrayAdvanced = nil // Matched records retain local overrides.
+        canonical.name = canonical.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        canonical.endpoint.host = canonical.endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if case var .wireGuard(wg) = canonical.options, let peers = wg.peers {
+            // Peer IDs address local Keychain items. They do not distinguish
+            // two provider records carrying identical peer credentials/routes.
+            wg.peers = peers.map { peer in
+                var canonicalPeer = peer
+                canonicalPeer.id = Self.canonicalID
+                return canonicalPeer
+            }
+            canonical.options = .wireGuard(wg)
+        }
+        // Swift String equality folds different UTF-8 spellings of passwords
+        // and paths. A byte-exact comparison keeps such records independent.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        bytes = (try? encoder.encode(canonical)) ?? Data(UUID().uuidString.utf8)
     }
 }
 

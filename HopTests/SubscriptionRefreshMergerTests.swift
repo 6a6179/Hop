@@ -123,6 +123,118 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         XCTAssertTrue(store.profiles.isEmpty)
     }
 
+    func testDistinctSameNameNodesRetainIDsAndRequireSeparateInsecureApproval() {
+        let owner = UUID()
+        let a = trojanProfile(name: "Main", host: "a.example", subscriptionID: owner)
+        let b = trojanProfile(name: "Main", host: "b.example", subscriptionID: owner)
+        var duplicate = b
+        duplicate.id = UUID()
+        var merger = SubscriptionRefreshMerger(profiles: [], groups: [], selectedTarget: nil)
+        merger.merge(ImportResult(profiles: [a, b, duplicate]), replacingSnapshotFor: owner)
+        XCTAssertEqual(Set(merger.profiles.map(\.id)), [a.id, b.id])
+
+        var rotatedB = b
+        rotatedB.id = UUID()
+        rotatedB.options = .trojan(TrojanOptions(password: "rotated"))
+        var unchangedA = a
+        unchangedA.id = UUID()
+        var newInsecure = b
+        newInsecure.id = UUID()
+        newInsecure.endpoint.host = "c.example"
+        newInsecure.security.tls?.allowInsecure = true
+        let incoming = [newInsecure, rotatedB, unchangedA]
+        XCTAssertEqual(SubscriptionRefreshMerger.newInsecureProfileNames(existing: merger.profiles, imported: incoming), ["Main"])
+        merger.merge(ImportResult(profiles: incoming), replacingSnapshotFor: owner)
+        XCTAssertEqual(merger.profiles.count, 3)
+        XCTAssertEqual(merger.profiles.first { $0.id == b.id }?.options, rotatedB.options)
+        XCTAssertEqual(merger.profiles.first { $0.id == a.id }?.endpoint, a.endpoint)
+    }
+
+    func testSameNameNodesWithDifferentPasswordBytesRemainIndependent() {
+        let owner = UUID()
+        var first = trojanProfile(name: "Main", host: "same.example", subscriptionID: owner)
+        first.options = .trojan(TrojanOptions(password: "caf\u{e9}"))
+        var second = first
+        second.id = UUID()
+        second.options = .trojan(TrojanOptions(password: "cafe\u{301}"))
+        var merger = SubscriptionRefreshMerger(profiles: [], groups: [], selectedTarget: nil)
+        merger.merge(ImportResult(profiles: [first, second]), replacingSnapshotFor: owner)
+        XCTAssertEqual(Set(merger.profiles.map(\.id)), [first.id, second.id])
+    }
+
+    func testWireGuardReviewShowsPeerRoutesAndKeepsPSKsPrivate() throws {
+        var existing = ProxyProfile(name: "WG", endpoint: Endpoint(host: "vpn.example", port: 51820),
+                                    options: .wireGuard(WireGuardOptions(privateKey: "local-secret", peerPublicKey: "key",
+                                                                         preSharedKey: "old-secret", localAddress: ["10.0.0.2"])), security: .none)
+        existing.subscriptionID = UUID()
+        var imported = existing
+        imported.id = UUID()
+        guard case var .wireGuard(options) = imported.options else { return XCTFail("Expected WireGuard") }
+        options.allowedIPs = ["10.0.0.0/8"]
+        options.preSharedKey = "new-secret"
+        imported.options = .wireGuard(options)
+        let merger = SubscriptionRefreshMerger(profiles: [existing], groups: [], selectedTarget: nil)
+        let detail = try XCTUnwrap(merger.securityCriticalChanges(in: [imported]).first?.details.first)
+        XCTAssertTrue(detail.before.contains("0.0.0.0/0, ::/0"))
+        XCTAssertTrue(detail.after.contains("10.0.0.0/8"))
+        XCTAssertTrue(detail.after.contains("Replaced"))
+        XCTAssertFalse((detail.before + detail.after).contains("-secret"))
+    }
+
+    func testProtectedPQFallbackAndEndpointDerivedVerificationName() throws {
+        let owner = UUID()
+        var current = trojanProfile(name: "Main", host: "before.example", subscriptionID: owner)
+        current.security.tls?.serverName = nil
+        current.security.tls?.curvePreferences = ["X25519MLKEM768"]
+        var proposed = current
+        proposed.id = UUID()
+        proposed.endpoint.host = "after.example"
+        proposed.security.tls?.curvePreferences.append("X25519")
+
+        var merger = SubscriptionRefreshMerger(profiles: [current], groups: [], selectedTarget: nil)
+        let changes = try XCTUnwrap(merger.securityCriticalChanges(in: [proposed]).first)
+        XCTAssertEqual(Set(changes.fields), [.tlsServerName, .postQuantumCurves])
+        let name = try XCTUnwrap(changes.details.first { $0.field == .tlsServerName })
+        XCTAssertEqual(name.before, "before.example")
+        XCTAssertEqual(name.after, "after.example")
+        merger.merge(ImportResult(profiles: [proposed]))
+        let stored = try XCTUnwrap(merger.profiles.first)
+        XCTAssertEqual(stored.endpoint.host, "after.example")
+        XCTAssertEqual(stored.security.tls?.serverName, "before.example")
+        XCTAssertEqual(stored.security.tls?.curvePreferences, ["X25519MLKEM768"])
+        merger.merge(ImportResult(profiles: [proposed]), securityPolicy: .applyReviewedChanges)
+        XCTAssertNil(merger.profiles.first?.security.tls?.serverName)
+        XCTAssertEqual(merger.profiles.first?.security.tls?.curvePreferences, ["X25519MLKEM768", "X25519"])
+
+        var noTLS = proposed
+        noTLS.security = .none
+        var removedLayer = SubscriptionRefreshMerger(profiles: [current], groups: [], selectedTarget: nil)
+        removedLayer.merge(ImportResult(profiles: [noTLS]))
+        XCTAssertEqual(removedLayer.profiles.first?.security.tls?.serverName, "before.example")
+    }
+
+    @MainActor
+    func testApprovalBindsChangedValuesAndRedactsSecrets() throws {
+        let source = SubscriptionSource(name: "Provider", url: "https://provider.example/sub")
+        var saved = trojanProfile(name: "Main", host: "before.example", subscriptionID: source.id)
+        saved.security.tls?.echConfigList = "old-sensitive"
+        var proposed = saved
+        proposed.id = UUID()
+        proposed.security.tls?.echConfigList = "new-sensitive"
+        let store = HopStore(profiles: [saved], subscriptions: [source], dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()))
+        guard case let .needsSecurityConfirmation(result, reviewed, names) = store.reviewSubscriptionRefresh(ImportResult(profiles: [proposed]), for: source) else { return XCTFail("Expected review") }
+        let detail = try XCTUnwrap(reviewed.first?.details.first)
+        XCTAssertEqual(detail.before, "Configured")
+        XCTAssertEqual(detail.after, "Replaced")
+        saved.security.tls?.echConfigList = "third-sensitive"
+        store.updateProfile(saved)
+        guard case let .needsSecurityConfirmation(_, next, _) = store.confirmSecuritySubscriptionRefresh(result, reviewedChanges: reviewed, reviewedInsecureProfileNames: names, for: source) else {
+            return XCTFail("A different old value for the same field must invalidate approval")
+        }
+        XCTAssertNotEqual(next, reviewed)
+        XCTAssertEqual(store.profiles.first?.security.tls?.echConfigList, "third-sensitive")
+    }
+
     func testNameAndProtocolMatchUpdatesProfileInPlace() {
         let subscriptionID = UUID()
         let existing = trojanProfile(name: "Tokyo", host: "old.example.com", subscriptionID: subscriptionID)

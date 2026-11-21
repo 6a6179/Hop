@@ -1,0 +1,143 @@
+diff --git a/proxy/dns/dns.go b/proxy/dns/dns.go
+index 1b15b0c..847ae58 100644
+--- a/proxy/dns/dns.go
++++ b/proxy/dns/dns.go
+@@ -271,7 +271,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
+ 						return err
+ 					}
+ 				} else {
+-					go h.handleIPQuery(ctx, id, qType, domain, writer, timer)
++					if err := h.startIPQuery(ctx, id, qType, domain, writer, timer); err != nil {
++						return err
++					}
+ 				}
+ 			case RuleAction_Direct:
+ 				if err := connWriter.WriteMessage(b); err != nil {
+@@ -310,6 +312,37 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
+ 	return nil
+ }
+ 
++// LookupIP has no caller cancellation parameter. Share the bound across all
++// handlers, including a previous core whose queries are still unwinding.
++const maxConcurrentDNSLookups = 16
++
++var dnsLookupSlots = make(chan struct{}, maxConcurrentDNSLookups)
++
++func tryAcquireDNSLookup() bool {
++	select {
++	case dnsLookupSlots <- struct{}{}:
++		return true
++	default:
++		return false
++	}
++}
++
++func releaseDNSLookup() { <-dnsLookupSlots }
++
++func (h *Handler) startIPQuery(ctx context.Context, id uint16, qType dnsmessage.Type, domain string, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) error {
++	if err := ctx.Err(); err != nil {
++		return err
++	}
++	if !tryAcquireDNSLookup() {
++		return h.rejectNonIPQuery(id, qType, domain, writer, dnsmessage.RCodeServerFailure)
++	}
++	go func() {
++		defer releaseDNSLookup()
++		h.handleIPQuery(ctx, id, qType, domain, writer, timer)
++	}()
++	return nil
++}
++
+ func (h *Handler) handleIPQuery(ctx context.Context, id uint16, qType dnsmessage.Type, domain string, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) {
+ 	if ctx.Err() != nil {
+ 		return
+@@ -406,8 +439,7 @@ func (h *Handler) handleIPQuery(ctx context.Context, id uint16, qType dnsmessage
+ }
+ 
+ func (h *Handler) rejectNonIPQuery(id uint16, qType dnsmessage.Type, domain string, writer dns_proto.MessageWriter, rCode dnsmessage.RCode) error {
+-	domainT := strings.TrimSuffix(domain, ".")
+-	if domainT == "" {
++	if domain == "" {
+ 		return errors.New("empty domain name")
+ 	}
+ 	b := buf.New()
+diff --git a/proxy/dns/hop_lookup_limit_test.go b/proxy/dns/hop_lookup_limit_test.go
+new file mode 100644
+index 0000000..9392716
+--- /dev/null
++++ b/proxy/dns/hop_lookup_limit_test.go
+@@ -0,0 +1,74 @@
++package dns
++
++import (
++	"context"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/net"
++	"github.com/xtls/xray-core/features/dns"
++	"golang.org/x/net/dns/dnsmessage"
++)
++
++func TestHopDNSBoundsUnfinishedLookupsAcrossHandlers(t *testing.T) {
++	started := make(chan struct{}, maxConcurrentDNSLookups)
++	release := make(chan struct{})
++	var resume sync.Once
++	unblock := func() { resume.Do(func() { close(release) }) }
++	defer unblock()
++
++	resolver := hopDNSLookup{lookup: func(string, dns.IPOption) ([]net.IP, uint32, error) {
++		started <- struct{}{}
++		<-release
++		return nil, 0, dns.ErrEmptyResponse
++	}}
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	old := Handler{client: resolver}
++	var discarded hopDNSReply
++	for i := range maxConcurrentDNSLookups {
++		if err := old.startIPQuery(ctx, uint16(i), dnsmessage.TypeA, "example.test.", &discarded, nil); err != nil {
++			t.Fatal(err)
++		}
++	}
++	for range maxConcurrentDNSLookups {
++		select {
++		case <-started:
++		case <-time.After(time.Second):
++			t.Fatal("admitted lookup did not start")
++		}
++	}
++
++	// Stopping an old handler does not free its outstanding resolver work.
++	cancel()
++	fresh := Handler{client: resolver}
++	var busy hopDNSReply
++	if err := fresh.startIPQuery(context.Background(), 102, dnsmessage.TypeAAAA, ".", &busy, nil); err != nil {
++		t.Fatal(err)
++	}
++	if len(busy.packets) != 1 {
++		t.Fatal("overload did not produce an immediate response")
++	}
++	var msg dnsmessage.Message
++	if err := msg.Unpack(busy.packets[0]); err != nil {
++		t.Fatal(err)
++	}
++	if !msg.Response || msg.RCode != dnsmessage.RCodeServerFailure || msg.ID != 102 ||
++		len(msg.Questions) != 1 || msg.Questions[0].Type != dnsmessage.TypeAAAA || msg.Questions[0].Name.String() != "." {
++		t.Fatalf("unexpected overload response: %+v", msg)
++	}
++
++	unblock()
++	deadline := time.Now().Add(time.Second)
++	for len(dnsLookupSlots) != 0 {
++		if time.Now().After(deadline) {
++			t.Fatal("completed lookup retained a slot")
++		}
++		time.Sleep(time.Millisecond)
++	}
++	if !tryAcquireDNSLookup() {
++		t.Fatal("did not resume admission")
++	}
++	releaseDNSLookup()
++}

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum RuntimeEnvironment {
@@ -36,8 +37,7 @@ enum RuntimeEnvironment {
             return url
         }
 
-        let fallback = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Hop", isDirectory: true)
+        let fallback = privateSupportDirectory
         try? FileManager.default.createDirectory(at: fallback, withIntermediateDirectories: true)
         return fallback
     }
@@ -59,8 +59,19 @@ enum RuntimeEnvironment {
         }
     }
 
+    private static var privateSupportDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Hop", isDirectory: true)
+    }
+
+    /// The library belongs to the app. Re-signing can change which shared
+    /// containers are accessible without changing the profile Keychain.
     static var stateFileURL: URL {
-        sharedContainerURL.appendingPathComponent(stateFileName)
+        privateSupportDirectory.appendingPathComponent("Library", isDirectory: true).appendingPathComponent(stateFileName)
+    }
+
+    static var legacyStateFileURLs: [URL] {
+        ([privateSupportDirectory] + [appGroupContainerURL].compactMap(\.self)).map { $0.appendingPathComponent(stateFileName) }
     }
 
     static var tunnelLogFileURL: URL {
@@ -313,7 +324,26 @@ private enum TunnelConfigStoreError: LocalizedError {
     }
 }
 
-struct SharedTunnelLogStore {
+struct ExtensionLogCursor: Codable, Equatable, Sendable {
+    struct FileIdentity: Codable, Equatable, Sendable {
+        let inode: UInt64
+        let birthSeconds: Int
+        let birthNanoseconds: Int
+    }
+
+    let file: FileIdentity?
+    let offset: UInt64
+    /// Rotation atomically replaces the file while retaining its tail. The last
+    /// complete timestamped line locates the overlap in the replacement.
+    let lastLine: String?
+}
+
+struct ExtensionLogBatch: Sendable {
+    let lines: [String]
+    let cursor: ExtensionLogCursor?
+}
+
+struct SharedTunnelLogStore: Sendable {
     /// Upper bound on how much of the tunnel log the app reads into memory. The
     /// extension rotates the file, but the reader is bounded independently so a
     /// large file can never exhaust app memory or freeze the log UI.
@@ -331,36 +361,52 @@ struct SharedTunnelLogStore {
     }
 
     func readLines() throws -> [String] {
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            return []
-        }
-
-        let data = try boundedTail(of: url)
-        guard let text = String(data: data, encoding: .utf8) else {
-            return []
-        }
-
-        return text
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+        try readBatch(after: nil).lines
     }
 
-    /// Reads at most `maxReadBytes` from the end of the file, dropping any
-    /// partial leading line so callers only ever see whole entries.
-    private func boundedTail(of url: URL) throws -> Data {
-        let size = try (FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
-        guard size > Self.maxReadBytes else {
-            return try Data(contentsOf: url)
+    func readBatch(after previous: ExtensionLogCursor?) throws -> ExtensionLogBatch {
+        let handle: FileHandle
+        do {
+            handle = try FileHandle(forReadingFrom: url)
+        } catch CocoaError.fileReadNoSuchFile {
+            return ExtensionLogBatch(lines: [], cursor: previous)
         }
-
-        let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
-        try handle.seek(toOffset: UInt64(size - Self.maxReadBytes))
-        let tail = try handle.readToEnd() ?? Data()
-        if let newline = tail.firstIndex(of: 0x0A) {
-            return tail.suffix(from: tail.index(after: newline))
+        var info = stat()
+        guard fstat(handle.fileDescriptor, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            throw CocoaError(.fileReadUnknown)
         }
-        return tail
+        let file = ExtensionLogCursor.FileIdentity(
+            inode: info.st_ino, birthSeconds: info.st_birthtimespec.tv_sec, birthNanoseconds: info.st_birthtimespec.tv_nsec,
+        )
+        let size = UInt64(info.st_size)
+        let resume = previous.flatMap { $0.file == file && $0.offset <= size ? $0.offset : nil }
+        let tailStart = size - min(size, UInt64(Self.maxReadBytes))
+        let start = max(tailStart, resume ?? 0)
+        // Inspect the preceding byte only when clipping a long tail. It may
+        // land in the middle of a UTF-8 code point or exactly on a boundary.
+        let clipped = start > 0 && start != resume
+        let readStart = clipped ? start - 1 : start
+        try handle.seek(toOffset: readStart)
+        let data = try size > readStart ? handle.read(upToCount: Int(size - readStart)) ?? Data() : Data()
+        let completeCount = data.lastIndex(of: 0x0A).map { data.index(after: $0) } ?? 0
+        var complete = data.prefix(completeCount)
+        if clipped, let newline = complete.firstIndex(of: 0x0A) {
+            complete = complete.suffix(from: complete.index(after: newline))
+        }
+        let lines = complete.split(separator: 0x0A).compactMap { line -> String? in
+            let text = String(decoding: line, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        }
+        var newLines = lines[...]
+        if resume == nil, let anchor = previous?.lastLine, let index = lines.lastIndex(of: anchor) {
+            newLines = lines.suffix(from: lines.index(after: index))
+        }
+        let cursor = ExtensionLogCursor(
+            file: file,
+            offset: readStart + UInt64(completeCount),
+            lastLine: lines.last ?? (resume != nil ? previous?.lastLine : nil),
+        )
+        return ExtensionLogBatch(lines: Array(newLines), cursor: cursor)
     }
 }

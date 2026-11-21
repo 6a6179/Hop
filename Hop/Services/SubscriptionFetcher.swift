@@ -1,146 +1,192 @@
 import Foundation
 
-/// Downloads a subscription body with the import policy enforced at the
-/// transport layer:
-///
-/// - Every redirect target is re-applied to
-///   `ImportPolicy.validateSubscriptionURL`, so a subscription server cannot
-///   bounce the fetch to a cleartext or private/loopback/metadata destination
-///   (SSRF, CWE-918). Refusing a redirect lets the task complete with the 3xx
-///   response, which then fails the 2xx check below.
-/// - The body is accumulated chunk-by-chunk and the transfer is cancelled the
-///   moment it exceeds `ImportPolicy.maxPayloadBytes`, so a malicious server
-///   can neither force a large allocation nor stream without bound. (A
-///   chunk-level delegate replaces the previous per-byte `AsyncBytes` loop,
-///   which paid an async-iterator hop and a `Data.append` per byte.)
-/// - Non-2xx responses fail with `subscriptionUnavailable`.
-///
-/// One instance serves one fetch. State is guarded by a lock: delegate
-/// callbacks, continuation registration, and task cancellation may run on
-/// different queues. All shared state stays behind the lock.
-final class SubscriptionFetcher: NSObject, @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data, Error>?
-    private var received = Data()
-    private var failure: Error?
+/// Each hop resolves once. Only the resulting checked IPs reach the socket,
+/// while Host, TLS SNI, and certificate verification use the original URL.
+/// One deadline covers DNS, connection attempts, redirects and the whole body.
+final class SubscriptionFetcher: @unchecked Sendable {
+    typealias Resolver = @Sendable (String) -> [String]?
+    typealias Connector = @Sendable (String, SubscriptionOrigin) throws -> any SubscriptionConnection
 
-    static func fetch(_ request: URLRequest, configuration: URLSessionConfiguration = .ephemeral) async throws -> Data {
+    private let queue = DispatchQueue(label: "cat.string.hop.subscription-fetch")
+    private let resolve: Resolver
+    private let connect: Connector
+    private let deadline: DispatchTime
+    private let cookies = URLSessionConfiguration.ephemeral.httpCookieStorage
+
+    // All mutable state and all connection callbacks are serialized on queue.
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var finished = false
+    private var connection: (any SubscriptionConnection)?
+    private var decoder = SubscriptionHTTPResponse()
+    private var redirects = 0
+    private var timeout: DispatchSourceTimer?
+    private var fallback: DispatchWorkItem?
+
+    private init(resolve: @escaping Resolver, connect: @escaping Connector, deadline: DispatchTime) {
+        self.deadline = deadline
+        self.resolve = resolve
+        self.connect = connect
+    }
+
+    static func fetch(
+        _ request: URLRequest,
+        timeout: TimeInterval = ImportPolicy.subscriptionRequestTimeout,
+        resolve: @escaping Resolver = { ImportPolicy.resolvedAddresses($0) },
+        connect: @escaping Connector = { try SubscriptionTLSConnection(address: $0, origin: $1) },
+    ) async throws -> Data {
         try Task.checkCancellation()
-        let fetcher = SubscriptionFetcher()
-        let session = URLSession(configuration: configuration, delegate: fetcher, delegateQueue: nil)
-        let task = session.dataTask(with: request)
-        defer { session.finishTasksAndInvalidate() }
+        guard let url = request.url else { throw ProxyLinkParseError.invalidURL }
+        let origin = try SubscriptionOrigin(url)
+        let duration = max(0, min(ImportPolicy.subscriptionRequestTimeout, timeout, request.timeoutInterval))
+        let fetcher = SubscriptionFetcher(resolve: resolve, connect: connect, deadline: .now() + duration)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                fetcher.lock.lock()
-                // Cancellation may complete the URLSession task before this
-                // continuation is installed. Keep that outcome instead of waiting forever.
-                if let failure = fetcher.failure {
-                    fetcher.lock.unlock()
-                    continuation.resume(throwing: failure)
-                    return
+                fetcher.queue.async {
+                    guard !fetcher.finished else { return continuation.resume(throwing: CancellationError()) }
+                    fetcher.continuation = continuation
+                    let expiry = DispatchSource.makeTimerSource(flags: .strict, queue: fetcher.queue)
+                    expiry.setEventHandler { [weak fetcher] in fetcher?.finish(.failure(URLError(.timedOut))) }
+                    expiry.schedule(deadline: fetcher.deadline, leeway: .nanoseconds(0))
+                    fetcher.timeout = expiry
+                    expiry.resume()
+                    fetcher.startHop(origin)
                 }
-                fetcher.continuation = continuation
-                fetcher.lock.unlock()
-                task.resume()
             }
         } onCancel: {
-            fetcher.fail(CancellationError())
-            task.cancel()
+            fetcher.queue.async { fetcher.finish(.failure(CancellationError())) }
         }
     }
 
-    /// Records `error` as the fetch outcome (first failure wins) so the
-    /// completion callback reports it instead of the generic cancellation the
-    /// accompanying `cancel()` produces.
-    private func fail(_ error: Error) {
-        lock.lock()
-        defer { lock.unlock() }
-        if failure == nil {
-            failure = error
-        }
-    }
-}
-
-extension SubscriptionFetcher: URLSessionDataDelegate {
-    func urlSession(
-        _: URLSession,
-        task _: URLSessionTask,
-        willPerformHTTPRedirection _: HTTPURLResponse,
-        newRequest request: URLRequest,
-        completionHandler: @escaping @Sendable (URLRequest?) -> Void,
-    ) {
-        guard let url = request.url, (try? ImportPolicy.validateSubscriptionURL(url)) != nil else {
-            completionHandler(nil)
-            return
-        }
-        completionHandler(request)
-    }
-
-    func urlSession(
-        _: URLSession,
-        dataTask _: URLSessionDataTask,
-        didReceive response: URLResponse,
-        completionHandler: @escaping @Sendable (URLSession.ResponseDisposition) -> Void,
-    ) {
-        if let http = response as? HTTPURLResponse {
-            guard (200 ..< 300).contains(http.statusCode) else {
-                fail(ProxyLinkParseError.subscriptionUnavailable)
-                completionHandler(.cancel)
-                return
-            }
-            // A valid prefix may contain complete proxy lines. Reconciling that
-            // prefix as a snapshot would remove the rest of the provider's nodes.
-            if http.statusCode == 206 || http.statusCode == 226 || http.value(forHTTPHeaderField: "Content-Range") != nil {
-                fail(ProxyLinkParseError.incompleteSubscriptionInventory)
-                completionHandler(.cancel)
-                return
+    private func startHop(_ origin: SubscriptionOrigin) {
+        decoder = SubscriptionHTTPResponse()
+        let resolve = resolve
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let result = Result { try ImportPolicy.subscriptionAddresses(for: origin.url, resolve: resolve) }
+            guard let self else { return }
+            queue.async {
+                guard !self.finished else { return }
+                switch result {
+                case let .success(addresses): self.open(origin, addresses: addresses[...])
+                case let .failure(error): self.finish(.failure(error))
+                }
             }
         }
-        if response.expectedContentLength > Int64(ImportPolicy.maxPayloadBytes) {
-            fail(ProxyLinkParseError.payloadTooLarge)
-            completionHandler(.cancel)
-            return
-        }
-        if response.expectedContentLength > 0 {
-            // The declared length has already passed the hard cap above, so
-            // reserving it avoids repeated growth/copies without trusting the
-            // server with an unbounded allocation.
-            lock.lock()
-            received.reserveCapacity(Int(response.expectedContentLength))
-            lock.unlock()
-        }
-        completionHandler(.allow)
     }
 
-    func urlSession(_: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        lock.lock()
-        let remaining = max(0, ImportPolicy.maxPayloadBytes - received.count)
-        let exceeded = data.count > remaining
-        if !exceeded {
-            received.append(data)
-        }
-        lock.unlock()
-
-        if exceeded {
-            fail(ProxyLinkParseError.payloadTooLarge)
-            dataTask.cancel()
+    private func open(_ origin: SubscriptionOrigin, addresses: ArraySlice<String>) {
+        do {
+            guard DispatchTime.now() < deadline else { throw URLError(.timedOut) }
+            guard let address = addresses.first else { throw URLError(.cannotConnectToHost) }
+            let next = try connect(address, origin)
+            connection = next
+            if addresses.count > 1 {
+                // A black-holed first address must leave time for the other family.
+                let retry = DispatchWorkItem { [weak self, weak next] in
+                    guard let self, let next, connection === next else { return }
+                    closeConnection()
+                    open(origin, addresses: addresses.dropFirst())
+                }
+                fallback = retry
+                queue.asyncAfter(deadline: .now() + 3, execute: retry)
+            }
+            next.start(on: queue) { [weak self, weak next] error in
+                guard let self, let next, connection === next else { return }
+                fallback?.cancel()
+                fallback = nil
+                if let error {
+                    closeConnection()
+                    if addresses.count > 1 {
+                        open(origin, addresses: addresses.dropFirst())
+                    } else {
+                        finish(.failure(error))
+                    }
+                    return
+                }
+                guard DispatchTime.now() < deadline else { return finish(.failure(URLError(.timedOut))) }
+                next.send(requestData(for: origin)) { [weak self, weak next] error in
+                    guard let self, let next, connection === next else { return }
+                    if let error {
+                        finish(.failure(error))
+                    } else {
+                        receive(from: next, origin: origin)
+                    }
+                }
+            }
+        } catch {
+            finish(.failure(error))
         }
     }
 
-    func urlSession(_: URLSession, task _: URLSessionTask, didCompleteWithError error: Error?) {
-        lock.lock()
-        let continuation = continuation
-        self.continuation = nil
-        let outcome: Result<Data, Error> = if let failure {
-            .failure(failure)
-        } else if let error {
-            .failure(error)
+    private func requestData(for origin: SubscriptionOrigin) -> Data {
+        var fields = [
+            "GET \(origin.requestTarget) HTTP/1.1", "Host: \(origin.authority)",
+            "Accept: */*", "Accept-Encoding: gzip, deflate", "Connection: close",
+            "User-Agent: Hop/\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1")",
+        ]
+        if let components = URLComponents(url: origin.url, resolvingAgainstBaseURL: true), let user = components.user {
+            let credentials = Data("\(user):\(components.password ?? "")".utf8).base64EncodedString()
+            fields.append("Authorization: Basic " + credentials)
+        }
+        if let matches = cookies?.cookies(for: origin.url),
+           let cookie = HTTPCookie.requestHeaderFields(with: matches)["Cookie"],
+           !cookie.contains(where: \.isNewline)
+        {
+            fields.append("Cookie: " + cookie)
+        }
+        return Data((fields.joined(separator: "\r\n") + "\r\n\r\n").utf8)
+    }
+
+    private func receive(from socket: any SubscriptionConnection, origin: SubscriptionOrigin) {
+        socket.receive { [weak self, weak socket] data, ended, error in
+            guard let self, let socket, connection === socket else { return }
+            if let error {
+                return finish(.failure(error))
+            }
+            do {
+                guard let result = try decoder.receive(data ?? Data(), endOfStream: ended) else {
+                    return receive(from: socket, origin: origin)
+                }
+                switch result {
+                case let .body(data):
+                    finish(.success(data))
+                case let .redirect(location):
+                    guard redirects < 20, let url = URL(string: location, relativeTo: origin.url)?.absoluteURL,
+                          let next = try? SubscriptionOrigin(url) else { throw ProxyLinkParseError.subscriptionUnavailable }
+                    for line in decoder.setCookieHeaders {
+                        let incoming = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": line], for: origin.url)
+                        cookies?.setCookies(incoming, for: origin.url, mainDocumentURL: origin.url)
+                    }
+                    redirects += 1
+                    closeConnection()
+                    startHop(next)
+                }
+            } catch {
+                finish(.failure(error))
+            }
+        }
+    }
+
+    private func closeConnection() {
+        fallback?.cancel()
+        fallback = nil
+        connection?.cancel()
+        connection = nil
+    }
+
+    private func finish(_ result: Result<Data, Error>) {
+        guard !finished else { return }
+        finished = true
+        timeout?.cancel()
+        timeout = nil
+        closeConnection()
+        let pending = continuation
+        continuation = nil
+        // The OS can delay the timer's delivery while the device is busy or
+        // suspended. A body processed after the deadline must still be rejected.
+        if case .success = result, DispatchTime.now() >= deadline {
+            pending?.resume(throwing: URLError(.timedOut))
         } else {
-            .success(received)
+            pending?.resume(with: result)
         }
-        lock.unlock()
-
-        continuation?.resume(with: outcome)
     }
 }

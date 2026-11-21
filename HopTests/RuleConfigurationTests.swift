@@ -4,6 +4,54 @@ import XCTest
 final class RuleConfigurationTests: XCTestCase {
     private let builder = XrayConfigBuilder()
 
+    func testEditingExistingFinalAndDormantRulesPreservesTheirOrder() {
+        let final = RoutingRule(kind: .final, value: "*", target: .reject)
+        let dormant = RoutingRule(kind: .domain, value: "example.org", target: .direct)
+        var configuration = RuleConfiguration(name: "Legacy", rules: [final, dormant])
+        var changedFinal = final
+        changedFinal.target = .selectedProxy
+        XCTAssertTrue(configuration.saveRule(changedFinal))
+        var changedDormant = dormant
+        changedDormant.value = "example.net"
+        XCTAssertTrue(configuration.saveRule(changedDormant))
+        XCTAssertEqual(configuration.rules, [changedFinal, changedDormant])
+    }
+
+    func testRuleEditorExplainsUnavailableMatchersAndChecksSniffing() async throws {
+        let proto = RuleEditorDraft(rule: RoutingRule(kind: .protocolSniff, value: "tls", target: .direct))
+        XCTAssertNotNil(proto.availabilityIssue(sniffTraffic: false))
+        do {
+            try await proto.validate(sniffTraffic: false)
+            XCTFail("Saved a protocol rule with sniffing disabled")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("sniffing"))
+        }
+        XCTAssertNil(proto.availabilityIssue(sniffTraffic: true))
+        try await proto.validate(sniffTraffic: true)
+        for kind in [RoutingRuleKind.wifiSSID, .wifiBSSID, .networkType, .networkIsConstrained, .networkIsExpensive] {
+            XCTAssertFalse(kind.isAvailableInXray)
+            XCTAssertNotNil(RuleEditorDraft(rule: RoutingRule(kind: kind, value: "example", target: .direct)).availabilityIssue(sniffTraffic: true))
+        }
+        for kind in [RoutingRuleKind.ipIsPrivate, .sourceIPIsPrivate] {
+            let negative = RuleEditorDraft(rule: RoutingRule(kind: kind, value: "false", target: .direct))
+            XCTAssertNotNil(negative.availabilityIssue(sniffTraffic: true))
+            let positive = RuleEditorDraft(rule: RoutingRule(kind: kind, value: "YES", target: .direct))
+            XCTAssertNil(positive.availabilityIssue(sniffTraffic: true))
+        }
+    }
+
+    func testLiteralMatcherKindsDoNotAcceptOtherXrayExpressions() async throws {
+        var rules = [RoutingRule(kind: .domainKeyword, value: "full:example.org", target: .reject)]
+        for kind in [RoutingRuleKind.ipCIDR, .sourceIPCIDR] {
+            rules.append(RoutingRule(kind: kind, value: "192.0.2.3,2001:db8::/32", target: .direct))
+            let invalid = RoutingRule(kind: kind, value: "geoip:private", target: .reject)
+            XCTAssertThrowsError(try builder.build(profiles: [], groups: [], selectedTarget: .direct, routingMode: .rule, rules: [invalid]))
+        }
+        let json = try builder.build(profiles: [], groups: [], selectedTarget: .direct, routingMode: .rule, rules: rules)
+        XCTAssertTrue(json.contains("keyword:full:example.org"))
+        try await XrayCoreClient.validate(configJSON: json)
+    }
+
     func testEditorInsertsNewMatchersBeforeFinalWithoutReorderingExistingRules() {
         let first = RoutingRule(kind: .domainSuffix, value: "first.example", target: .direct)
         let final = RoutingRule(kind: .final, value: "*", target: .reject)

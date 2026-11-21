@@ -157,6 +157,7 @@ struct AppShellView: View {
 }
 
 struct LibraryRecoveryView: View {
+    let message: String?
     let retry: () -> Void
     let reset: () -> Bool
     @State private var confirmingReset = false
@@ -166,7 +167,7 @@ struct LibraryRecoveryView: View {
         ContentUnavailableView {
             Label("Library Unavailable", systemImage: "lock.doc")
         } description: {
-            Text("Hop couldn’t open your saved library. Unlock your device and try again.")
+            Text(message ?? "Hop couldn’t open your saved library. Unlock your device and try again.")
         } actions: {
             Button("Retry", action: retry)
                 .buttonStyle(.borderedProminent)

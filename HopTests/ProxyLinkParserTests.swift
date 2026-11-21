@@ -113,6 +113,71 @@ final class ProxyLinkParserTests: XCTestCase {
         }
     }
 
+    func testStandardHysteria2AuthorityAndPin() throws {
+        let pin = String(repeating: "a1", count: 32)
+        let profile = try parse("hy2://site:p%40ss@edge.example/?pinSHA256=\(pin)#Edge")
+        XCTAssertEqual(profile.endpoint, Endpoint(host: "edge.example", port: 443))
+        XCTAssertEqual(profile.security.tls?.pinnedPeerCertSHA256, pin)
+        guard case let .hysteria2(options) = profile.options else { return XCTFail("Expected Hysteria 2") }
+        XCTAssertEqual(options.password, "site:p@ss")
+        XCTAssertNil(options.ports)
+
+        let hopping = try parse("hysteria2://p%3Aword@[2001:db8::1]:5000-5002,8443/?pcs=\(pin)#Hops")
+        guard case let .hysteria2(hops) = hopping.options else { return XCTFail("Expected Hysteria 2") }
+        XCTAssertEqual(hopping.name, "Hops")
+        XCTAssertEqual(hopping.endpoint.port, 5000)
+        XCTAssertEqual(hops.ports, "5000-5002,8443")
+        XCTAssertEqual(hops.password, "p:word")
+        XCTAssertEqual(hopping.security.tls?.pinnedPeerCertSHA256, pin)
+    }
+
+    func testMalformedHysteriaPortListDoesNotApplyOrExposeUserinfo() throws {
+        let text = """
+        hy2://sensitive-value@edge.example:443,70000/?insecure=1
+        hy2://valid@other.example
+        """
+        let result = try importService.importText(text)
+        XCTAssertEqual(result.profiles.count, 1)
+        XCTAssertEqual(result.incompleteSubscriptionInventory, true)
+        XCTAssertFalse(result.warnings.map(\.message).joined().contains("sensitive-value"))
+        for invalid in ["0", "65536", "3-2", "1,,2", "443-", "+443", ""] {
+            XCTAssertThrowsError(try parse("hy2://key@edge.example:\(invalid)/"))
+        }
+    }
+
+    func testVMessConfigurationKeepsKeyedPasswordOutOfCipherAndRedactedState() throws {
+        let id = "11111111-1111-4111-8111-111111111111"
+        for (arguments, cipher) in [
+            ("password=\(id), tls=true", "auto"),
+            ("password=\(id), method=chacha20-poly1305", "chacha20-poly1305"),
+            ("aes-128-gcm, \(id)", "aes-128-gcm"),
+            ("aes-128-gcm, password=\(id)", "aes-128-gcm"),
+            ("method=aes-128-gcm, \(id)", "aes-128-gcm"),
+        ] {
+            let profile = try parse("[Proxy]\nNode = vmess, edge.example, 443, \(arguments)")
+            XCTAssertEqual(profile.options, .vmess(VMessOptions(uuid: id, security: cipher, alterID: 0)))
+            let redacted = try JSONEncoder().encode(profile.redactingSecrets())
+            XCTAssertFalse(String(decoding: redacted, as: UTF8.self).contains(id))
+        }
+    }
+
+    func testWireGuardImportChecksFallbackAndExplicitPeerHosts() throws {
+        XCTAssertThrowsError(try parse("wg://key@bad..host:51820?publickey=peer&address=10.0.0.2%2F32"))
+        let profile = ProxyProfile(
+            name: "WG",
+            endpoint: Endpoint(host: "valid.example", port: 51820),
+            options: .wireGuard(WireGuardOptions(
+                privateKey: "key",
+                peerPublicKey: "peer",
+                localAddress: ["10.0.0.2/32"],
+                peers: [WireGuardPeer(publicKey: "peer", endpoint: Endpoint(host: "bad..host", port: 51820))],
+            )),
+            security: .none,
+        )
+        let link = try XCTUnwrap(ProxyShareLink.shareLink(for: profile))
+        XCTAssertThrowsError(try parse(link))
+    }
+
     func testRejectsTUICBecausePinnedXrayHasNoOutbound() {
         XCTAssertThrowsError(
             try parse("tuic://22222222-2222-4222-8222-222222222222:secret@tuic.example.net:443?sni=tuic.example.net&congestion_control=bbr#TUIC"),

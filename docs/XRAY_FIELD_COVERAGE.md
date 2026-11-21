@@ -40,10 +40,10 @@ Existing public VLESS and Trojan nodes configured with plaintext transport can s
 | WebSocket | Host, path, headers, heartbeat | PROXY-protocol acceptance is listener-only. |
 | gRPC | Authority, service name, multi-mode, idle/health timeouts, permit-without-stream, user agent | Initial window stays at `0` (the core default), as required by Hop's iOS policy. |
 | HTTP Upgrade | Host, path, headers | PROXY-protocol acceptance is listener-only. |
-| XHTTP | Host, path, mode; headers, padding, request/session/sequence placement, chunk/post limits, post timing and XMux fields | `noSSEHeader`, `scMaxBufferedPosts`, `scStreamUpServerSecs`, `serverMaxHeaderBytes` are server-only. Separate `downloadSettings` needs a typed, reviewed secondary connection. Outer client fields are normalized into `extra`; ignored/colliding placements are rejected. |
+| XHTTP | Host, path, mode; headers, padding, request/session/sequence placement, chunk/post limits, post timing and XMux fields | Hop limits XMux to one physical connection. Leave `maxConcurrency` unset or zero. `noSSEHeader`, `scMaxBufferedPosts`, `scStreamUpServerSecs`, `serverMaxHeaderBytes` are server-only. Separate `downloadSettings` needs a typed, reviewed secondary connection. Outer client fields are normalized into `extra`; ignored/colliding placements are rejected. |
 | mKCP | MTU, TTI, upload/download capacity, congestion-window multiplier, send window | Old `header` and `seed` were removed. Buffer caps still apply. |
 | Hysteria | Version/auth from protocol fields, UDP idle timeout | Bandwidth and congestion use FinalMask QUIC parameters. Port hopping uses a UDP `udphop` layer on the same endpoint. |
-| Mux | Enabled, concurrency, XUDP concurrency, UDP/443 policy | Concurrency caps still apply. |
+| Mux | Enabled, concurrency, XUDP concurrency, UDP/443 policy | Each TCP Mux worker honors concurrency 1–8. With Mux enabled, zero or omitted TCP concurrency selects 8. Separate XUDP workers support up to 16. |
 | Socket | TCP Fast Open, domain strategy, dialer proxy, keepalive interval/idle, interface, address/port strategy, Happy Eyeballs, XHTTP penetration | See unavailable options below. |
 | FinalMask | TCP/UDP mask lists and QUIC parameters; per-type settings | Payload/window/layer caps and existing secret/network-destination validation apply. QUIC incoming streams stay at `0`. |
 

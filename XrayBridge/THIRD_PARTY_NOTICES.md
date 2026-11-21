@@ -4,7 +4,15 @@
 [XTLS/Xray-core](https://github.com/XTLS/Xray-core) `v26.11.9` at commit
 `676eaf66f8f05d4d558ee7a74b4736623d3feeb9`, licensed under the Mozilla Public
 License 2.0. The complete, reproducible transitive Go module inventory is
-recorded in `go.mod` and `go.sum`.
+recorded in `go.mod` and `go.sum`. The IPA includes the generated
+[`Acknowledgments.txt`](Acknowledgments.txt) in the host app. It contains
+license texts for Go, Go Mobile and dependencies used for both iOS
+architectures, plus credits for the pruned routing data.
+
+Regenerate it with `GOTOOLCHAIN=go1.27.4 scripts/generate-acknowledgments.py`
+from the repository root. Use `--check` to verify the checked-in bytes. The
+engine build repeats the check against the patched Xray module and release
+packaging compares the resource in the IPA with the checked-in copy.
 
 Hop builds the following changes to the upstream source.
 
@@ -15,6 +23,10 @@ Hop builds the following changes to the upstream source.
 - `0005-xdns-resolver-dial.patch` makes the XDNS client dial its configured resolvers directly.
 - `0006-reclaim-completed-dns-flows.patch` reclaims completed DNS exchanges on the tunnel's virtual resolvers so their UDP flows do not exhaust the iOS flow limit.
 - `0007-dns-terminal-errors.patch` returns SERVFAIL to the client when an upstream DNS lookup fails, allowing the client to retry.
+- `0008-isolate-udp-routes-and-rollback-core.patch` routes UDP destinations independently and cleans up partially constructed core instances.
+- `0009-bound-dns-lookups.patch` bounds concurrent address lookups across tunnel instances.
+- `0010-forward-dns-records.patch` forwards additional DNS record types using the configured resolver.
+- `0011-honor-ios-mux-concurrency.patch` preserves the configured per-worker TCP Mux concurrency and enforces Hop’s eight-session limit when creating the outbound handler.
 
 These patches are distributed in `patches/` alongside the bridge source.
 

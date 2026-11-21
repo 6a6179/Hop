@@ -1,0 +1,190 @@
+diff --git a/app/proxyman/outbound/handler.go b/app/proxyman/outbound/handler.go
+index 4c3b16a..ba9ef7f 100644
+--- a/app/proxyman/outbound/handler.go
++++ b/app/proxyman/outbound/handler.go
+@@ -53,6 +53,12 @@ func getStatCounter(v *core.Instance, tag string) (stats.Counter, stats.Counter)
+ 	return uplinkCounter, downlinkCounter
+ }
+ 
++// The Hop packet tunnel shares a 50 MiB process budget across its outbounds.
++const (
++	hopMuxConcurrencyLimit  = 8
++	hopXUDPConcurrencyLimit = 16
++)
++
+ // Handler implements outbound.Handler.
+ type Handler struct {
+ 	tag             string
+@@ -84,6 +90,15 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
+ 		}
+ 		switch s := senderSettings.(type) {
+ 		case *proxyman.SenderConfig:
++			// Validate before creating a proxy that may start its own workers.
++			if config := s.MultiplexSettings; config != nil {
++				if config.Concurrency > hopMuxConcurrencyLimit {
++					return nil, errors.New("mux concurrency exceeds ", hopMuxConcurrencyLimit)
++				}
++				if config.XudpConcurrency > hopXUDPConcurrencyLimit {
++					return nil, errors.New("XUDP concurrency exceeds ", hopXUDPConcurrencyLimit)
++				}
++			}
+ 			h.senderSettings = s
+ 			mss, err := internet.ToMemoryStreamConfig(s.StreamSettings)
+ 			if err != nil {
+@@ -121,11 +136,11 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
+ 		if config := h.senderSettings.MultiplexSettings; config.Enabled {
+ 			if config.Concurrency < 0 {
+ 				h.mux = &mux.ClientManager{Enabled: false}
+-			}
+-			if config.Concurrency >= 0 && config.Concurrency <= 128 {
+-				config.Concurrency = 128
+-			}
+-			if config.Concurrency > 0 {
++			} else {
++				concurrency := config.Concurrency
++				if concurrency == 0 {
++					concurrency = hopMuxConcurrencyLimit
++				}
+ 				h.mux = &mux.ClientManager{
+ 					Enabled: true,
+ 					Picker: &mux.IncrementalWorkerPicker{
+@@ -133,7 +148,7 @@ func NewHandler(ctx context.Context, config *core.OutboundHandlerConfig) (outbou
+ 							Proxy:  proxyHandler,
+ 							Dialer: h,
+ 							Strategy: mux.ClientStrategy{
+-								MaxConcurrency: uint32(config.Concurrency),
++								MaxConcurrency: uint32(concurrency),
+ 								MaxConnection:  1024,
+ 							},
+ 						},
+diff --git a/app/proxyman/outbound/hop_mux_export_test.go b/app/proxyman/outbound/hop_mux_export_test.go
+new file mode 100644
+index 0000000..d02ec16
+--- /dev/null
++++ b/app/proxyman/outbound/hop_mux_export_test.go
+@@ -0,0 +1,7 @@
++package outbound
++
++import "github.com/xtls/xray-core/common/mux"
++
++func (h *Handler) HopTestMuxManagers() (*mux.ClientManager, *mux.ClientManager) {
++	return h.mux, h.xudp
++}
+diff --git a/app/proxyman/outbound/hop_mux_limit_test.go b/app/proxyman/outbound/hop_mux_limit_test.go
+new file mode 100644
+index 0000000..29e23e3
+--- /dev/null
++++ b/app/proxyman/outbound/hop_mux_limit_test.go
+@@ -0,0 +1,112 @@
++package outbound_test
++
++import (
++	"fmt"
++	"strings"
++	"testing"
++
++	_ "github.com/xtls/xray-core/app/dispatcher"
++	_ "github.com/xtls/xray-core/app/proxyman/inbound"
++	proxymanout "github.com/xtls/xray-core/app/proxyman/outbound"
++	"github.com/xtls/xray-core/common/mux"
++	"github.com/xtls/xray-core/core"
++	"github.com/xtls/xray-core/features/outbound"
++	"github.com/xtls/xray-core/infra/conf/serial"
++)
++
++func TestHopMuxWorkerLimits(t *testing.T) {
++	// An absent manager differs from one explicitly disabled with a negative
++	// limit: e.g. a nil XUDP manager lets UDP use the regular mux manager.
++	const absent = 0
++	const disabled = -1
++	type testCase struct {
++		name, fields  string
++		regular, xudp int
++		reject        bool
++	}
++	tests := []testCase{
++		{"omitted limits", `"enabled":true`, 8, absent, false},
++		{"zero limits", `"enabled":true,"concurrency":0,"xudpConcurrency":0`, 8, absent, false},
++		{"XUDP disabled", `"enabled":true,"concurrency":3,"xudpConcurrency":-2`, 3, disabled, false},
++		{"regular disabled", `"enabled":true,"concurrency":-2,"xudpConcurrency":16`, disabled, 16, false},
++		{"both disabled", `"enabled":true,"concurrency":-1,"xudpConcurrency":-1`, disabled, disabled, false},
++		{"mux disabled", `"enabled":false,"concurrency":4,"xudpConcurrency":7`, absent, absent, false},
++		{"excessive regular", `"enabled":true,"concurrency":9`, 0, 0, true},
++		{"excessive XUDP", `"enabled":true,"xudpConcurrency":17`, 0, 0, true},
++		{"excessive disabled", `"enabled":false,"concurrency":128`, 0, 0, true},
++	}
++	for n := 1; n <= 8; n++ {
++		tests = append(tests, testCase{fmt.Sprintf("regular-%d", n), fmt.Sprintf(`"enabled":true,"concurrency":%d,"xudpConcurrency":%d`, n, 2*n), n, 2 * n, false})
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			raw := `{"outbounds":[{"protocol":"freedom","tag":"test","mux":{` + tc.fields + `}}]}`
++			parsed, err := serial.DecodeJSONConfigStrict(strings.NewReader(raw))
++			if err != nil {
++				t.Fatal(err)
++			}
++			config, err := parsed.Build()
++			if err != nil {
++				t.Fatal(err)
++			}
++			instance, err := core.New(config)
++			if err != nil {
++				if tc.reject && strings.Contains(err.Error(), "concurrency") {
++					return
++				}
++				t.Fatal(err)
++			}
++			defer instance.Close()
++			if tc.reject {
++				t.Fatal("accepted excessive mux limits")
++			}
++			manager := instance.GetFeature(outbound.ManagerType()).(outbound.Manager)
++			handler := manager.GetHandler("test").(*proxymanout.Handler)
++			regular, xudp := handler.HopTestMuxManagers()
++			checkHopMuxManager(t, regular, tc.regular)
++			checkHopMuxManager(t, xudp, tc.xudp)
++		})
++	}
++}
++
++func checkHopMuxManager(t *testing.T, manager *mux.ClientManager, want int) {
++	t.Helper()
++	switch {
++	case want == 0:
++		if manager != nil {
++			t.Fatal("unexpected mux manager")
++		}
++		return
++	case want < 0:
++		if manager == nil || manager.Enabled || manager.Picker != nil {
++			t.Fatal("expected disabled mux")
++		}
++		return
++	}
++	if manager == nil || !manager.Enabled {
++		t.Fatal("missing enabled mux")
++	}
++	picker := manager.Picker.(*mux.IncrementalWorkerPicker)
++	strategy := picker.Factory.(*mux.DialingWorkerFactory).Strategy
++	if int(strategy.MaxConcurrency) != want {
++		t.Fatalf("worker concurrency = %d, want %d", strategy.MaxConcurrency, want)
++	}
++
++	// ClientWorker.Dispatch passes this exact strategy into the session table.
++	sessions := mux.NewSessionManager()
++	defer sessions.Close()
++	var last *mux.Session
++	for range want {
++		last = sessions.Allocate(&strategy, nil, nil)
++		if last == nil {
++			t.Fatal("refused a session below the limit")
++		}
++	}
++	if sessions.Allocate(&strategy, nil, nil) != nil {
++		t.Fatal("allocated above the requested concurrency")
++	}
++	last.Close(false)
++	if sessions.Allocate(&strategy, nil, nil) == nil {
++		t.Fatal("failed to reuse a released slot")
++	}
++}

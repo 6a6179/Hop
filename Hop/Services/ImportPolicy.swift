@@ -103,20 +103,13 @@ enum ImportPolicy {
         guard let host = url.host, !host.isEmpty else {
             throw ProxyLinkParseError.missingHost
         }
-        if isDisallowedRemoteHost(host) || resolvedAddressesAreDisallowed(host) {
+        if isDisallowedRemoteHost(host) || resolvedAddresses(host, numericOnly: true)?.contains(where: isPrivateOrReservedAddress) == true {
             throw ProxyLinkParseError.disallowedSubscriptionHost
         }
     }
 
-    /// Resolves `host` and reports whether ANY resolved address is private or
-    /// reserved. Catches alternate IP encodings (`2130706433`, `127.1`,
-    /// `0x7f000001`) that `inet_pton` rejects but the system resolver — and thus
-    /// `URLSession` — accepts, plus hostnames that point at internal addresses.
-    /// Resolution failures are treated as "not disallowed": an unresolvable host
-    /// can't be an SSRF target and the fetch fails on its own. This narrows but
-    /// does not fully eliminate DNS rebinding (the resolver may answer
-    /// differently at connect time); the subscription fetcher's redirect
-    /// re-validation is the companion control.
+    /// Rejects a hostname whose current answer contains any reserved address.
+    /// Subscription connections use the checked numeric addresses themselves.
     static func resolvedAddressesAreDisallowed(_ host: String) -> Bool {
         guard let addresses = resolvedAddresses(host) else {
             return false
@@ -165,7 +158,20 @@ enum ImportPolicy {
         return String(trimmed.dropFirst().dropLast())
     }
 
-    private static func resolvedAddresses(_ host: String) -> [String]? {
+    /// All answers must be public before any socket can be opened. An empty
+    /// or failed lookup must never fall back to a separate hostname lookup.
+    static func subscriptionAddresses(for url: URL, resolve: (String) -> [String]? = { resolvedAddresses($0) }) throws -> [String] {
+        try validateSubscriptionURL(url)
+        guard let host = url.host, let addresses = resolve(host), !addresses.isEmpty else {
+            throw ProxyLinkParseError.subscriptionUnavailable
+        }
+        guard addresses.allSatisfy(isPublicIPAddressLiteral) else {
+            throw ProxyLinkParseError.disallowedSubscriptionHost
+        }
+        return addresses
+    }
+
+    static func resolvedAddresses(_ host: String, numericOnly: Bool = false) -> [String]? {
         var trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("["), trimmed.hasSuffix("]") {
             trimmed = String(trimmed.dropFirst().dropLast())
@@ -178,6 +184,7 @@ enum ImportPolicy {
         }
 
         var hints = addrinfo()
+        hints.ai_flags = numericOnly ? AI_NUMERICHOST : 0
         hints.ai_family = AF_UNSPEC
         hints.ai_socktype = SOCK_STREAM
         var info: UnsafeMutablePointer<addrinfo>?
@@ -394,6 +401,11 @@ enum ImportPolicy {
                 return "\(scheme):// [redacted] (\(label))"
             }
             return "\(scheme):// [redacted]"
+        }
+        // Multi-port Hysteria authorities cannot be parsed by URLComponents.
+        // Their userinfo must never be treated as a .conf display name.
+        if trimmed.contains("://") {
+            return "[redacted]"
         }
 
         // Configuration "Name = type, host, port, secrets..." lines: keep the

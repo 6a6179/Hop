@@ -17,6 +17,10 @@ XRAY_PATCHES=(
   XrayBridge/patches/0005-xdns-resolver-dial.patch
   XrayBridge/patches/0006-reclaim-completed-dns-flows.patch
   XrayBridge/patches/0007-dns-terminal-errors.patch
+  XrayBridge/patches/0008-isolate-udp-routes-and-rollback-core.patch
+  XrayBridge/patches/0009-bound-dns-lookups.patch
+  XrayBridge/patches/0010-forward-dns-records.patch
+  XrayBridge/patches/0011-honor-ios-mux-concurrency.patch
 )
 
 # A FIPS-enabled Go build defaults the runtime to FIPS mode. Its entropy path
@@ -46,6 +50,15 @@ command -v git >/dev/null 2>&1 || err "git is required."
 command -v python3 >/dev/null 2>&1 || err "python3 is required to normalize the xcframework metadata."
 command -v shasum >/dev/null 2>&1 || err "shasum is required."
 command -v xcodebuild >/dev/null 2>&1 || err "Xcode is required."
+# Cgo objects record the SDK in LC_BUILD_VERSION. A matching deployment
+# target alone cannot reproduce the reviewed framework bytes.
+[[ "$(xcodebuild -version | awk '/Build version/ {print $3}')" == 17F42 ]] \
+  || err "Select Xcode 26.5 (17F42) with DEVELOPER_DIR."
+for sdk in iphoneos iphonesimulator; do
+  [[ "$(xcrun --sdk "$sdk" --show-sdk-version)" == 26.5 &&
+     "$(xcrun --sdk "$sdk" --show-sdk-build-version)" == 23F73 ]] \
+    || err "The reviewed $sdk SDK is 26.5 (23F73). Check DEVELOPER_DIR."
+done
 [[ "$(go env GOVERSION 2>/dev/null)" == "$GO_VERSION" ]] \
   || err "Go $GO_VERSION is required; found $(go env GOVERSION 2>/dev/null || printf unknown)."
 [[ "$(go env GOFIPS140 2>/dev/null)" == "off" ]] \
@@ -104,12 +117,15 @@ chmod -R u+w "$build_bridge"
 (
   cd "$build_bridge"
   GOWORK=off go mod edit -replace=github.com/xtls/xray-core=../xray-core
+  "$repo_root/scripts/generate-acknowledgments.py" --check --bridge-directory "$build_bridge"
   GOWORK=off go test -mod=readonly -race -run '^TestHop' -count=1 \
     github.com/xtls/xray-core/proxy/tun \
     github.com/xtls/xray-core/proxy/dns \
+    github.com/xtls/xray-core/app/dns \
+    github.com/xtls/xray-core/app/proxyman/outbound \
     github.com/xtls/xray-core/features/routing/dns \
     github.com/xtls/xray-core/transport/internet/finalmask/xdns
-  GOWORK=off go test -mod=readonly -race .
+  GOWORK=off go test -tags hop_patched_core -mod=readonly -race .
 )
 
 info "Installing pinned gomobile $GOMOBILE_COMMIT ..."

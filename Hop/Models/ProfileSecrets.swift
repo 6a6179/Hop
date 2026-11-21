@@ -175,11 +175,24 @@ extension ProxyProfile {
         return XraySecretSidecar(valuesByJSONPointer: values)
     }
 
+    /// Old envelopes had no manifest. A persisted reference still identifies
+    /// an advanced credential that must be available before upgrading.
+    func hasMissingLegacyAdvancedSecret(in values: [String: String]) -> Bool {
+        var missing = false
+        visitAdvancedSecretStrings { pointer, value in
+            if XrayAdvancedSecret.isPersistentReference(value) {
+                let field = XrayAdvancedSecret.fieldRaw(for: pointer)
+                missing = missing || values[HopSecret.key(profileID: id, fieldRaw: field)]?.isEmpty != false
+            }
+        }
+        return missing
+    }
+
     /// A copy with all secret fields blanked, for writing to JSON.
     func redactingSecrets() -> ProxyProfile {
         rewritingSecrets { _, _ in "" }
-            .rewritingAdvancedSecrets { pointer, _ in
-                XrayAdvancedSecret.persistentReference(
+            .rewritingAdvancedSecrets { pointer, value in
+                value.isEmpty ? "" : XrayAdvancedSecret.persistentReference(
                     fieldRaw: XrayAdvancedSecret.fieldRaw(for: pointer),
                 )
             }

@@ -44,9 +44,9 @@ enum ProxyLinkParseError: LocalizedError {
 struct ProxyImportService {
     private static let serverNameKeys = ["sni", "servername", "server_name", "server-name", "peer"]
 
-    /// Session configuration for subscription fetches; tests substitute one
-    /// with a stub `URLProtocol` to exercise the transfer policy offline.
-    var subscriptionSessionConfiguration: URLSessionConfiguration = .ephemeral
+    /// Tests substitute an offline transport. Production always uses checked,
+    /// numeric-address connections with TLS authenticated against the origin.
+    var downloadSubscription: @Sendable (URLRequest) async throws -> Data = { try await SubscriptionFetcher.fetch($0) }
 
     func importText(_ rawValue: String) throws -> ImportResult {
         guard rawValue.utf8.count <= ImportPolicy.maxPayloadBytes else {
@@ -122,17 +122,9 @@ struct ProxyImportService {
     }
 
     func importSubscription(url: URL, subscriptionID: SubscriptionSource.ID? = nil) async throws -> ImportResult {
-        try ImportPolicy.validateSubscriptionURL(url)
-
-        var request = URLRequest(url: url)
-        request.timeoutInterval = ImportPolicy.subscriptionRequestTimeout
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-
-        // A dedicated fetcher rather than `URLSession.shared`: it re-validates
-        // every redirect target (which would otherwise bypass the up-front
-        // `validateSubscriptionURL` check) and enforces the payload cap
-        // mid-stream so peak memory stays bounded. See `SubscriptionFetcher`.
-        let data = try await SubscriptionFetcher.fetch(request, configuration: subscriptionSessionConfiguration)
+        // The downloader validates every hop and enforces the same request
+        // budget across resolution, TLS, redirects, and reading the full body.
+        let data = try await downloadSubscription(URLRequest(url: url, timeoutInterval: ImportPolicy.subscriptionRequestTimeout))
         guard let text = String(data: data, encoding: .utf8) else {
             throw ProxyLinkParseError.invalidURL
         }
@@ -145,6 +137,9 @@ struct ProxyImportService {
 
     private func parseProfileLink(_ rawValue: String) throws -> ProxyProfile {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if isHysteria2Link(trimmed) {
+            return try parseHysteria2(trimmed)
+        }
         guard let components = URLComponents(string: trimmed), let scheme = components.scheme?.lowercased() else {
             throw ProxyLinkParseError.invalidURL
         }
@@ -154,8 +149,6 @@ struct ProxyImportService {
             return try parseVLESS(components: components)
         case "trojan":
             return try parseTrojan(components: components)
-        case "hysteria2", "hy2":
-            return try parseHysteria2(components: components)
         case "tuic":
             throw ProxyLinkParseError.unsupportedScheme("TUIC is not supported by Xray-core \(XrayAdvancedDocument.currentSchemaVersion)")
         case "ss":
@@ -205,13 +198,43 @@ struct ProxyImportService {
         )
     }
 
-    private func parseHysteria2(components: URLComponents) throws -> ProxyProfile {
-        let password = try requiredUser(components)
-        let endpoint = try endpoint(from: components)
+    private func isHysteria2Link(_ text: String) -> Bool {
+        let prefix = text.prefix("hysteria2://".count).lowercased()
+        return prefix.hasPrefix("hy2://") || prefix == "hysteria2://"
+    }
+
+    private func parseHysteria2(_ raw: String) throws -> ProxyProfile {
+        // A Hysteria port list is valid in this scheme's authority but cannot
+        // be represented by URLComponents. Give Foundation a scalar port so it
+        // still owns all userinfo, bracketed-host, query and fragment decoding.
+        guard let scheme = raw.range(of: "://") else { throw ProxyLinkParseError.invalidURL }
+        let authority = raw[scheme.upperBound...].prefix { !"/?#".contains($0) }
+        let hostPort = authority.suffix(from: authority.lastIndex(of: "@").map { authority.index(after: $0) } ?? authority.startIndex)
+        var url = raw
+        var authorityPorts: String?
+        if !hostPort.hasSuffix("]"), let colon = hostPort.lastIndex(of: ":") {
+            let ports = hostPort[hostPort.index(after: colon)...]
+            let firstPort = try firstHysteriaPort(in: ports)
+            if ports.contains(",") || ports.contains("-") {
+                authorityPorts = String(ports)
+                url.replaceSubrange(ports.startIndex ..< ports.endIndex, with: String(firstPort))
+            }
+        }
+        guard let components = URLComponents(string: url), let host = components.host, !host.isEmpty else {
+            throw ProxyLinkParseError.missingHost
+        }
+        let endpoint = Endpoint(host: host, port: components.port ?? 443)
+        var password = components.user ?? ""
+        if let userPassword = components.password {
+            password += ":" + userPassword
+        }
         let query = Query(components)
+        if let authorityPorts, let legacyPorts = query["ports"], authorityPorts != legacyPorts {
+            throw ProxyLinkParseError.invalidURL
+        }
         // Hysteria2 runs over QUIC and always uses TLS. Links commonly omit an
         // explicit security parameter, so default to TLS on the host.
-        let security = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: true)
+        let security = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: true, certificatePin: query["pinSHA256"])
 
         return try ProxyProfile(
             name: displayName(from: components, fallback: "Hysteria2 \(endpoint.host)"),
@@ -223,7 +246,7 @@ struct ProxyImportService {
                     obfsPassword: query["obfs-password"] ?? query["obfs_password"] ?? query["obfsParam"],
                     up: query.first("up", "upmbps"),
                     down: query.first("down", "downmbps"),
-                    ports: query["ports"],
+                    ports: authorityPorts ?? query["ports"],
                     hopIntervalSeconds: Int(query.first("hop-interval", "hop_interval") ?? ""),
                     udpIdleTimeoutSeconds: Int(query.first("udp-idle-timeout", "udp_idle_timeout") ?? ""),
                 ),
@@ -231,6 +254,23 @@ struct ProxyImportService {
             security: security,
             transport: parseTransport(query: query, defaultType: .hysteria),
         )
+    }
+
+    private func firstHysteriaPort(in ports: Substring) throws -> UInt16 {
+        let parts = ports.split(separator: ",", maxSplits: IOSRuntimeLimits.default.maxHysteriaPortHops, omittingEmptySubsequences: false)
+        var first: UInt16?
+        for part in parts {
+            let bounds = part.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
+            guard let lower = bounds.first.flatMap({ UInt16($0) }), lower > 0,
+                  let upper = bounds.last.flatMap({ UInt16($0) }), lower <= upper,
+                  part.utf8.allSatisfy({ (48 ... 57).contains($0) || $0 == 45 })
+            else { throw ProxyLinkParseError.missingPort }
+            if first == nil {
+                first = lower
+            }
+        }
+        guard let first else { throw ProxyLinkParseError.missingPort }
+        return first
     }
 
     private func parseShadowsocks(rawValue: String, components: URLComponents) throws -> ProxyProfile {
@@ -417,6 +457,7 @@ struct ProxyImportService {
     private func parseWireGuard(components: URLComponents) throws -> ProxyProfile {
         let privateKey = try requiredUser(components)
         let endpoint = try endpoint(from: components)
+        guard Endpoint.isValidWireGuardHost(endpoint.host) else { throw ProxyLinkParseError.invalidURL }
         let query = Query(components)
         guard let publicKey = query.first("publickey", "publicKey", "peerPublicKey"), !publicKey.isEmpty,
               let addresses = query["address"].map(csv), !addresses.isEmpty
@@ -465,7 +506,7 @@ struct ProxyImportService {
               peers.allSatisfy({ peer in
                   !peer.publicKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
                       (peer.endpoint == nil || (
-                          !peer.endpoint!.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                          Endpoint.isValidWireGuardHost(peer.endpoint!.host) &&
                               (1 ... 65535).contains(peer.endpoint!.port)
                       ))
               })
@@ -481,13 +522,13 @@ struct ProxyImportService {
         }
     }
 
-    private func parseSecurity(query: Query, fallbackServerName: String, defaultTLS: Bool = false) -> ProxySecurity {
+    private func parseSecurity(query: Query, fallbackServerName: String, defaultTLS: Bool = false, certificatePin: String? = nil) -> ProxySecurity {
         let security = (query.first("security", "tls") ?? "").lowercased()
         let serverName = Self.serverNameKeys.lazy.compactMap { query[$0] }.first ?? fallbackServerName
         let alpn = alpnValues(from: query.first("alpn"))
         let fingerprint = query.first("fp", "fingerprint", "utlsFingerprint", "utls_fingerprint", "utls-fingerprint", "clientFingerprint", "client_fingerprint", "client-fingerprint") ?? "chrome"
         let allowInsecure = boolOption(query.first("allowInsecure", "allow_insecure", "allow-insecure", "insecure", "skipCertVerify", "skip_cert_verify", "skip-cert-verify"))
-        let pinnedCertificates = query.first("pcs", "pinnedPeerCertSha256", "pinned_peer_cert_sha256", "pinned-peer-cert-sha256")
+        let pinnedCertificates = certificatePin ?? query.first("pcs", "pinnedPeerCertSha256", "pinned_peer_cert_sha256", "pinned-peer-cert-sha256")
         let verifyNames = query.first("vcn", "verifyPeerCertByName", "verify_peer_cert_by_name", "verify-peer-cert-by-name")
         let echConfig = query.first("ech", "echConfigList", "ech_config_list", "ech-config-list")
         let curves = alpnValues(from: query.first("curves", "curvePreferences", "curve_preferences", "curve-preferences"))
@@ -735,7 +776,7 @@ struct ProxyImportService {
                 inComment = true
             } else if !inComment, !token.isEmpty {
                 let link = repairingMarkdownVLESSLink(token)
-                if URLComponents(string: link)?.scheme != nil {
+                if isHysteria2Link(link) || URLComponents(string: link)?.scheme != nil {
                     imported.append(link)
                 } else {
                     skippedTokens = true

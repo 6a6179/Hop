@@ -17,11 +17,14 @@ enum TunnelConfigAuthenticator {
     }
 
     static func readSnapshot(at url: URL, nonce: String, secret: String) throws -> String {
-        let encodedMAC = try readFile(at: signatureURL(forConfigURL: url), limit: 44)
-        guard encodedMAC.count == 44, let mac = Data(base64Encoded: encodedMAC), mac.count == 32 else {
+        guard let encodedMAC = try readRegularFileIfPresent(at: signatureURL(forConfigURL: url), limit: 44),
+              encodedMAC.count == 44, let mac = Data(base64Encoded: encodedMAC), mac.count == 32
+        else {
             throw TunnelSnapshotError.invalidSignature
         }
-        let data = try readFile(at: url, limit: TunnelMemoryPolicy.maximumConfigurationBytes)
+        guard let data = try readRegularFileIfPresent(at: url, limit: TunnelMemoryPolicy.maximumConfigurationBytes) else {
+            throw TunnelSnapshotError.invalidFile
+        }
         guard let expected = snapshotMAC(for: data, nonce: nonce, secret: secret), expected == mac else {
             throw TunnelSnapshotError.invalidSignature
         }
@@ -40,8 +43,11 @@ enum TunnelConfigAuthenticator {
     }
 
     /// Inspect the opened file and cap the read itself in case its size changes.
-    private static func readFile(at url: URL, limit: Int) throws -> Data {
+    static func readRegularFileIfPresent(at url: URL, limit: Int) throws -> Data? {
         let fd = open(url.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        if fd < 0, errno == ENOENT {
+            return nil
+        }
         guard fd >= 0 else { throw TunnelSnapshotError.invalidFile }
         let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
         defer { try? handle.close() }
@@ -49,7 +55,7 @@ enum TunnelConfigAuthenticator {
         guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
               info.st_size <= limit else { throw TunnelSnapshotError.invalidFile }
         var data = Data()
-        while let chunk = try handle.read(upToCount: limit + 1 - data.count), !chunk.isEmpty {
+        while let chunk = try handle.read(upToCount: min(65536, limit + 1 - data.count)), !chunk.isEmpty {
             data.append(chunk)
             guard data.count <= limit else { throw TunnelSnapshotError.invalidFile }
         }

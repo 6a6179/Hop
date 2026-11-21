@@ -9,7 +9,7 @@ struct ProfileSecuritySummary: View {
 
             Spacer(minLength: 8)
 
-            Text("\(profile.endpoint.host):\(profile.endpoint.port)")
+            Text("\(profile.probeEndpoint.host):\(profile.probeEndpoint.port)")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

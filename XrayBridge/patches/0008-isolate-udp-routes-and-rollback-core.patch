@@ -1,0 +1,315 @@
+diff --git a/core/xray.go b/core/xray.go
+index 794ce8f..9d0cae1 100644
+--- a/core/xray.go
++++ b/core/xray.go
+@@ -167,24 +167,26 @@ func OptionalFeatures(ctx context.Context, callback interface{}) error {
+ // The instance is not started at this point.
+ // To ensure Xray instance works properly, the config must contain one Dispatcher, one InboundHandlerManager and one OutboundHandlerManager. Other features are optional.
+ func New(config *Config) (*Instance, error) {
+-	server := &Instance{ctx: context.Background()}
+-
+-	done, err := initInstanceWithConfig(config, server)
+-	if done {
+-		return nil, err
+-	}
+-
+-	return server, nil
++	return NewWithContext(context.Background(), config)
+ }
+ 
+ func NewWithContext(ctx context.Context, config *Config) (*Instance, error) {
+ 	server := &Instance{ctx: ctx}
++	// Some outbound constructors start workers before Instance.Start. Release any
++	// installed features if a subsequent constructor returns an error or panics.
++	committed := false
++	defer func() {
++		if !committed {
++			_ = server.Close()
++		}
++	}()
+ 
+ 	done, err := initInstanceWithConfig(config, server)
+ 	if done {
+ 		return nil, err
+ 	}
+ 
++	committed = true
+ 	return server, nil
+ }
+ 
+diff --git a/proxy/tun/hop_budget_test.go b/proxy/tun/hop_budget_test.go
+index 71d8ff8..72b090e 100644
+--- a/proxy/tun/hop_budget_test.go
++++ b/proxy/tun/hop_budget_test.go
+@@ -118,7 +118,10 @@ func TestHopUDPQueueBudgetAndShutdown(t *testing.T) {
+ 			s.udp.HandlePacket(src, dst, b)
+ 		}
+ 	}
+-	if len(s.udp.udpConns) != udpFlowLimit || s.udpBytes.Load() != udpStackBytes {
++	// Each accepted datagram fills its per-flow byte allowance. New sources
++	// are not admitted once the aggregate budget is exhausted.
++	wantFlows := udpStackBytes / udpQueueBytes
++	if len(s.udp.udpConns) != wantFlows || s.udpBytes.Load() != udpStackBytes {
+ 		t.Fatalf("flows=%d, queued bytes=%d", len(s.udp.udpConns), s.udpBytes.Load())
+ 	}
+ 	for _, c := range s.udp.udpConns {
+@@ -132,7 +135,7 @@ func TestHopUDPQueueBudgetAndShutdown(t *testing.T) {
+ 	if s.udpBytes.Load() != 0 {
+ 		t.Fatal("queued buffers retained after close")
+ 	}
+-	for range udpFlowLimit {
++	for range wantFlows {
+ 		c := <-incoming
+ 		if _, err := c.Read(make([]byte, 1)); err == nil {
+ 			t.Fatal("closed UDP flow still readable")
+diff --git a/proxy/tun/hop_dns_test.go b/proxy/tun/hop_dns_test.go
+index 375b708..5ffd437 100644
+--- a/proxy/tun/hop_dns_test.go
++++ b/proxy/tun/hop_dns_test.go
+@@ -44,7 +44,7 @@ func sendTestUDP(u *udpConnectionHandler, port int, dst net.Destination, p []byt
+ 	u.HandlePacket(src, dst, b)
+ 	u.RLock()
+ 	defer u.RUnlock()
+-	return u.udpConns[src]
++	return u.udpConns[udpFlow{src, dst}]
+ }
+ func answerTestDNS(t *testing.T, c *udpConn, b []byte) {
+ 	t.Helper()
+@@ -146,7 +146,7 @@ func TestHopDNSPreservesPendingAndStaleOwnership(t *testing.T) {
+ 	if err := c.Close(); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	if u.udpConns[c.src] != reused {
++	if u.udpConns[c.udpFlow] != reused {
+ 		t.Fatal("old Close removed the new owner")
+ 	}
+ 	blocked() // old reply did not satisfy the new request
+@@ -158,7 +158,7 @@ func TestHopDNSGatewayScopeAndAmbiguity(t *testing.T) {
+ 		t.Fatal(gateways)
+ 	}
+ 	other := net.UDPDestination(net.ParseAddress("192.0.2.53"), 53)
+-	for _, kind := range []string{"mixed", "duplicate", "malformed", "overflow", "external DNS", "other port"} {
++	for _, kind := range []string{"duplicate", "malformed", "overflow", "external DNS", "other port"} {
+ 		t.Run(kind, func(t *testing.T) {
+ 			u := testDNSHandler(t)
+ 			occupyOtherSources(u)
+@@ -173,8 +173,6 @@ func TestHopDNSGatewayScopeAndAmbiguity(t *testing.T) {
+ 			r := testDNSPacket(t, 0, dnsmessage.TypeA, true)
+ 			c := sendTestUDP(u, 12000, dst, q)
+ 			switch kind {
+-			case "mixed":
+-				sendTestUDP(u, 12000, other, q)
+ 			case "duplicate":
+ 				sendTestUDP(u, 12000, dst, q)
+ 			case "malformed":
+diff --git a/proxy/tun/hop_udp_route_test.go b/proxy/tun/hop_udp_route_test.go
+new file mode 100644
+index 0000000..4def856
+--- /dev/null
++++ b/proxy/tun/hop_udp_route_test.go
+@@ -0,0 +1,69 @@
++package tun
++
++import (
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/xtls/xray-core/common/net"
++)
++
++func TestHopUDPDispatchesEachDestination(t *testing.T) {
++	dispatches := make(chan net.Destination, 2)
++	u := newUdpConnectionHandler(func(_ net.Conn, dst net.Destination) { dispatches <- dst }, nil)
++	defer u.close()
++
++	first := net.UDPDestination(net.ParseAddress("192.0.2.1"), 443)
++	second := net.UDPDestination(net.ParseAddress("192.0.2.2"), 443)
++	a := sendTestUDP(u, 17000, first, []byte{1})
++	b := sendTestUDP(u, 17000, second, []byte{2})
++	if a == nil || b == nil || a == b || sendTestUDP(u, 17000, first, []byte{3}) != a {
++		t.Fatal("one dispatcher per source and destination was expected")
++	}
++	remaining := map[net.Destination]bool{first: true, second: true}
++	for range 2 {
++		select {
++		case dst := <-dispatches:
++			if !remaining[dst] {
++				t.Fatalf("unexpected dispatch to %v", dst)
++			}
++			delete(remaining, dst)
++		case <-time.After(time.Second):
++			t.Fatal("missing destination dispatch")
++		}
++	}
++
++	for _, pair := range []struct {
++		c       *udpConn
++		payload byte
++	}{{a, 1}, {b, 2}, {a, 3}} {
++		var packet [1]byte
++		if _, err := pair.c.Read(packet[:]); err != nil || packet[0] != pair.payload {
++			t.Fatalf("wrong queue: %v, %v", packet, err)
++		}
++	}
++	if err := a.Close(); err != nil || sendTestUDP(u, 17000, second, []byte{4}) != b {
++		t.Fatal("closing one destination affected the other")
++	}
++}
++
++func TestHopUDPRejectedFirstPacketDoesNotDispatch(t *testing.T) {
++	dispatches := make(chan net.Destination, 2)
++	u := newUdpConnectionHandler(func(_ net.Conn, dst net.Destination) { dispatches <- dst }, nil)
++	defer u.close()
++	u.budget = &atomic.Int32{}
++	u.budget.Store(udpStackBytes)
++	dst := net.UDPDestination(net.ParseAddress("192.0.2.1"), 443)
++	if c := sendTestUDP(u, 17000, dst, []byte{1}); c != nil {
++		t.Fatal("allocated an empty flow under pressure")
++	}
++	u.budget.Store(0)
++	if c := sendTestUDP(u, 17001, dst, []byte{2}); c == nil {
++		t.Fatal("failed to admit a packet after pressure subsided")
++	}
++	select {
++	case <-dispatches:
++	case <-time.After(time.Second):
++		t.Fatal("admitted packet was not dispatched")
++	}
++}
+diff --git a/proxy/tun/udp_fullcone.go b/proxy/tun/udp_fullcone.go
+index dcf9b99..3d151c4 100644
+--- a/proxy/tun/udp_fullcone.go
++++ b/proxy/tun/udp_fullcone.go
+@@ -12,11 +12,16 @@ import (
+ 	"github.com/xtls/xray-core/common/net"
+ )
+ 
++// Outbound routing is evaluated once per dispatched connection.
++type udpFlow struct {
++	src, dst net.Destination
++}
++
+ // sub-handler specifically for udp connections under main handler
+ type udpConnectionHandler struct {
+ 	sync.RWMutex
+ 
+-	udpConns      map[net.Destination]*udpConn
++	udpConns      map[udpFlow]*udpConn
+ 	budget        *atomic.Int32
+ 	dnsGateways   map[net.Destination]bool
+ 	dispatchSlots chan struct{}
+@@ -28,7 +33,7 @@ type udpConnectionHandler struct {
+ 
+ func newUdpConnectionHandler(handleConnection func(conn net.Conn, dest net.Destination), writePacket func(data []byte, src net.Destination, dst net.Destination) error) *udpConnectionHandler {
+ 	handler := &udpConnectionHandler{
+-		udpConns:         make(map[net.Destination]*udpConn),
++		udpConns:         make(map[udpFlow]*udpConn),
+ 		dispatchSlots:    make(chan struct{}, udpFlowLimit),
+ 		stopped:          make(chan struct{}),
+ 		handleConnection: handleConnection,
+@@ -39,12 +44,13 @@ func newUdpConnectionHandler(handleConnection func(conn net.Conn, dest net.Desti
+ }
+ 
+ // HandlePacket handles UDP packets coming from tun, to forward to the dispatcher
+-// this custom handler support FullCone NAT of returning packets, binding connection only by the source addr:port
++// Destinations reached through the same local socket may select different outbounds.
+ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destination, data *buf.Buffer) {
+ 	data.UDP = &dst
++	flow := udpFlow{src, dst}
+ 
+ 	u.RLock()
+-	if c := u.udpConns[src]; c != nil && c.dns == nil {
++	if c := u.udpConns[flow]; c != nil && c.dns == nil {
+ 		if !c.queue.push(data) {
+ 			errors.LogDebug(context.Background(), "drop udp with size ", data.Len(), " to ", dst.NetAddr(), " original ", c.dst.NetAddr(), " > queue full")
+ 			data.Release()
+@@ -60,12 +66,12 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+ 		data.Release()
+ 		return
+ 	}
+-	conn, found := u.udpConns[src]
++	conn, found := u.udpConns[flow]
+ 	// The reader owns the buffer once queued. Parse before handing it off, but
+ 	// record only questions actually admitted; u.Lock serializes the matching reply.
+ 	var key dnsKey
+ 	var valid bool
+-	if u.dnsGateways[dst] && (!found || conn.dns != nil && !conn.dns.opaque && conn.dst == dst) {
++	if u.dnsGateways[dst] && (!found || !conn.dns.opaque) {
+ 		key, valid = questionKey(data.Bytes(), false)
+ 	}
+ 	// Once every response has been delivered, move to a new dispatcher before
+@@ -79,26 +85,22 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+ 			data.Release()
+ 			return
+ 		}
+-		conn = &udpConn{handler: u, queue: newPacketQueue(udpQueueLimit), src: src, dst: dst}
++		conn = &udpConn{handler: u, queue: newPacketQueue(udpQueueLimit), udpFlow: flow}
+ 		conn.queue.budget = u.budget
+ 		if u.dnsGateways[dst] {
+ 			conn.dns = &udpDNSExchange{}
+ 		}
+ 	}
+-	d := conn.dns
+-	if conn.queue.push(data) {
+-		if d != nil {
+-			d.request(key, valid)
+-		}
+-	} else {
+-		errors.LogDebug(context.Background(), "drop udp with size ", data.Len(), " to ", dst.NetAddr(), " original ", conn.dst.NetAddr(), " > queue full")
++	if !conn.queue.push(data) {
++		errors.LogDebug(context.Background(), "drop udp with size ", data.Len(), " to ", dst.NetAddr(), " > queue full")
+ 		data.Release()
+-		if !found && d != nil {
+-			return
+-		}
++		return
++	}
++	if conn.dns != nil {
++		conn.dns.request(key, valid)
+ 	}
+ 	if !found {
+-		u.udpConns[src] = conn
++		u.udpConns[flow] = conn
+ 		if len(u.dnsGateways) == 0 {
+ 			go u.handleConnection(conn, dst)
+ 		} else {
+@@ -117,7 +119,7 @@ func (u *udpConnectionHandler) dispatch(c *udpConn) {
+ 	}
+ 	defer func() { <-u.dispatchSlots }()
+ 	u.RLock()
+-	current := u.udpConns[c.src] == c
++	current := u.udpConns[c.udpFlow] == c
+ 	u.RUnlock()
+ 	if current {
+ 		u.handleConnection(c, c.dst)
+@@ -141,7 +143,7 @@ func (u *udpConnectionHandler) retireCompleted(c *udpConn) bool {
+ 		return false
+ 	}
+ 	d.retired = true
+-	delete(u.udpConns, c.src)
++	delete(u.udpConns, c.udpFlow)
+ 	c.queue.close()
+ 	d.writeMu.Unlock()
+ 	return true
+@@ -154,8 +156,8 @@ func (u *udpConnectionHandler) connectionFinished(conn *udpConn) {
+ 		d.retired = true
+ 	}
+ 	u.Lock()
+-	if u.udpConns[conn.src] == conn {
+-		delete(u.udpConns, conn.src)
++	if u.udpConns[conn.udpFlow] == conn {
++		delete(u.udpConns, conn.udpFlow)
+ 		conn.queue.close()
+ 	}
+ 	u.Unlock()
+@@ -184,8 +186,7 @@ type udpConn struct {
+ 
+ 	queue *packetQueue
+ 	dns   *udpDNSExchange
+-	src   net.Destination
+-	dst   net.Destination
++	udpFlow
+ }
+ 
+ func (c *udpConn) ReadMultiBuffer() (buf.MultiBuffer, error) {

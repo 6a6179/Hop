@@ -137,11 +137,14 @@ extension ProxyImportService {
             }
             profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .shadowsocks(ShadowsocksOptions(method: method, password: password)), security: security)
         case "vmess":
-            guard let password = keyed["password"] ?? values[safe: 3] else {
+            var positional = values.dropFirst(2).filter { !$0.contains("=") }[...]
+            let hasPositionalMethod = keyed["password"] != nil || positional.count > 1
+            let method = keyed["method"] ?? (hasPositionalMethod ? positional.popFirst() : nil) ?? "auto"
+            guard let password = keyed["password"] ?? positional.popFirst() else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): VMess requires password UUID."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vmess(VMessOptions(uuid: password, security: keyed["method"] ?? values[safe: 2] ?? "auto", alterID: Int(keyed["alterid"] ?? keyed["alter-id"] ?? "0") ?? 0)), security: security, transport: configurationTransport(keyed: keyed))
+            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vmess(VMessOptions(uuid: password, security: method, alterID: Int(keyed["alterid"] ?? keyed["alter-id"] ?? "0") ?? 0)), security: security, transport: configurationTransport(keyed: keyed))
         case "vless":
             guard let password = keyed["password"] ?? keyed["uuid"] ?? values[safe: 2] else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): VLESS requires password UUID."))

@@ -23,6 +23,8 @@ targets:
     sources:
       - Hop
       - Shared
+      - path: XrayBridge/Acknowledgments.txt
+        buildPhase: resources
       - path: Geodata/geoip.dat
         buildPhase: resources
       - path: Geodata/geosite.dat
