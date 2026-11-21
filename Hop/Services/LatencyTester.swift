@@ -7,12 +7,31 @@ enum NodeLatencyResult: Equatable {
     case testing
     case success(Int) // milliseconds
     case failure(String)
+    case udpOnly
 
     var milliseconds: Int? {
         if case let .success(value) = self {
             return value
         }
         return nil
+    }
+}
+
+/// Only properties that affect which service the selected probe measures.
+struct LatencyProbeInput: Equatable {
+    let endpoint: Endpoint
+    let method: LatencyTestMethod
+    let tlsServerName: String?
+    let canProbe: Bool
+
+    init(profile: ProxyProfile, method: LatencyTestMethod) {
+        endpoint = profile.probeEndpoint
+        self.method = method
+        tlsServerName = method == .connect && profile.security.layer != .none
+            ? profile.security.tls?.serverName ?? endpoint.host : nil
+        let udpOnly = [.wireGuard, .hysteria2, .tuic].contains(profile.proto)
+            || [.mKCP, .quic, .hysteria].contains(profile.transport.type)
+        canProbe = method == .icmp || !udpOnly
     }
 }
 

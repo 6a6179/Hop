@@ -27,7 +27,9 @@ final class TunnelController {
     var state: TunnelConnectionState = .disconnected
     private(set) var installedConnection: InstalledTunnelConnection?
     var logs: [String]
-    var maximumLogEntries: Int
+    var maximumLogEntries: Int {
+        didSet { trimLogsToLimit() }
+    }
 
     @ObservationIgnored var onLogsChanged: (() -> Void)?
     @ObservationIgnored var onLegacyExtensionLogPurgeCompleted: (() -> Void)?
@@ -45,6 +47,10 @@ final class TunnelController {
     @ObservationIgnored private var extensionLogReadID = UUID()
     private var lastObservedStatus: NEVPNStatus?
     private var startInProgress = false
+    private var stopInProgress = false
+    private var currentActionID = UUID()
+    private let preferenceGate = TunnelPreferenceGate()
+    private(set) var configurationFailureHint: String?
     private var loggedStartupStop = false
     init(
         logs: [String] = [],
@@ -74,7 +80,7 @@ final class TunnelController {
             try await NETunnelProviderManager.loadAllFromPreferences()
         },
     ) async {
-        guard !startInProgress, state != .disconnecting else { return }
+        guard !startInProgress, !stopInProgress, !preferenceGate.isLocked, state != .disconnecting else { return }
         let refreshID = UUID()
         statusRefreshID = refreshID
         do {
@@ -99,20 +105,25 @@ final class TunnelController {
         routingMode: RoutingMode,
         rules: [RoutingRule],
         settings: AppSettings,
+        loadManagers: @MainActor () async throws -> [NETunnelProviderManager] = {
+            try await NETunnelProviderManager.loadAllFromPreferences()
+        },
     ) async {
-        guard !startInProgress else {
-            appendLog("Connect ignored: a tunnel start is already in progress")
+        guard !startInProgress, !stopInProgress, state != .disconnecting else {
+            appendLog("Connect ignored: a tunnel action is already in progress")
             return
         }
         let actionID = UUID()
+        currentActionID = actionID
         statusRefreshID = actionID
+        configurationFailureHint = nil
         // The saved connection can still emit old status changes while the
         // new configuration is being validated. Observe again at launch.
         observeStatus(for: nil)
         defer {
             // Preflight can fail before launch installs the new observer.
             // Do not leave an existing VPN unobserved, or rebind over a newer action.
-            if statusRefreshID == actionID, statusObserver == nil {
+            if currentActionID == actionID, statusObserver == nil {
                 observeStatus(for: manager?.connection)
             }
         }
@@ -161,6 +172,7 @@ final class TunnelController {
             appendLog("Unable to clear extension log: \(error.diagnosticDescription)")
         }
 
+        var attemptedNonce: String?
         do {
             appendLog("Preparing tunnel with \(profiles.count) nodes, \(groups.count) groups, \(rules.count) rules")
             let buildSnapshot = XrayConfigBuildSnapshot(
@@ -177,21 +189,28 @@ final class TunnelController {
             let resolvedConfig = try await Task.detached(priority: .userInitiated) {
                 try buildSnapshot.build()
             }.value
-            guard startInProgress else {
+            guard currentActionID == actionID, startInProgress else {
                 appendLog("Tunnel start cancelled during config validation")
                 return
             }
             appendLog("Validating settings with Xray-core \(XrayConfigBuilder.coreVersion)")
             try await XrayCoreClient.validate(configJSON: resolvedConfig)
-            guard startInProgress else {
+            guard currentActionID == actionID, startInProgress else {
                 appendLog("Tunnel start cancelled during Xray validation")
                 return
             }
 
+            // The snapshot files, runtime Keychain and VPN preferences form one
+            // transaction. A stop or erase waits for an in-flight write before
+            // it reads or changes the installed manager.
+            await preferenceGate.acquire()
+            defer { preferenceGate.release() }
+            guard currentActionID == actionID else { return }
+
             // A failed/ambiguous save can leave the cached manager mutated.
             // Only persisted preferences may decide which snapshots are live.
-            let existingManager = try await loadManager(reload: true)
-            guard startInProgress, statusRefreshID == actionID else { return }
+            let existingManager = try await loadManager(reload: true, loadManagers: loadManagers)
+            guard currentActionID == actionID else { return }
             let existingConfiguration = (existingManager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
             let previousNonce = existingConfiguration?["secretNonce"] as? String
             let retainedNonces = Set([previousNonce, existingConfiguration?["previousSecretNonce"] as? String].compactMap(\.self))
@@ -209,7 +228,7 @@ final class TunnelController {
                 let configContent = try await Task.detached(priority: .userInitiated) {
                     try buildSnapshot.build(tokenizingSecretsWith: secretNonce)
                 }.value
-                guard startInProgress else {
+                guard currentActionID == actionID, startInProgress else {
                     appendLog("Tunnel start cancelled during tokenized config preparation")
                     return
                 }
@@ -224,7 +243,7 @@ final class TunnelController {
                 try await Task.detached(priority: .userInitiated) {
                     try snapshot.write(keeping: retainedNonces)
                 }.value
-                guard startInProgress else {
+                guard currentActionID == actionID, startInProgress else {
                     // No manager or tunnel is launched for this nonce. The file
                     // contains references rather than plaintext credentials,
                     // and the next connect prunes this abandoned snapshot.
@@ -235,7 +254,9 @@ final class TunnelController {
                 preparation = snapshot
             }
 
+            attemptedNonce = secretNonce
             let manager = try await configuredManager(
+                existingManager,
                 secretNonce: secretNonce,
                 connection: InstalledTunnelConnection(targetName: targetName, routingMode: routingMode),
                 onDemand: settings.connectOnDemand,
@@ -244,6 +265,7 @@ final class TunnelController {
                 configURL: configURL,
                 previousNonce: previousNonce,
             )
+            guard currentActionID == actionID else { return }
             if let preparation {
                 let installedNonces = Set([secretNonce, previousNonce].compactMap(\.self))
                 try await Task.detached(priority: .utility) {
@@ -253,9 +275,8 @@ final class TunnelController {
             // The manager round-trip suspends; a disconnect() issued meanwhile
             // cleared `startInProgress`, and starting anyway would override the
             // user's explicit stop with a stale connect.
-            guard startInProgress else {
+            guard currentActionID == actionID, startInProgress else {
                 appendLog("Tunnel start cancelled before launch")
-                await disarmOnDemandIfNeeded(context: "start cancelled")
                 return
             }
             observeStatus(for: manager.connection)
@@ -276,6 +297,7 @@ final class TunnelController {
             try manager.connection.startVPNTunnel(options: startOptions)
             appendLog("startVPNTunnel returned; current status is \(manager.connection.status.displayName)")
             await syncExtensionLogs()
+            guard currentActionID == actionID else { return }
             // The synchronous status read here is almost always still
             // `disconnected` — the connecting transition arrives via the status
             // notification. Feeding it into `updateState` would misreport a
@@ -286,13 +308,20 @@ final class TunnelController {
             if state == .connecting {
                 appendLog("VPN start requested. Waiting for NetworkExtension status.")
             }
-            schedulePostStartDiagnostics()
+            schedulePostStartDiagnostics(actionID: actionID)
         } catch {
+            guard currentActionID == actionID else { return }
             state = .failed
             startInProgress = false
-            await syncExtensionLogs()
             appendTunnelStartFailure(error)
-            await disarmOnDemandIfNeeded(context: "tunnel start failed")
+            if let attemptedNonce {
+                await disarmOnDemandIfNeeded(
+                    context: "tunnel start failed", actionID: actionID,
+                    installedNonce: attemptedNonce, loadManagers: loadManagers,
+                )
+            }
+            guard currentActionID == actionID else { return }
+            await syncExtensionLogs()
         }
     }
 
@@ -301,16 +330,47 @@ final class TunnelController {
     /// configuration and iOS keeps relaunching a tunnel the app shows as
     /// failed — a loop the user could otherwise only break from iOS Settings.
     /// The setting itself is untouched; the next manual connect re-arms it.
-    private func disarmOnDemandIfNeeded(context: String) async {
-        guard let manager, manager.isOnDemandEnabled else {
-            return
-        }
-        manager.isOnDemandEnabled = false
+    private func disarmOnDemandIfNeeded(
+        context: String, actionID: UUID, installedNonce: String? = nil,
+        loadManagers: @MainActor () async throws -> [NETunnelProviderManager] = {
+            try await NETunnelProviderManager.loadAllFromPreferences()
+        },
+    ) async {
+        await preferenceGate.acquire()
+        defer { preferenceGate.release() }
+        guard currentActionID == actionID else { return }
         do {
-            try await save(manager)
+            if let installedNonce {
+                // A rejected or ambiguous install leaves the in-memory manager
+                // mutated. Saving it again could install the rejected protocol.
+                manager = nil
+                installedConnection = nil
+                observeStatus(for: nil)
+                let managers = try await loadManagers()
+                guard currentActionID == actionID else { return }
+                manager = Self.existingManager(in: managers)
+                installedConnection = InstalledTunnelConnection(manager: manager)
+                observeStatus(for: manager?.connection)
+                let configuration = (manager?.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration
+                guard configuration?["secretNonce"] as? String == installedNonce else { return }
+            }
+            guard let manager, manager.isOnDemandEnabled else { return }
+            try await disableOnDemand(manager)
             appendLog("On-demand connect disabled (\(context))")
         } catch {
             appendLog("Could not disable on-demand connect (\(context)): \(error.diagnosticDescription)")
+        }
+    }
+
+    private func disableOnDemand(_ manager: NETunnelProviderManager) async throws {
+        guard manager.isOnDemandEnabled else { return }
+        manager.isOnDemandEnabled = false
+        do {
+            try await save(manager)
+        } catch {
+            // The persisted flag can still be enabled. A retry must save it.
+            manager.isOnDemandEnabled = true
+            throw error
         }
     }
 
@@ -319,45 +379,52 @@ final class TunnelController {
             try await NETunnelProviderManager.loadAllFromPreferences()
         },
     ) async {
+        guard !stopInProgress else { return }
         let actionID = UUID()
+        currentActionID = actionID
         statusRefreshID = actionID
-        guard state.isConnected || state == .connecting else {
-            state = .disconnected
-            // A failed session can leave the on-demand rule armed (the start
-            // saved it before failing); clear it so iOS stops relaunching a
-            // tunnel the UI shows as down.
-            await disarmOnDemandIfNeeded(context: "disconnect while not connected")
-            return
-        }
-
-        state = .disconnecting
+        let interruptedStart = startInProgress
+        let shouldStop = interruptedStart || state.isConnected || state == .connecting
         startInProgress = false
+        stopInProgress = true
+        defer {
+            if currentActionID == actionID {
+                stopInProgress = false
+            }
+        }
         diagnosticsTask?.cancel()
+        if shouldStop {
+            state = .disconnecting
+        }
+        observeStatus(for: nil)
+        await preferenceGate.acquire()
+        defer { preferenceGate.release() }
+        guard currentActionID == actionID else { return }
         do {
-            let manager = try await loadManager(loadManagers: loadManagers)
-            // With on-demand rules active, iOS would immediately relaunch the
-            // tunnel after stopVPNTunnel; disable them before stopping so a
-            // manual disconnect sticks until the next connect re-arms them.
-            if manager.isOnDemandEnabled {
-                manager.isOnDemandEnabled = false
-                do {
-                    try await save(manager)
-                } catch {
-                    // A retry must still save the disabled flag if the system
-                    // refused the first save and the reload also fails.
-                    manager.isOnDemandEnabled = true
-                    throw error
+            guard shouldStop else {
+                if let manager {
+                    try await disableOnDemand(manager)
                 }
+                observeStatus(for: manager?.connection)
+                state = .disconnected
+                return
+            }
+            let manager = try await loadManager(reload: interruptedStart, loadManagers: loadManagers)
+            guard currentActionID == actionID else { return }
+            if manager.isOnDemandEnabled {
+                try await disableOnDemand(manager)
                 appendLog("On-demand connect disabled until the next manual connect")
             }
+            guard currentActionID == actionID else { return }
             observeStatus(for: manager.connection)
             manager.connection.stopVPNTunnel()
             await syncExtensionLogs()
+            guard currentActionID == actionID else { return }
             updateState(from: manager.connection.status, source: "disconnect")
             appendLog("Tunnel disconnect requested")
         } catch {
             let saved = try? await loadManagers()
-            guard statusRefreshID == actionID else { return }
+            guard currentActionID == actionID else { return }
             if let saved {
                 manager = Self.existingManager(in: saved)
                 installedConnection = InstalledTunnelConnection(manager: manager)
@@ -371,6 +438,80 @@ final class TunnelController {
         }
     }
 
+    /// Erase can be retried after any failed preference or file operation.
+    /// Keep disabled managers as a record of their containers until cleanup succeeds.
+    func eraseInstalledTunnel(
+        loadManagers: @MainActor () async throws -> [NETunnelProviderManager] = {
+            try await NETunnelProviderManager.loadAllFromPreferences()
+        },
+        eraseSnapshots: @escaping @Sendable (Set<URL>) throws -> Void = { containers in
+            for container in containers {
+                try SharedTunnelConfigurationStore.eraseAllSnapshots(in: container)
+            }
+            guard SecretStore.runtime.pruneTunnelSnapshots(keeping: []) else {
+                throw TunnelSecretPreparationError.writeFailed
+            }
+        },
+    ) async throws {
+        let actionID = UUID()
+        currentActionID = actionID
+        statusRefreshID = actionID
+        startInProgress = false
+        stopInProgress = true
+        defer {
+            if currentActionID == actionID {
+                stopInProgress = false
+            }
+        }
+        diagnosticsTask?.cancel()
+        observeStatus(for: nil)
+        await preferenceGate.acquire()
+        defer { preferenceGate.release() }
+        guard currentActionID == actionID else { throw CancellationError() }
+        let managers = try await loadManagers().filter(Self.isHopManager)
+        var containers: Set = [RuntimeEnvironment.sharedContainerURL]
+        for manager in managers {
+            if let configuration = (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration,
+               configuration["configPath"] != nil, let group = configuration["appGroup"] as? String
+            {
+                guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group) else {
+                    throw RuntimeEnvironmentError.appGroupUnavailable(group)
+                }
+                containers.insert(url)
+            }
+            if manager.isEnabled || manager.isOnDemandEnabled {
+                let enabled = manager.isEnabled
+                let onDemand = manager.isOnDemandEnabled
+                manager.isEnabled = false
+                manager.isOnDemandEnabled = false
+                do {
+                    try await save(manager)
+                } catch {
+                    manager.isEnabled = enabled
+                    manager.isOnDemandEnabled = onDemand
+                    throw error
+                }
+            }
+            let session = manager.connection
+            if session.status != .disconnected, session.status != .invalid {
+                session.stopVPNTunnel()
+                let deadline = ContinuousClock.now + .seconds(10)
+                while session.status != .disconnected, session.status != .invalid {
+                    guard ContinuousClock.now < deadline else { throw TunnelEraseError.stopTimedOut }
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+            }
+        }
+        let snapshotContainers = containers
+        try await Task.detached(priority: .userInitiated) { try eraseSnapshots(snapshotContainers) }.value
+        for manager in managers {
+            try await manager.removeFromPreferences()
+        }
+        manager = nil
+        installedConnection = nil
+        state = .disconnected
+    }
+
     func appendLog(_ message: String) {
         appendLogs([message])
     }
@@ -379,7 +520,13 @@ final class TunnelController {
     /// localized description is not safe to persist. Xray errors already expose
     /// a stable code-only summary; all other errors retain only domain and code.
     func appendTunnelStartFailure(_ error: Error) {
+        if let error = error as? XrayConfigError, case let .validationFailed(issues) = error,
+           let issue = issues.first
+        {
+            configurationFailureHint = "\(issue.publicField). \(issue.publicReason ?? "Review the settings before reconnecting.")"
+        }
         if let error = error as? XrayCoreClientError {
+            configurationFailureHint = error.localizedDescription
             appendLog("Tunnel start failed: \(error.localizedDescription)")
         } else {
             let error = error as NSError
@@ -422,10 +569,15 @@ final class TunnelController {
         // Newest-first display order: the last message of the batch lands at
         // index 0, matching what per-line inserts would have produced.
         logs.insert(contentsOf: entries.reversed(), at: 0)
-        if logs.count > maximumLogEntries {
-            logs.removeLast(logs.count - maximumLogEntries)
-        }
+        trimLogsToLimit()
         onLogsChanged?()
+    }
+
+    private func trimLogsToLimit() {
+        let limit = max(0, maximumLogEntries)
+        if logs.count > limit {
+            logs.removeLast(logs.count - limit)
+        }
     }
 
     func clearLogs() {
@@ -500,8 +652,7 @@ final class TunnelController {
         }
     }
 
-    private func configuredManager(secretNonce: String, connection: InstalledTunnelConnection, onDemand: Bool, killSwitch: Bool, usesInlineResolvedConfig: Bool, configURL: URL, previousNonce: String?) async throws -> NETunnelProviderManager {
-        let manager = try await loadManager()
+    private func configuredManager(_ manager: NETunnelProviderManager, secretNonce: String, connection: InstalledTunnelConnection, onDemand: Bool, killSwitch: Bool, usesInlineResolvedConfig: Bool, configURL: URL, previousNonce: String?) async throws -> NETunnelProviderManager {
         let tunnelProtocol = NETunnelProviderProtocol()
         tunnelProtocol.providerBundleIdentifier = RuntimeEnvironment.tunnelProviderBundleIdentifier
         tunnelProtocol.serverAddress = "Hop"
@@ -561,10 +712,12 @@ final class TunnelController {
     }
 
     private static func existingManager(in managers: [NETunnelProviderManager]) -> NETunnelProviderManager? {
-        managers.first {
-            ($0.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier
-                == RuntimeEnvironment.tunnelProviderBundleIdentifier
-        }
+        managers.first(where: isHopManager)
+    }
+
+    private nonisolated static func isHopManager(_ manager: NETunnelProviderManager) -> Bool {
+        (manager.protocolConfiguration as? NETunnelProviderProtocol)?.providerBundleIdentifier
+            == RuntimeEnvironment.tunnelProviderBundleIdentifier
     }
 
     func loadManager(
@@ -620,7 +773,7 @@ final class TunnelController {
         }
     }
 
-    private func schedulePostStartDiagnostics() {
+    private func schedulePostStartDiagnostics(actionID: UUID) {
         diagnosticsTask?.cancel()
         diagnosticsTask = Task { [weak self] in
             for delaySeconds in [1, 3, 6] {
@@ -632,13 +785,14 @@ final class TunnelController {
                 guard !Task.isCancelled else {
                     return
                 }
-                await self?.runPostStartDiagnostic(delaySeconds: delaySeconds)
+                await self?.runPostStartDiagnostic(delaySeconds: delaySeconds, actionID: actionID)
             }
         }
     }
 
-    private func runPostStartDiagnostic(delaySeconds: Int) async {
+    private func runPostStartDiagnostic(delaySeconds: Int, actionID: UUID) async {
         await syncExtensionLogs()
+        guard currentActionID == actionID, !Task.isCancelled else { return }
         guard let status = manager?.connection.status else {
             appendLog("Post-start diagnostic +\(delaySeconds)s: no tunnel manager connection available")
             return
@@ -668,7 +822,7 @@ final class TunnelController {
         case .disconnecting:
             state = .disconnecting
         case .disconnected, .invalid:
-            if startInProgress || state == .connecting {
+            if startInProgress {
                 state = .failed
                 startInProgress = false
                 if !loggedStartupStop {
@@ -678,7 +832,8 @@ final class TunnelController {
                     logLastDisconnectError()
                     // A startup failure repeats identically on every on-demand
                     // relaunch; disarm so iOS doesn't loop a broken config.
-                    Task { await self.disarmOnDemandIfNeeded(context: "tunnel failed during startup") }
+                    let actionID = currentActionID
+                    Task { await self.disarmOnDemandIfNeeded(context: "tunnel failed during startup", actionID: actionID) }
                 }
                 Task { await syncExtensionLogs() }
             } else if state != .failed {
@@ -710,6 +865,30 @@ final class TunnelController {
                 }
                 self.appendLastDisconnectError(error)
             }
+        }
+    }
+}
+
+/// Transfers ownership of the entire preferences/snapshot transaction across
+/// suspension points. Main-actor isolation alone only serializes individual steps.
+@MainActor
+private final class TunnelPreferenceGate {
+    private(set) var isLocked = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func acquire() async {
+        if isLocked {
+            await withCheckedContinuation { waiters.append($0) }
+        } else {
+            isLocked = true
+        }
+    }
+
+    func release() {
+        if waiters.isEmpty {
+            isLocked = false
+        } else {
+            waiters.removeFirst().resume()
         }
     }
 }
@@ -786,6 +965,10 @@ struct SharedTunnelConfigPreparation: @unchecked Sendable {
             throw TunnelSecretPreparationError.writeFailed
         }
     }
+}
+
+private enum TunnelEraseError: Error {
+    case stopTimedOut
 }
 
 private enum TunnelSecretPreparationError: Error {

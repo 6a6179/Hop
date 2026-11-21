@@ -5,7 +5,7 @@ import VisionKit
 /// a detected subscription URL plus its fetched items.
 enum ImportTextSaveResult {
     case importText(ImportResult)
-    case subscription(SubscriptionSource, ImportResult)
+    case subscription(SubscriptionSource, ImportResult, sourceAtPreview: SubscriptionSource?)
 }
 
 extension View {
@@ -35,24 +35,28 @@ struct ImportTextDraft {
             result = nil
             error = nil
             subscriptionURL = nil
+            sourceAtPreview = nil
         }
     }
 
     var result: ImportResult?
     var error: String?
     var subscriptionURL: URL?
+    var sourceAtPreview: SubscriptionSource?
 
-    mutating func finishPreview(_ result: ImportResult, subscriptionURL: URL?, for input: String) throws {
+    mutating func finishPreview(_ result: ImportResult, subscriptionURL: URL?, sourceAtPreview: SubscriptionSource? = nil, for input: String) throws {
         try Task.checkCancellation()
         guard text == input else { return }
         self.result = result
         self.subscriptionURL = subscriptionURL
+        self.sourceAtPreview = sourceAtPreview
         error = nil
     }
 }
 
 struct ImportTextSheet: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(HopStore.self) private var store
     @State private var draft: ImportTextDraft
     @State private var isLoading = false
     @State private var previewTask: Task<Void, Never>?
@@ -189,6 +193,7 @@ struct ImportTextSheet: View {
                     lastImportSummary: importResult.summary,
                 ),
                 importResult,
+                sourceAtPreview: draft.sourceAtPreview,
             ))
         } else {
             onSave(.importText(importResult))
@@ -200,33 +205,34 @@ struct ImportTextSheet: View {
         cancelPreview()
         let input = draft.text
         let trimmed = trimmedImportText
+        draft.result = nil
+        draft.subscriptionURL = nil
+        draft.sourceAtPreview = nil
         guard let payload = ProfileImportPayloadDetector.detect(trimmed) else {
-            draft.result = nil
-            draft.subscriptionURL = nil
             draft.error = ProxyLinkParseError.invalidURL.localizedDescription
             return
         }
 
         draft.error = nil
-        draft.result = nil
-        draft.subscriptionURL = nil
 
         isLoading = true
         previewTask = Task { @MainActor in
             do {
                 let result: ImportResult
                 let subscriptionURL: URL?
+                let sourceAtPreview: SubscriptionSource?
                 switch payload {
                 case let .subscription(url):
+                    sourceAtPreview = store.subscription(at: url.absoluteString)
                     result = try await importService.importSubscription(url: url)
-                        .droppingRules()
-                        .requiringSubscriptionGroupReview()
+                        .preparedForSubscription(sourceAtPreview?.id ?? UUID())
                     subscriptionURL = url
                 case let .importText(text):
+                    sourceAtPreview = nil
                     result = try await importService.importTextOffMain(text)
                     subscriptionURL = nil
                 }
-                try draft.finishPreview(result, subscriptionURL: subscriptionURL, for: input)
+                try draft.finishPreview(result, subscriptionURL: subscriptionURL, sourceAtPreview: sourceAtPreview, for: input)
             } catch {
                 guard !Task.isCancelled, draft.text == input else { return }
                 draft.error = error.localizedDescription
@@ -291,7 +297,7 @@ private struct ImportPreviewView: View {
             DisclosureGroup("Rules (\(result.rules.count))") {
                 ForEach(result.rules) { rule in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(rule.value)
+                        Text(rule.matchDescription)
                         Text("\(rule.kind.displayName) → \(targetName(rule.target))")
                             .font(.caption)
                             .foregroundStyle(.secondary)

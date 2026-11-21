@@ -85,6 +85,19 @@ final class XrayConfigBuilderTests: XCTestCase {
         }
     }
 
+    func testWireGuardLocalAddressesAreValidatedBeforeSaveAndConnect() throws {
+        let key = Data(repeating: 1, count: 32).base64EncodedString()
+        var options = WireGuardOptions(privateKey: key, peerPublicKey: key, localAddress: ["10.0.0.2", "fd00::2/64"])
+        var profile = ProxyProfile(name: "WG", endpoint: Endpoint(host: "peer.example", port: 51820), options: .wireGuard(options), security: .none)
+        XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .global, rules: []))
+        for addresses in [[], ["10.0.0.2", "fd00::2/129"], ["10.0.0.2/33"], ["peer.example"]] {
+            options.localAddress = addresses
+            profile.options = .wireGuard(options)
+            assertRejected(profile, contains: "localAddress")
+            XCTAssertNil(ProfileEditorDraft(profile: profile).validation(availableProfiles: []).profile)
+        }
+    }
+
     func testBuilderDisablesEngineLogOutputsBeforeCoreValidation() throws {
         let json = try builder.build(profile: basicVLESS(), routingMode: .global, rules: [])
         let config = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
@@ -1929,7 +1942,7 @@ final class XrayConfigBuilderTests: XCTestCase {
     }
 
     func testRoutingAtomBoundaryDoesNotDoubleChargeTargetResolution() throws {
-        let rule = RoutingRule(kind: .final, value: "", target: .direct)
+        let rule = RoutingRule(kind: .port, value: "443", target: .direct)
         let maximumRules = Array(repeating: rule, count: IOSRuntimeLimits.default.maxRoutingAtoms)
         XCTAssertNoThrow(try builder.build(
             profile: basicVLESS(),
@@ -1944,6 +1957,82 @@ final class XrayConfigBuilderTests: XCTestCase {
             rules: excessiveRules,
         )) { error in
             XCTAssertTrue(error.localizedDescription.contains("Routing contains 4097 atoms"), "Unexpected error: \(error)")
+        }
+    }
+
+    func testOnlyRulesThroughFirstFinalAffectRoutingAndReachability() throws {
+        let missing = OutboundTarget.profile(UUID())
+        var settings = AppSettings.defaults
+        settings.proxyDNS = false
+        settings.sniffTraffic = false
+        let active = [RoutingRule(kind: .port, value: "80", target: .direct), RoutingRule(kind: .final, value: "*", target: .reject)]
+        let dormant = Array(repeating: RoutingRule(kind: .ipCIDR, value: "10.0.0.0/8", target: missing), count: IOSRuntimeLimits.default.maxRoutingAtoms)
+        let json = try builder.build(profiles: [], groups: [], selectedTarget: missing, routingMode: .rule, rules: active + dormant, settings: settings)
+        let routing = try XCTUnwrap(parse(json)["routing"] as? [String: Any])
+        let rules = try XCTUnwrap(routing["rules"] as? [[String: Any]])
+        XCTAssertEqual(rules.compactMap { $0["outboundTag"] as? String }, ["dns-out", "direct", "direct", "reject"])
+        XCTAssertEqual(routing["domainStrategy"] as? String, "AsIs")
+
+        settings.proxyDNS = true
+        XCTAssertThrowsError(try builder.build(profiles: [], groups: [], selectedTarget: missing, routingMode: .rule, rules: active, settings: settings))
+    }
+
+    func testDomainMatchersRequireSniffingOnTheTUN() throws {
+        var settings = AppSettings.defaults
+        settings.sniffTraffic = false
+        let profile = basicVLESS()
+        for kind in [RoutingRuleKind.domain, .domainSuffix, .domainKeyword, .domainRegex, .geoSite] {
+            let rule = RoutingRule(kind: kind, value: kind == .geoSite ? "category-ir" : "example", target: .reject)
+            XCTAssertThrowsError(try builder.build(profile: profile, routingMode: .rule, rules: [rule], settings: settings)) {
+                XCTAssertTrue($0.localizedDescription.contains("sniffing"))
+            }
+            XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .global, rules: [rule], settings: settings))
+        }
+        let ipRule = RoutingRule(kind: .ipCIDR, value: "10.0.0.0/8", target: .reject)
+        XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .rule, rules: [ipRule], settings: settings))
+        settings.sniffTraffic = true
+        settings.xrayAdvanced = XrayAdvancedDocument(["fakeDns": .object(["ipPool": .string("198.18.0.0/15"), "poolSize": .number(32)])])
+        let domainRule = RoutingRule(kind: .domainSuffix, value: "example.com", target: .reject)
+        XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .rule, rules: [domainRule], settings: settings))
+    }
+
+    func testProtocolRulesUseCanonicalNamesAndRejectUnknownProtocols() throws {
+        let profile = basicVLESS()
+        var settings = AppSettings.defaults
+        func build(_ value: String) throws -> [[String: Any]] {
+            let rule = RoutingRule(kind: .protocolSniff, value: value, target: .reject)
+            let root = try parse(builder.build(profile: profile, routingMode: .rule, rules: [rule], settings: settings))
+            let routing = try XCTUnwrap(root["routing"] as? [String: Any])
+            return try XCTUnwrap(routing["rules"] as? [[String: Any]])
+        }
+        XCTAssertEqual(try build("TLS, Http, QUIC, BitTorrent").compactMap { $0["protocol"] as? [String] }.first, ["tls", "http", "quic", "bittorrent"])
+        XCTAssertThrowsError(try build("TLS, HTTPS"))
+        XCTAssertThrowsError(try build("FakeDNS"))
+        settings.xrayAdvanced = XrayAdvancedDocument(["fakeDns": .object(["ipPool": .string("198.18.0.0/15"), "poolSize": .number(32)])])
+        XCTAssertEqual(try build("FakeDNS").compactMap { $0["protocol"] as? [String] }.first, ["fakedns"])
+    }
+
+    func testOverlappingURLTestGroupsCountUniqueObservatoryMembers() throws {
+        let profiles = (0 ... IOSRuntimeLimits.default.maxObservatoryTargets).map { _ in basicVLESS() }
+        let targets = profiles.map { OutboundTarget.profile($0.id) }
+        let probe = ProxyGroupTestOptions(url: "https://1.1.1.1/")
+        let first = ProxyGroup(name: "First", type: .urlTest, members: Array(targets.prefix(9)), testOptions: probe)
+        var second = ProxyGroup(name: "Second", type: .urlTest, members: first.members, testOptions: probe)
+        let rule = RoutingRule(kind: .port, value: "443", target: .group(second.id))
+        func build() throws -> String {
+            try builder.build(profiles: profiles, groups: [first, second], selectedTarget: .group(first.id), routingMode: .rule, rules: [rule])
+        }
+        let observatory = try XCTUnwrap(parse(build())["observatory"] as? [String: Any])
+        let expected = profiles.prefix(9).map { "proxy-\($0.id.uuidString.lowercased())" }.sorted()
+        XCTAssertEqual(observatory["subjectSelector"] as? [String], expected)
+        second.members = Array(targets.dropFirst(9))
+        XCTAssertThrowsError(try build()) { XCTAssertTrue($0.localizedDescription.contains("16-target")) }
+
+        var settings = AppSettings.defaults
+        settings.xrayAdvanced = XrayAdvancedDocument(["observatory": .object(["subjectSelector": .array([.string("proxy-")])])])
+        let routes = targets.enumerated().map { RoutingRule(kind: .port, value: String(1000 + $0.offset), target: $0.element) }
+        XCTAssertThrowsError(try builder.build(profiles: profiles, groups: [], selectedTarget: .direct, routingMode: .rule, rules: routes, settings: settings)) {
+            XCTAssertTrue($0.localizedDescription.contains("16-target"))
         }
     }
 

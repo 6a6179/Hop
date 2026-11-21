@@ -46,11 +46,21 @@ struct ProxyGroupEditorView: View {
                     }
 
                     ForEach(store.profiles) { profile in
-                        Toggle(profile.name, isOn: memberBinding(for: .profile(profile.id)))
+                        Toggle(isOn: memberBinding(for: .profile(profile.id))) {
+                            Text(profile.name)
+                            if draft.warning == ImportResult.ambiguousSubscriptionGroupWarning {
+                                Text("\(profile.proto.displayName) · \(profile.endpoint.host):\(profile.endpoint.port)")
+                            }
+                        }
                     }
 
                     ForEach(selectableGroups) { group in
-                        Toggle(group.name, isOn: memberBinding(for: .group(group.id)))
+                        Toggle(isOn: memberBinding(for: .group(group.id))) {
+                            Text(group.name)
+                            if draft.warning == ImportResult.ambiguousSubscriptionGroupWarning {
+                                Text("\(group.type.displayName) · \(group.members.count) members")
+                            }
+                        }
                     }
                 } header: {
                     Text("Members")
@@ -158,6 +168,9 @@ struct ProxyGroupEditorDraft {
     var type: ProxyGroupType
     var members: [OutboundTarget]
     var defaultTarget: OutboundTarget?
+    private let providerDefaultTarget: OutboundTarget?
+    private let originalSelection: ProxyGroup.LocalSelection?
+    private let originalDefaultTarget: OutboundTarget?
     var url: String
     var intervalSeconds: String
     let toleranceMilliseconds: Int
@@ -172,7 +185,10 @@ struct ProxyGroupEditorDraft {
         name = group.name
         type = group.type
         members = group.members
-        defaultTarget = group.defaultTarget
+        providerDefaultTarget = group.defaultTarget
+        originalSelection = group.localSelection
+        originalDefaultTarget = group.effectiveDefaultTarget
+        defaultTarget = group.effectiveDefaultTarget
         url = group.testOptions.url
         intervalSeconds = String(group.testOptions.intervalSeconds)
         toleranceMilliseconds = group.testOptions.toleranceMilliseconds
@@ -234,6 +250,17 @@ struct ProxyGroupEditorDraft {
         }
 
         let trimmedURL = trimmed(url)
+        var savedDefault = type == .urlTest ? nil : defaultTarget
+        var localSelection: ProxyGroup.LocalSelection?
+        if subscriptionID != nil, type == .select {
+            savedDefault = providerDefaultTarget
+            if originalDefaultTarget == defaultTarget {
+                localSelection = originalSelection
+            } else {
+                localSelection = defaultTarget == providerDefaultTarget ? .provider : .member(defaultTarget)
+            }
+        }
+        let reviewedWarnings = [ImportResult.ambiguousSubscriptionGroupWarning, ImportResult.newGroupReviewPrompt, ImportResult.changedGroupReviewPrompt]
 
         return ProxyGroup(
             id: id,
@@ -241,7 +268,8 @@ struct ProxyGroupEditorDraft {
             name: trimmedName,
             type: type,
             members: members,
-            defaultTarget: type == .urlTest ? nil : defaultTarget,
+            defaultTarget: savedDefault,
+            localSelection: localSelection,
             testOptions: ProxyGroupTestOptions(
                 // Keep the editor in agreement with the import path and config
                 // builder: a disallowed/empty probe URL falls back to the default
@@ -252,7 +280,7 @@ struct ProxyGroupEditorDraft {
             ),
             isEnabled: isEnabled,
             importedType: importedType,
-            warning: warning,
+            warning: isEnabled && warning.map(reviewedWarnings.contains) == true ? nil : warning,
             lastLatencyMilliseconds: lastLatencyMilliseconds,
         )
     }

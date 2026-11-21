@@ -49,19 +49,24 @@ struct XrayConfigBuilder {
     ) throws -> String {
         try validateGlobalAdvanced(settings.xrayAdvanced)
 
+        let activeRules: ArraySlice<RoutingRule> = if routingMode != .rule {
+            []
+        } else if let final = rules.firstIndex(where: { $0.kind == .final }) {
+            rules[...final]
+        } else {
+            rules[...]
+        }
         let resolver = XrayReachabilityResolver(profiles: profiles, groups: groups, limits: limits)
-        let selectedDestination = try resolver.resolve(routingMode == .direct ? .direct : selectedTarget)
-        let ruleDestinations = try routingMode == .rule ? rules.map { rule in
-            rule.target == .selectedProxy ? selectedDestination : try resolver.resolve(rule.target)
-        } : []
-
-        try require(
-            resolver.urlGroups.values.reduce(0) { $0 + $1.memberTags.count } <= limits.maxObservatoryTargets,
-            path: "/observatory/subjectSelector",
-            "URL-test groups exceed the \(limits.maxObservatoryTargets)-target iOS limit.",
+        let usesSelectedTarget = routingMode != .direct && (
+            activeRules.last?.kind != .final || activeRules.contains { $0.target == .selectedProxy }
+                || (settings.dnsPreset != .system && settings.proxyDNS)
         )
+        let selectedDestination = try resolver.resolve(usesSelectedTarget ? selectedTarget : .direct)
+        let ruleDestinations = try activeRules.map { rule in
+            rule.target == .selectedProxy ? selectedDestination : try resolver.resolve(rule.target)
+        }
 
-        let routingAtoms = routingMode == .rule ? rules.reduce(0) { $0 + atomCount(in: $1) } : 0
+        let routingAtoms = activeRules.reduce(0) { $0 + atomCount(in: $1) }
         try require(
             routingAtoms <= limits.maxRoutingAtoms,
             path: "/routing/rules",
@@ -112,7 +117,7 @@ struct XrayConfigBuilder {
             ]),
             "routing": .object(routingDictionary(
                 mode: routingMode,
-                rules: rules,
+                rules: activeRules,
                 selected: selectedDestination,
                 ruleDestinations: ruleDestinations,
                 resolver: resolver,
@@ -120,7 +125,7 @@ struct XrayConfigBuilder {
             )),
         ]
 
-        if let observatory = try observatoryDictionary(from: Array(resolver.urlGroups.values)) {
+        if let observatory = observatoryDictionary(from: Array(resolver.urlGroups.values)) {
             root["observatory"] = .object(observatory)
         }
 
@@ -171,7 +176,7 @@ struct XrayConfigBuilder {
         } catch let XrayConfigError.validationFailed(issues) {
             return issues
         } catch {
-            return [XrayValidationIssue(path: "/", message: error.localizedDescription)]
+            return [XrayValidationIssue(path: "/", message: "\(error.localizedDescription)")]
         }
     }
 
@@ -343,9 +348,9 @@ private extension XrayConfigBuilder {
         "paddingMin", "paddingMax", "padding_min", "padding_max",
     ]
 
-    func require(_ condition: @autoclosure () -> Bool, path: String, _ message: String) throws {
+    func require(_ condition: @autoclosure () -> Bool, path: String, _ message: @autoclosure () -> XrayValidationMessage) throws {
         guard condition() else {
-            throw XrayConfigError.validationFailed([XrayValidationIssue(path: path, message: message)])
+            throw XrayConfigError.validationFailed([XrayValidationIssue(path: path, message: message())])
         }
     }
 
@@ -565,6 +570,10 @@ private extension XrayConfigBuilder {
                 )
             }
             try require(wireGuardKeyHex(options.privateKey) != nil, path: "\(path)/options/privateKey", "WireGuard private key must encode 32 bytes.")
+            try require(!options.localAddress.isEmpty, path: "\(path)/options/localAddress", "WireGuard requires a local IP address.")
+            for (index, address) in options.localAddress.enumerated() {
+                try require(Endpoint.ipAddressWidth(address) != nil || Endpoint.hostBits(inCIDR: address) != nil, path: "\(path)/options/localAddress/\(index)", "WireGuard local address must be an IPv4 or IPv6 address or CIDR prefix.")
+            }
             let peers = options.effectivePeers
             try require(!peers.isEmpty && peers.count <= limits.maxWireGuardPeers, path: "\(path)/options/peers", "WireGuard supports at most \(limits.maxWireGuardPeers) peers on iOS.")
             if options.peers != nil {
@@ -1474,7 +1483,7 @@ private extension XrayConfigBuilder {
 
     func routingDictionary(
         mode: RoutingMode,
-        rules: [RoutingRule],
+        rules: ArraySlice<RoutingRule>,
         selected: XrayResolvedTarget,
         ruleDestinations: [XrayResolvedTarget],
         resolver: XrayReachabilityResolver,
@@ -1496,18 +1505,18 @@ private extension XrayConfigBuilder {
             setRouteTarget(settings.proxyDNS && mode != .direct ? selected : .outbound("direct"), in: &dnsRoute)
             resultRules.append(.object(dnsRoute))
         }
-        if mode == .rule {
-            for (index, rule) in rules.enumerated() {
-                try resultRules.append(.object(routingRuleDictionary(rule, index: index, destination: ruleDestinations[index], sniff: settings.sniffTraffic)))
-            }
+        for (index, rule) in rules.enumerated() {
+            try resultRules.append(.object(routingRuleDictionary(rule, index: index, destination: ruleDestinations[index], settings: settings)))
         }
 
-        var catchAll: JSONObject = [
-            "type": .string("field"),
-            "network": .string("tcp,udp"),
-        ]
-        setRouteTarget(mode == .direct ? .outbound("direct") : selected, in: &catchAll)
-        resultRules.append(.object(catchAll))
+        if rules.last?.kind != .final {
+            var catchAll: JSONObject = [
+                "type": .string("field"),
+                "network": .string("tcp,udp"),
+            ]
+            setRouteTarget(selected, in: &catchAll)
+            resultRules.append(.object(catchAll))
+        }
 
         // IPIfNonMatch never retries DNS once our TCP/UDP catch-all matches.
         let needsDestinationIP = mode == .rule && rules.contains { [.geoIP, .ipIsPrivate, .ipCIDR].contains($0.kind) }
@@ -1535,12 +1544,12 @@ private extension XrayConfigBuilder {
         _ rule: RoutingRule,
         index: Int,
         destination: XrayResolvedTarget,
-        sniff: Bool,
+        settings: AppSettings,
     ) throws -> JSONObject {
         let path = "/routing/rules/\(index)"
         try require(rule.kind.isAvailableInXray, path: path, "\(rule.kind.displayName) is Apple-specific and cannot be reproduced by Xray routing.")
-        if rule.kind == .protocolSniff {
-            try require(sniff, path: path, "Protocol routing requires traffic sniffing.")
+        if !settings.sniffTraffic, let requirement = rule.kind.sniffingRequirement {
+            try require(false, path: path, XrayValidationMessage(stringLiteral: requirement))
         }
 
         var result: JSONObject = ["type": .string("field")]
@@ -1580,7 +1589,13 @@ private extension XrayConfigBuilder {
             try require(values.allSatisfy { ["tcp", "udp"].contains($0.lowercased()) }, path: path, "Xray TUN routing supports tcp and udp network matchers only.")
             result["network"] = .string(values.joined(separator: ","))
         case .protocolSniff:
-            result["protocol"] = .array(values.map(JSONValue.string))
+            let protocols = values.map { $0.lowercased() }
+            var supported: Set = ["http", "http1", "tls", "quic", "bittorrent"]
+            if settings.xrayAdvanced?.values["fakeDns"] != nil {
+                supported.insert("fakedns")
+            }
+            try require(!protocols.isEmpty && protocols.allSatisfy(supported.contains), path: path, "Choose a protocol the tunnel can identify: \(supported.sorted().joined(separator: ", ")).")
+            result["protocol"] = .array(protocols.map(JSONValue.string))
         case .geoSite:
             try require(values.allSatisfy(safeGeoCategory), path: path, "Unsafe GeoSite/GeoIP category; only letters, digits, hyphen, and underscore are allowed.")
             try require(values.allSatisfy { VerifiedXrayGeodata.geoSiteCategories.contains($0.lowercased()) }, path: path, "GeoSite category is not present in Hop's verified, memory-bounded local asset.")
@@ -1625,7 +1640,7 @@ private extension XrayConfigBuilder {
         }
     }
 
-    func observatoryDictionary(from groups: [XrayResolvedURLGroup]) throws -> JSONObject? {
+    func observatoryDictionary(from groups: [XrayResolvedURLGroup]) -> JSONObject? {
         guard let first = groups.first else { return nil }
         let tags = Array(Set(groups.flatMap(\.memberTags))).sorted()
         return [
@@ -1682,7 +1697,13 @@ private extension XrayConfigBuilder {
             try require(servers.count <= limits.maxDNSServers, path: "/dns/servers", "DNS server count exceeds the iOS limit of \(limits.maxDNSServers).")
         }
         if let subjects = root["observatory"]?.objectValue?["subjectSelector"]?.arrayValue {
-            try require(subjects.count <= limits.maxObservatoryTargets, path: "/observatory/subjectSelector", "Observatory target count exceeds the iOS limit of \(limits.maxObservatoryTargets).")
+            let path = "/observatory/subjectSelector"
+            try require(subjects.count <= limits.maxObservatoryTargets, path: path, "Observatory exceeds the \(limits.maxObservatoryTargets)-target iOS limit.")
+            // Xray expands each selector as a tag prefix and probes a matching outbound only once.
+            let selectors = subjects.compactMap(\.stringValue)
+            let tags = root["outbounds"]?.arrayValue?.compactMap { $0.objectValue?["tag"]?.stringValue } ?? []
+            let matched = tags.filter { tag in selectors.contains(where: tag.hasPrefix) }
+            try require(matched.count <= limits.maxObservatoryTargets, path: path, "Observatory exceeds the \(limits.maxObservatoryTargets)-target iOS limit.")
         }
         if let subjects = root["burstObservatory"]?.objectValue?["subjectSelector"]?.arrayValue {
             try require(subjects.count <= limits.maxObservatoryTargets, path: "/burstObservatory/subjectSelector", "Burst-observatory target count exceeds the iOS limit of \(limits.maxObservatoryTargets).")
@@ -2467,7 +2488,7 @@ private final class XrayReachabilityResolver {
         switch group.type {
         case .select:
             var attempted: Set<OutboundTarget> = []
-            if let selected = group.defaultTarget {
+            if let selected = group.effectiveDefaultTarget {
                 attempted.insert(deduplicationKey(for: selected))
                 do {
                     let destination = try resolve(selected, activeGroups: &activeGroups, groupDepth: groupDepth)
@@ -2523,7 +2544,7 @@ private final class XrayReachabilityResolver {
         return .outbound(XrayConfigBuilder.tag(for: profile))
     }
 
-    private func fail<T>(_ path: String, _ message: String) throws -> T {
+    private func fail<T>(_ path: String, _ message: XrayValidationMessage) throws -> T {
         throw XrayConfigError.validationFailed([XrayValidationIssue(path: path, message: message)])
     }
 

@@ -4,6 +4,59 @@ import XCTest
 final class RuleConfigurationTests: XCTestCase {
     private let builder = XrayConfigBuilder()
 
+    func testFinalRulesCanonicalizeLegacyTextAndDescribeTheirActualMatch() throws {
+        var legacy = RoutingRule(kind: .final, value: "example.org", target: .reject)
+        XCTAssertEqual(legacy.value, "*")
+        legacy.value = "old hostname"
+        XCTAssertEqual(legacy.value, "*")
+        let data = try JSONEncoder().encode(legacy)
+        var fields = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        fields["value"] = "legacy-host.example"
+        let restored = try JSONDecoder().decode(RoutingRule.self, from: JSONSerialization.data(withJSONObject: fields))
+        XCTAssertEqual(restored.value, "*")
+        XCTAssertEqual(restored.matchDescription, "All remaining traffic")
+        XCTAssertEqual(RuleEditorDraft(rule: restored).rule.value, "*")
+    }
+
+    func testRuleReorderingCannotCrossTheFinalOrActivateDormantRows() {
+        let broad = RoutingRule(kind: .domainSuffix, value: "example.org", target: .direct)
+        let narrow = RoutingRule(kind: .domain, value: "one.example.org", target: .reject)
+        let final = RoutingRule(kind: .final, value: "*", target: .selectedProxy)
+        let dormant = RoutingRule(kind: .port, value: "443", target: .direct)
+        var config = RuleConfiguration(name: "Policy", rules: [broad, narrow, final, dormant])
+        config.moveActiveRules(fromOffsets: [1], toOffset: 0)
+        XCTAssertEqual(config.rules, [narrow, broad, final, dormant])
+        config.moveActiveRules(fromOffsets: [0], toOffset: 4)
+        config.moveActiveRules(fromOffsets: [3], toOffset: 0)
+        config.moveActiveRules(fromOffsets: [2], toOffset: 0)
+        XCTAssertEqual(config.rules, [narrow, broad, final, dormant])
+    }
+
+    func testGeoSiteHintIsAcceptedByTheInstalledCore() async throws {
+        let rule = RoutingRule(kind: .geoSite, value: RoutingRuleKind.geoSite.valuePrompt, target: .reject)
+        try await RuleEditorDraft(rule: rule).validate()
+    }
+
+    @MainActor
+    func testRenamingAnOlderDraftCannotUndoRepairedRuleTargets() {
+        let store = HopStore(dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()))
+        let original = RuleConfiguration(name: "Custom", rules: [.init(kind: .domain, value: "example.org", target: .named("Work"))])
+        store.addRuleConfiguration(original)
+        var repaired = original
+        repaired.rules[0].target = .reject
+        XCTAssertTrue(store.updateRuleConfiguration(repaired))
+        var stale = original
+        stale.name = "Renamed"
+        XCTAssertFalse(store.updateRuleConfiguration(stale, ifUnchangedSince: original))
+        XCTAssertEqual(store.activeRuleConfiguration, repaired)
+        var renamed = repaired
+        renamed.name = stale.name
+        XCTAssertTrue(store.updateRuleConfiguration(renamed, ifUnchangedSince: repaired))
+        XCTAssertEqual(store.activeRuleConfiguration, renamed)
+        store.deleteRuleConfiguration(id: renamed.id)
+        XCTAssertFalse(store.updateRuleConfiguration(repaired, ifUnchangedSince: renamed))
+    }
+
     func testEditingExistingFinalAndDormantRulesPreservesTheirOrder() {
         let final = RoutingRule(kind: .final, value: "*", target: .reject)
         let dormant = RoutingRule(kind: .domain, value: "example.org", target: .direct)
@@ -263,7 +316,7 @@ final class RuleConfigurationTests: XCTestCase {
     }
 
     @MainActor
-    func testDeleteProfileAndGroupRemoveDanglingRuleTargets() {
+    func testDeleteProfileAndGroupPreserveRulesAsReject() {
         let store = HopStore(dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()))
         let profile = ProxyProfile(
             name: "Rule Target",
@@ -280,21 +333,16 @@ final class RuleConfigurationTests: XCTestCase {
             RoutingRule(kind: .domainSuffix, value: "c.example.com", target: .direct),
         ])
         store.addRuleConfiguration(config)
+        let inactive = RuleConfiguration(name: "Other", rules: config.rules)
+        store.addRuleConfiguration(inactive)
 
         store.deleteProfile(id: profile.id)
-        var rules = store.ruleConfigurations.first { $0.id == config.id }?.rules ?? []
-        XCTAssertFalse(
-            rules.contains { $0.target == .profile(profile.id) },
-            "deleting a node must drop rules that target it, or the next config build fails on a dangling reference",
-        )
-
         store.deleteGroup(id: group.id)
-        rules = store.ruleConfigurations.first { $0.id == config.id }?.rules ?? []
-        XCTAssertFalse(
-            rules.contains { $0.target == .group(group.id) },
-            "deleting a group must drop rules that target it",
-        )
-        XCTAssertTrue(rules.contains { $0.target == .direct }, "unrelated rules must survive the repair")
+        for original in [config, inactive] {
+            let repaired = store.ruleConfigurations.first { $0.id == original.id }?.rules ?? []
+            XCTAssertEqual(repaired.map(\.id), original.rules.map(\.id))
+            XCTAssertEqual(repaired.map(\.target), [.reject, .reject, .direct])
+        }
     }
 
     @MainActor

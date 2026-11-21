@@ -3,6 +3,8 @@ import Foundation
 enum ProxyLinkParseError: LocalizedError {
     case unsupportedScheme(String)
     case invalidURL
+    case invalidSecurity
+    case invalidTransport
     case missingCredentials
     case missingHost
     case missingPort
@@ -19,6 +21,10 @@ enum ProxyLinkParseError: LocalizedError {
             "Unsupported proxy scheme: \(scheme)"
         case .invalidURL:
             "Invalid proxy URL."
+        case .invalidSecurity:
+            "Unsupported or conflicting proxy security setting."
+        case .invalidTransport:
+            "Unsupported proxy transport."
         case .missingCredentials:
             "Missing proxy credentials."
         case .missingHost:
@@ -172,7 +178,7 @@ struct ProxyImportService {
         let uuid = try requiredUser(components)
         let endpoint = try endpoint(from: components)
         let query = Query(components)
-        let security = parseSecurity(query: query, fallbackServerName: endpoint.host)
+        let security = try parseSecurity(query: query, fallbackServerName: endpoint.host)
 
         return try ProxyProfile(
             name: displayName(from: components, fallback: "VLESS \(endpoint.host)"),
@@ -187,7 +193,7 @@ struct ProxyImportService {
         let password = try requiredUser(components)
         let endpoint = try endpoint(from: components)
         let query = Query(components)
-        let security = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: true)
+        let security = try parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: true)
 
         return try ProxyProfile(
             name: displayName(from: components, fallback: "Trojan \(endpoint.host)"),
@@ -234,7 +240,7 @@ struct ProxyImportService {
         }
         // Hysteria2 runs over QUIC and always uses TLS. Links commonly omit an
         // explicit security parameter, so default to TLS on the host.
-        let security = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: true, certificatePin: query["pinSHA256"])
+        let security = try parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: true, requiresSecurity: true, certificatePin: query["pinSHA256"])
 
         return try ProxyProfile(
             name: displayName(from: components, fallback: "Hysteria2 \(endpoint.host)"),
@@ -324,12 +330,14 @@ struct ProxyImportService {
             throw ProxyLinkParseError.invalidURL
         }
 
+        let endpoint = try endpoint(from: serverComponents)
+        let query = Query(components)
         return try ProxyProfile(
             name: name,
-            endpoint: endpoint(from: serverComponents),
+            endpoint: endpoint,
             options: .shadowsocks(ShadowsocksOptions(method: credentials[0], password: credentials[1])),
-            security: .none,
-            transport: .tcp,
+            security: parseSecurity(query: query, fallbackServerName: endpoint.host),
+            transport: parseTransport(query: query),
         )
     }
 
@@ -346,8 +354,12 @@ struct ProxyImportService {
             // `server_port: 0`, failing the tunnel with no useful diagnostic.
             guard (1 ... 65535).contains(port) else { throw ProxyLinkParseError.missingPort }
             let uuid = try stringValue(object["id"], error: .missingCredentials)
-            let network = (object["net"] as? String) ?? "tcp"
-            let tlsValue = ((object["tls"] as? String) ?? "").lowercased()
+            let network = object["net"] as? String
+            guard object["net"] == nil || network != nil else { throw ProxyLinkParseError.invalidTransport }
+            let tlsValue = object["tls"] as? String
+            guard object["tls"] == nil || tlsValue != nil else { throw ProxyLinkParseError.invalidSecurity }
+            // v2rayN also represents no transport security with an empty string.
+            let layer = try importedSecurityLayer(tlsValue?.nilIfEmpty, defaultLayer: .none)
             let sni = (object["sni"] as? String) ?? (object["host"] as? String)
             let tls = TLSOptions(
                 serverName: sni ?? host,
@@ -363,7 +375,7 @@ struct ProxyImportService {
                 cipherSuites: object["ciphers"] as? String,
                 enableSessionResumption: boolValue(from: object["sessionResumption"]) ?? false,
             )
-            let security: ProxySecurity = if tlsValue == "reality" {
+            let security: ProxySecurity = if layer == .reality {
                 ProxySecurity(
                     layer: .reality,
                     tls: tls,
@@ -376,12 +388,12 @@ struct ProxyImportService {
                         utlsFingerprint: tls.utlsFingerprint ?? "chrome",
                     ),
                 )
-            } else if tlsValue == "tls" {
+            } else if layer == .tls {
                 .tls(tls)
             } else {
                 .none
             }
-            var transport = transportFromVMess(network: network, path: object["path"] as? String, host: object["host"] as? String)
+            var transport = try transportFromVMess(network: network ?? "tcp", path: object["path"] as? String, host: object["host"] as? String)
             if transport.type == .xhttp, let mode = object["mode"] as? String {
                 transport.xhttpMode = mode
             }
@@ -429,7 +441,7 @@ struct ProxyImportService {
         let query = Query(components)
         let username = components.user
         let password = components.password
-        let parsedSecurity = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: isTLS)
+        let parsedSecurity = try parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: isTLS, requiresSecurity: isTLS)
         return try ProxyProfile(
             name: displayName(from: components, fallback: "\(isTLS ? "HTTPS" : "HTTP") \(endpoint.host)"),
             endpoint: endpoint,
@@ -444,7 +456,7 @@ struct ProxyImportService {
         let query = Query(components)
         let username = components.user
         let password = components.password
-        let parsedSecurity = parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: isTLS)
+        let parsedSecurity = try parseSecurity(query: query, fallbackServerName: endpoint.host, defaultTLS: isTLS, requiresSecurity: isTLS)
         return try ProxyProfile(
             name: displayName(from: components, fallback: "SOCKS \(endpoint.host)"),
             endpoint: endpoint,
@@ -522,8 +534,13 @@ struct ProxyImportService {
         }
     }
 
-    private func parseSecurity(query: Query, fallbackServerName: String, defaultTLS: Bool = false, certificatePin: String? = nil) -> ProxySecurity {
-        let security = (query.first("security", "tls") ?? "").lowercased()
+    private func parseSecurity(query: Query, fallbackServerName: String, defaultTLS: Bool = false, requiresSecurity: Bool = false, certificatePin: String? = nil) throws -> ProxySecurity {
+        let implicitTLS = defaultTLS || query["sni"] != nil || query["alpn"] != nil
+        let layer = try importedSecurityLayer(query["security"], tls: query["tls"], defaultLayer: implicitTLS ? .tls : .none)
+        if layer == .none {
+            guard !requiresSecurity, query["sni"] == nil, query["alpn"] == nil else { throw ProxyLinkParseError.invalidSecurity }
+            return .none
+        }
         let serverName = Self.serverNameKeys.lazy.compactMap { query[$0] }.first ?? fallbackServerName
         let alpn = alpnValues(from: query.first("alpn"))
         let fingerprint = query.first("fp", "fingerprint", "utlsFingerprint", "utls_fingerprint", "utls-fingerprint", "clientFingerprint", "client_fingerprint", "client-fingerprint") ?? "chrome"
@@ -537,7 +554,7 @@ struct ProxyImportService {
         let cipherSuites = query.first("ciphers", "cipherSuites", "cipher_suites", "cipher-suites")
         let sessionResumption = boolOption(query.first("sessionResumption", "session_resumption", "session-resumption"))
 
-        if security == "reality" {
+        if layer == .reality {
             return ProxySecurity(
                 layer: .reality,
                 tls: TLSOptions(
@@ -557,30 +574,47 @@ struct ProxyImportService {
             )
         }
 
-        if defaultTLS || security == "tls" || boolOption(query["tls"]) || query["sni"] != nil || query["alpn"] != nil {
-            return .tls(
-                TLSOptions(
-                    serverName: serverName,
-                    alpn: alpn,
-                    allowInsecure: allowInsecure,
-                    utlsFingerprint: fingerprint,
-                    pinnedPeerCertSHA256: pinnedCertificates,
-                    verifyPeerCertByName: verifyNames,
-                    echConfigList: echConfig,
-                    curvePreferences: curves,
-                    minVersion: minVersion,
-                    maxVersion: maxVersion,
-                    cipherSuites: cipherSuites,
-                    enableSessionResumption: sessionResumption,
-                ),
-            )
-        }
+        return .tls(
+            TLSOptions(
+                serverName: serverName,
+                alpn: alpn,
+                allowInsecure: allowInsecure,
+                utlsFingerprint: fingerprint,
+                pinnedPeerCertSHA256: pinnedCertificates,
+                verifyPeerCertByName: verifyNames,
+                echConfigList: echConfig,
+                curvePreferences: curves,
+                minVersion: minVersion,
+                maxVersion: maxVersion,
+                cipherSuites: cipherSuites,
+                enableSessionResumption: sessionResumption,
+            ),
+        )
+    }
 
-        return .none
+    func importedSecurityLayer(_ security: String?, tls: String? = nil, defaultLayer: SecurityLayer) throws -> SecurityLayer {
+        func layer(_ value: String) throws -> SecurityLayer {
+            switch value.lowercased() {
+            case "tls", "true", "yes", "1", "on": return .tls
+            case "none", "false", "no", "0", "off": return .none
+            case "reality": return .reality
+            default: throw ProxyLinkParseError.invalidSecurity
+            }
+        }
+        let primary = try security.map(layer)
+        let alias = try tls.map(layer)
+        if let primary, let alias, primary != alias, !(primary == .reality && alias == .tls) {
+            throw ProxyLinkParseError.invalidSecurity
+        }
+        return primary ?? alias ?? defaultLayer
     }
 
     private func parseTransport(query: Query, defaultType: TransportType = .tcp) throws -> TransportOptions {
-        var transport = switch (query["type"] ?? query["net"] ?? "").lowercased() {
+        var transport = switch query.first("type", "net")?.lowercased() {
+        case nil:
+            TransportOptions(type: defaultType)
+        case "tcp", "raw":
+            TransportOptions(type: .tcp)
         case "ws", "websocket":
             TransportOptions(type: .websocket, path: query["path"], host: query["host"], serviceName: nil)
         case "grpc":
@@ -604,14 +638,16 @@ struct ProxyImportService {
             // migration error instead of silently changing the transport.
             TransportOptions(type: .quic)
         default:
-            TransportOptions(type: defaultType)
+            throw ProxyLinkParseError.invalidTransport
         }
         try applyTransportExtensions(from: query, to: &transport)
         return transport
     }
 
-    private func transportFromVMess(network: String, path: String?, host: String?) -> TransportOptions {
+    private func transportFromVMess(network: String, path: String?, host: String?) throws -> TransportOptions {
         switch network.lowercased() {
+        case "raw", "tcp":
+            .tcp
         case "ws", "websocket":
             TransportOptions(type: .websocket, path: path, host: host, serviceName: nil)
         case "grpc":
@@ -629,7 +665,7 @@ struct ProxyImportService {
         case "quic":
             TransportOptions(type: .quic)
         default:
-            .tcp
+            throw ProxyLinkParseError.invalidTransport
         }
     }
 
@@ -815,10 +851,6 @@ struct ProxyImportService {
         return (imported, false, skippedTokens)
     }
 
-    private func looksLikeProxyConfiguration(_ text: String) -> Bool {
-        text.contains("[Proxy]") || text.contains("[Proxy Group]") || text.contains("[Rule]")
-    }
-
     private func decodeBase64String(_ value: String) -> String? {
         // Strip all whitespace (not just leading/trailing) before computing
         // padding: RFC 2045-style wrapped base64 carries internal newlines that
@@ -927,10 +959,13 @@ private struct Query {
 
     init(_ components: URLComponents) {
         for item in components.queryItems ?? [] {
-            guard let value = item.value else {
-                continue
+            let key = item.name.lowercased()
+            if let value = item.value {
+                values[key] = value
+            } else if ["security", "tls", "type", "net"].contains(key) {
+                // An explicit mode without a value must not take the absent-field default.
+                values[key] = ""
             }
-            values[item.name.lowercased()] = value
         }
     }
 

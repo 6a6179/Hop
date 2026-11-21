@@ -216,7 +216,7 @@ final class HopAppDataStoreTests: XCTestCase {
     }
 
     @MainActor
-    func testMissingRejectedOrUndecodableStatePurgesLegacyLogWithoutOverwritingRejectedState() throws {
+    func testMissingRejectedOrUndecodableStatePurgesLegacyLogWithoutOverwritingRejectedState() async throws {
         enum InvalidState: String, CaseIterable {
             case missing
             case tampered
@@ -301,12 +301,15 @@ final class HopAppDataStoreTests: XCTestCase {
                 store.flushPendingPersists()
                 XCTAssertEqual(try Data(contentsOf: stateURL), rejectedState)
                 XCTAssertEqual(profileSecretStore.value(forKey: sentinelKey), "preserve-me")
-                XCTAssertTrue(store.resetUnreadableLibrary())
+                try await store.resetUnreadableLibrary(eraseInstalledTunnel: { _ in })
                 editableStore = HopStore(dataStore: dataStore)
                 XCTAssertNil(profileSecretStore.value(forKey: sentinelKey))
             }
             XCTAssertFalse(editableStore.libraryLoadFailed)
-            XCTAssertFalse(editableStore.resetUnreadableLibrary())
+            do {
+                try await editableStore.resetUnreadableLibrary(eraseInstalledTunnel: { _ in XCTFail("Editable library must not erase its VPN") })
+                XCTFail("Expected reset to be refused")
+            } catch CocoaError.userCancelled {}
             editableStore.addProfile(explicitProfile)
             editableStore.flushPendingPersists()
             let explicitlyReplaced = try XCTUnwrap(dataStore.load())

@@ -213,6 +213,137 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         XCTAssertEqual(removedLayer.profiles.first?.security.tls?.serverName, "before.example")
     }
 
+    func testReplacingDefaultCurvesWithClassicOnlyNeedsReview() throws {
+        let owner = UUID()
+        let current = trojanProfile(name: "Main", host: "node.example", subscriptionID: owner)
+        var proposed = current
+        proposed.id = UUID()
+        proposed.security.tls?.curvePreferences = ["X25519"]
+
+        var merger = SubscriptionRefreshMerger(profiles: [current], groups: [], selectedTarget: nil)
+        let change = try XCTUnwrap(merger.securityCriticalChanges(in: [proposed]).first)
+        XCTAssertEqual(change.fields, [.postQuantumCurves])
+        XCTAssertEqual(change.details.first?.before, "Core defaults")
+        merger.merge(ImportResult(profiles: [proposed]))
+        XCTAssertEqual(merger.profiles.first?.security.tls?.curvePreferences, [])
+        merger.merge(ImportResult(profiles: [proposed]), securityPolicy: .applyReviewedChanges)
+        XCTAssertEqual(merger.profiles.first?.security.tls?.curvePreferences, ["X25519"])
+    }
+
+    @MainActor
+    func testSavingPreviewChecksSourceRevisionAndAbsence() {
+        let original = SubscriptionSource(name: "Provider", url: "https://EXAMPLE.com/sub")
+        let store = HopStore(subscriptions: [original],
+                             dataStore: HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory()))
+        let previewed = store.subscription(at: "https://example.com/sub")
+        XCTAssertEqual(previewed?.id, original.id)
+        let newer = ImportResult(profiles: [trojanProfile(name: "New", host: "new.example")])
+        guard case .applied = store.reviewSubscriptionRefresh(newer, for: original) else { return XCTFail("Refresh failed") }
+        let prior = ImportResult(profiles: [trojanProfile(name: "Old", host: "old.example")])
+        guard case .failed = store.saveSubscriptionPreview(prior, for: original, sourceAtPreview: previewed) else { return XCTFail("Stale preview committed") }
+        guard case .failed = store.saveSubscriptionPreview(prior, for: original, sourceAtPreview: nil) else { return XCTFail("Preview overwrote an added source") }
+        XCTAssertEqual(store.profiles.map(\.name), ["New"])
+        store.deleteSubscription(id: original.id)
+        guard case .failed = store.saveSubscriptionPreview(prior, for: original, sourceAtPreview: previewed) else { return XCTFail("Preview restored a deleted source") }
+        guard case .applied = store.saveSubscriptionPreview(prior, for: original, sourceAtPreview: nil) else { return XCTFail("New preview failed") }
+        XCTAssertEqual(store.profiles.map(\.name), ["Old"])
+    }
+
+    @MainActor
+    func testLocalManualSelectionSurvivesUnchangedRefreshAndRelaunch() throws {
+        let source = SubscriptionSource(name: "Source", url: "https://source.example/sub")
+        var provider = ProxyGroup(name: "Select", type: .select, members: [.direct, .reject], defaultTarget: .direct, importedType: "select")
+        let dataStore = HopAppDataStore(url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory())
+        let store = HopStore(dataStore: dataStore)
+        XCTAssertTrue(store.applySubscriptionImport(ImportResult(groups: [provider]), adding: source))
+        let saved = try XCTUnwrap(store.groups.first)
+        var draft = ProxyGroupEditorDraft(group: saved)
+        draft.isEnabled = true
+        draft.defaultTarget = .reject
+        try store.updateGroup(XCTUnwrap(draft.makeGroup(probeURLIsAllowed: true)))
+        store.selectedTarget = .group(saved.id)
+        provider.id = UUID()
+        XCTAssertTrue(store.applySubscriptionRefresh(ImportResult(groups: [provider]), updating: source))
+        store.flushPendingPersists()
+        let reloaded = HopStore(dataStore: dataStore)
+        let group = try XCTUnwrap(reloaded.groups.first)
+        XCTAssertTrue(group.isEnabled)
+        XCTAssertEqual(group.defaultTarget, .direct)
+        XCTAssertEqual(group.effectiveDefaultTarget, .reject)
+        XCTAssertEqual(reloaded.selectedTarget, .group(group.id))
+        let rendered = try XrayConfigBuilder().build(profiles: [], groups: [group], selectedTarget: .group(group.id), routingMode: .global, rules: [])
+        let config = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(rendered.utf8)) as? [String: Any])
+        let routing = try XCTUnwrap(config["routing"] as? [String: Any])
+        XCTAssertEqual((routing["rules"] as? [[String: Any]])?.last?["outboundTag"] as? String, "reject")
+        provider.defaultTarget = .reject
+        XCTAssertTrue(reloaded.applySubscriptionRefresh(ImportResult(groups: [provider]), updating: source))
+        XCTAssertEqual(reloaded.groups.first?.effectiveDefaultTarget, .reject)
+        XCTAssertFalse(try XCTUnwrap(reloaded.groups.first).isEnabled)
+        provider.members = [.direct]
+        provider.defaultTarget = .direct
+        XCTAssertTrue(reloaded.applySubscriptionRefresh(ImportResult(groups: [provider]), updating: source))
+        XCTAssertEqual(reloaded.groups.first?.localSelection, .provider)
+        XCTAssertFalse(try XCTUnwrap(reloaded.groups.first).isEnabled)
+    }
+
+    func testOwnedNamesRequireOneCandidateAcrossProfilesAndGroups() throws {
+        let owner = UUID()
+        var first = trojanProfile(name: "Shared", host: "first.example")
+        var second = trojanProfile(name: " shared ", host: "second.example")
+        first.subscriptionID = owner
+        second.subscriptionID = owner
+        let child = ProxyGroup(subscriptionID: owner, name: "Shared", type: .select, members: [.reject], importedType: "select")
+        let parent = ProxyGroup(subscriptionID: owner, name: "Parent", type: .select, members: [.named("SHARED"), .direct], defaultTarget: .named("Shared"), importedType: "select")
+        let inventories = [
+            ImportResult(profiles: [first, second], groups: [parent]),
+            ImportResult(profiles: [second, first], groups: [parent]),
+            ImportResult(profiles: [first], groups: [parent, child]),
+        ]
+        for inventory in inventories {
+            let prepared = inventory.preparedForSubscription(owner)
+            let group = try XCTUnwrap(prepared.groups.first { $0.id == parent.id })
+            XCTAssertEqual(group.members, [.direct])
+            XCTAssertFalse(group.isEnabled)
+            XCTAssertEqual(group.warning, ImportResult.ambiguousSubscriptionGroupWarning)
+            var prior = group
+            prior.warning = nil
+            prior.isEnabled = true
+            var merger = SubscriptionRefreshMerger(profiles: [], groups: [prior], selectedTarget: .group(prior.id))
+            merger.merge(prepared, replacingSnapshotFor: owner)
+            XCTAssertFalse(try XCTUnwrap(merger.groups.first { $0.id == prior.id }).isEnabled)
+            XCTAssertNil(merger.selectedTarget)
+
+            let clean = ImportResult(profiles: [first], groups: [parent]).preparedForSubscription(owner)
+            merger.merge(clean, replacingSnapshotFor: owner)
+            let corrected = try XCTUnwrap(merger.groups.first { $0.id == prior.id })
+            XCTAssertFalse(corrected.isEnabled)
+            XCTAssertNotEqual(corrected.warning, ImportResult.ambiguousSubscriptionGroupWarning)
+            var draft = ProxyGroupEditorDraft(group: corrected)
+            draft.isEnabled = true
+            let enabled = try XCTUnwrap(draft.makeGroup(probeURLIsAllowed: true))
+            XCTAssertTrue(enabled.isEnabled)
+            XCTAssertNil(enabled.warning)
+        }
+    }
+
+    func testLegacyGroupKeepsItsPossibleLocalSelectionPendingReview() throws {
+        let source = UUID()
+        let old = ProxyGroup(subscriptionID: source, name: "Old", type: .select, members: [.direct, .reject],
+                             defaultTarget: .reject, importedType: "select")
+        let legacy = try JSONDecoder().decode(ProxyGroup.self, from: JSONEncoder().encode(old))
+        XCTAssertNil(legacy.localSelection)
+        var provider = legacy
+        provider.id = UUID()
+        provider.defaultTarget = .direct
+        var merger = SubscriptionRefreshMerger(profiles: [], groups: [legacy], selectedTarget: .group(legacy.id))
+        merger.merge(ImportResult(groups: [provider]).preparedForSubscription(source), replacingSnapshotFor: source)
+        let stored = try XCTUnwrap(merger.groups.first)
+        XCTAssertEqual(stored.defaultTarget, .direct)
+        XCTAssertEqual(stored.effectiveDefaultTarget, .reject)
+        XCTAssertFalse(stored.isEnabled)
+        XCTAssertNil(merger.selectedTarget)
+    }
+
     @MainActor
     func testApprovalBindsChangedValuesAndRedactsSecrets() throws {
         let source = SubscriptionSource(name: "Provider", url: "https://provider.example/sub")
@@ -1873,7 +2004,8 @@ final class SubscriptionRefreshMergerTests: XCTestCase {
         XCTAssertEqual(store.groups.map(\.id), [manualGroup.id])
         XCTAssertEqual(store.groups.first?.members, [.named("Owned"), .profile(manual.id)])
         XCTAssertEqual(store.groups.first?.defaultTarget, .named("Owned"))
-        XCTAssertEqual(store.rules.map(\.target), [.named(" owned "), .profile(manual.id)])
+        XCTAssertEqual(store.rules.map(\.id), rules.rules.map(\.id))
+        XCTAssertEqual(store.rules.map(\.target), [.reject, .reject, .named(" owned "), .profile(manual.id)])
         XCTAssertEqual(store.subscriptions, [survivingSubscription])
         XCTAssertNotEqual(store.selectedTarget, .group(ownedGroup.id))
     }

@@ -9,15 +9,18 @@ final class ImportTextDraftTests: XCTestCase {
         let result = ImportResult(warnings: [ImportWarning(message: "Review this node")])
         var draft = ImportTextDraft(text: input, error: "Old error")
 
-        try draft.finishPreview(result, subscriptionURL: url, for: input)
+        let fetchedSource = SubscriptionSource(name: "Test", url: input)
+        try draft.finishPreview(result, subscriptionURL: url, sourceAtPreview: fetchedSource, for: input)
         XCTAssertEqual(draft.result, result)
         XCTAssertEqual(draft.subscriptionURL, url)
+        XCTAssertEqual(draft.sourceAtPreview, fetchedSource)
         XCTAssertNil(draft.error)
 
         draft.text = "trojan://different@example.com:443"
         try draft.finishPreview(result, subscriptionURL: url, for: input)
         XCTAssertNil(draft.result)
         XCTAssertNil(draft.subscriptionURL)
+        XCTAssertNil(draft.sourceAtPreview)
     }
 
     func testCancelledPreviewCannotPublishResult() async throws {

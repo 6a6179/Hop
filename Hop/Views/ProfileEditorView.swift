@@ -6,23 +6,28 @@ struct ProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(HopStore.self) private var store
     @State private var showingEditConflict = false
-    @State private var draft: ProfileEditorDraft
+    @State private var editor: ProfileEditorState
+
+    private var draft: ProfileEditorDraft {
+        editor.draft
+    }
 
     let isNew: Bool
     let onSave: (ProxyProfile) -> Bool
 
     init(profile: ProxyProfile, isNew: Bool = false, onSave: @escaping (ProxyProfile) -> Bool) {
-        _draft = State(initialValue: ProfileEditorDraft(profile: profile))
+        _editor = State(initialValue: ProfileEditorState(draft: ProfileEditorDraft(profile: profile)))
         self.isNew = isNew
         self.onSave = onSave
     }
 
     var body: some View {
-        let validation = draft.validation(availableProfiles: store.profiles)
+        let revision = editor.revision(profiles: store.profilesRevision)
+        let validation = editor.validation(for: revision)
 
         NavigationStack {
             Form {
-                if let validationMessage = validation.message {
+                if let validationMessage = validation?.message {
                     Section {
                         Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -31,14 +36,14 @@ struct ProfileEditorView: View {
                 }
 
                 Section("Basics") {
-                    ProfileTextField("Name", text: $draft.name, capitalization: .words, autocorrectionDisabled: false)
-                    Picker("Protocol", selection: $draft.proto) {
+                    ProfileTextField("Name", text: $editor.draft.name, capitalization: .words, autocorrectionDisabled: false)
+                    Picker("Protocol", selection: $editor.draft.proto) {
                         ForEach(ProfileEditorChoices.supportedProtocols, id: \.self) { proto in
                             Text(proto.displayName).tag(proto)
                         }
                     }
-                    ProfileTextField(draft.proto == .wireGuard ? "Peer Host" : "Host", text: $draft.host, prompt: "example.com")
-                    ProfileTextField(draft.proto == .wireGuard ? "Peer Port" : "Port", text: $draft.port, prompt: "443", keyboardType: .numberPad)
+                    ProfileTextField(draft.proto == .wireGuard ? "Peer Host" : "Host", text: $editor.draft.host, prompt: "example.com")
+                    ProfileTextField(draft.proto == .wireGuard ? "Peer Port" : "Port", text: $editor.draft.port, prompt: "443", keyboardType: .numberPad)
                 }
 
                 credentialsSection
@@ -50,7 +55,7 @@ struct ProfileEditorView: View {
 
                 Section {
                     DisclosureGroup("Raw JSON") {
-                        TextEditor(text: $draft.xrayAdvancedJSON)
+                        TextEditor(text: $editor.draft.xrayAdvancedJSON)
                             .font(.system(.caption, design: .monospaced))
                             .frame(minHeight: 140)
                             .textInputAutocapitalization(.never)
@@ -74,21 +79,25 @@ struct ProfileEditorView: View {
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        // Revalidate on the explicit save action so a stale
-                        // rendered button can never admit a changed draft.
-                        guard let profile = draft.validation(availableProfiles: store.profiles).profile else {
-                            return
-                        }
+                    Button(validation == nil ? "Checking…" : "Save") {
+                        let current = editor.revision(profiles: store.profilesRevision)
+                        guard let profile = editor.validation(for: current)?.profile else { return }
                         if onSave(profile) {
                             dismiss()
                         } else {
                             showingEditConflict = true
                         }
                     }
-                    .disabled(validation.profile == nil)
+                    .disabled(validation?.profile == nil)
                 }
             }
+        }
+        .task(id: revision) {
+            do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+            let snapshot = editor.draft
+            let result = await snapshot.validateForEditor(availableProfiles: store.profiles)
+            guard !Task.isCancelled else { return }
+            editor.record(result, for: revision, currentProfiles: store.profilesRevision)
         }
     }
 
@@ -98,61 +107,61 @@ struct ProfileEditorView: View {
             case .vless:
                 // UUIDs are bearer credentials (possession authenticates), so
                 // they get the same SecureField treatment as passwords.
-                ProfileTextField("UUID", text: $draft.vlessUUID, isSecure: true)
-                ProfileTextField("Flow", text: $draft.vlessFlow, prompt: "xtls-rprx-vision")
-                ProfileTextField("Encryption / Auth", text: $draft.vlessEncryption, prompt: "none", isSecure: true)
+                ProfileTextField("UUID", text: $editor.draft.vlessUUID, isSecure: true)
+                ProfileTextField("Flow", text: $editor.draft.vlessFlow, prompt: "xtls-rprx-vision")
+                ProfileTextField("Encryption / Auth", text: $editor.draft.vlessEncryption, prompt: "none", isSecure: true)
             case .trojan:
-                ProfileTextField("Password", text: $draft.trojanPassword, isSecure: true)
+                ProfileTextField("Password", text: $editor.draft.trojanPassword, isSecure: true)
             case .hysteria2:
-                ProfileTextField("Password", text: $draft.hysteriaPassword, isSecure: true)
-                ProfileTextField("Obfuscation", text: $draft.hysteriaObfs, prompt: "salamander")
-                ProfileTextField("Obfs Password", text: $draft.hysteriaObfsPassword, isSecure: true)
-                ProfileTextField("Upload", text: $draft.hysteriaUp, prompt: "20 mbps")
-                ProfileTextField("Download", text: $draft.hysteriaDown, prompt: "100 mbps")
-                ProfileTextField("Port Hopping", text: $draft.hysteriaPorts, prompt: "20000-50000")
-                ProfileTextField("Hop Interval (s)", text: $draft.hysteriaHopInterval, prompt: "30", keyboardType: .numberPad)
-                ProfileTextField("UDP Idle (s)", text: $draft.hysteriaUDPIdleTimeout, prompt: "60", keyboardType: .numberPad)
+                ProfileTextField("Password", text: $editor.draft.hysteriaPassword, isSecure: true)
+                ProfileTextField("Obfuscation", text: $editor.draft.hysteriaObfs, prompt: "salamander")
+                ProfileTextField("Obfs Password", text: $editor.draft.hysteriaObfsPassword, isSecure: true)
+                ProfileTextField("Upload", text: $editor.draft.hysteriaUp, prompt: "20 mbps")
+                ProfileTextField("Download", text: $editor.draft.hysteriaDown, prompt: "100 mbps")
+                ProfileTextField("Port Hopping", text: $editor.draft.hysteriaPorts, prompt: "20000-50000")
+                ProfileTextField("Hop Interval (s)", text: $editor.draft.hysteriaHopInterval, prompt: "30", keyboardType: .numberPad)
+                ProfileTextField("UDP Idle (s)", text: $editor.draft.hysteriaUDPIdleTimeout, prompt: "60", keyboardType: .numberPad)
             case .tuic:
-                ProfileTextField("UUID", text: $draft.tuicUUID, isSecure: true)
-                ProfileTextField("Password", text: $draft.tuicPassword, isSecure: true)
-                ProfileTextField("Congestion Control", text: $draft.tuicCongestionControl, prompt: "bbr")
+                ProfileTextField("UUID", text: $editor.draft.tuicUUID, isSecure: true)
+                ProfileTextField("Password", text: $editor.draft.tuicPassword, isSecure: true)
+                ProfileTextField("Congestion Control", text: $editor.draft.tuicCongestionControl, prompt: "bbr")
             case .shadowsocks:
-                ProfileTextField("Method", text: $draft.shadowsocksMethod, prompt: "2022-blake3-aes-128-gcm")
-                ProfileTextField("Password", text: $draft.shadowsocksPassword, isSecure: true)
+                ProfileTextField("Method", text: $editor.draft.shadowsocksMethod, prompt: "2022-blake3-aes-128-gcm")
+                ProfileTextField("Password", text: $editor.draft.shadowsocksPassword, isSecure: true)
             case .vmess:
-                ProfileTextField("UUID", text: $draft.vmessUUID, isSecure: true)
-                ProfileTextField("Security", text: $draft.vmessSecurity, prompt: "auto")
+                ProfileTextField("UUID", text: $editor.draft.vmessUUID, isSecure: true)
+                ProfileTextField("Security", text: $editor.draft.vmessSecurity, prompt: "auto")
                 if draft.vmessAlterID != "0" {
-                    Button("Use VMess AEAD") { draft.vmessAlterID = "0" }
+                    Button("Use VMess AEAD") { editor.draft.vmessAlterID = "0" }
                 }
             case .http:
-                ProfileTextField("Username", text: $draft.httpUsername)
-                ProfileTextField("Password", text: $draft.httpPassword, isSecure: true)
+                ProfileTextField("Username", text: $editor.draft.httpUsername)
+                ProfileTextField("Password", text: $editor.draft.httpPassword, isSecure: true)
             case .socks:
-                ProfileTextField("Username", text: $draft.socksUsername)
-                ProfileTextField("Password", text: $draft.socksPassword, isSecure: true)
+                ProfileTextField("Username", text: $editor.draft.socksUsername)
+                ProfileTextField("Password", text: $editor.draft.socksPassword, isSecure: true)
             case .wireGuard:
-                ProfileTextField("Private Key", text: $draft.wireGuardPrivateKey, isSecure: true)
-                ProfileTextField("Peer Public Key", text: $draft.wireGuardPeerPublicKey)
-                ProfileTextField("Pre-shared Key", text: $draft.wireGuardPreSharedKey, prompt: "optional", isSecure: true)
-                ProfileTextField("Local Addresses", text: $draft.wireGuardLocalAddresses, prompt: "10.0.0.2/32, fd00::2/128")
-                ProfileTextField("Allowed IPs", text: $draft.wireGuardAllowedIPs, prompt: "0.0.0.0/0, ::/0")
-                ProfileTextField("Reserved Bytes", text: $draft.wireGuardReserved, prompt: "0, 0, 0")
-                ProfileTextField("Keepalive (s)", text: $draft.wireGuardKeepAlive, prompt: "25", keyboardType: .numberPad)
-                ProfileTextField("MTU", text: $draft.wireGuardMTU, prompt: "1280", keyboardType: .numberPad)
+                ProfileTextField("Private Key", text: $editor.draft.wireGuardPrivateKey, isSecure: true)
+                ProfileTextField("Peer Public Key", text: $editor.draft.wireGuardPeerPublicKey)
+                ProfileTextField("Pre-shared Key", text: $editor.draft.wireGuardPreSharedKey, prompt: "optional", isSecure: true)
+                ProfileTextField("Local Addresses", text: $editor.draft.wireGuardLocalAddresses, prompt: "10.0.0.2/32, fd00::2/128")
+                ProfileTextField("Allowed IPs", text: $editor.draft.wireGuardAllowedIPs, prompt: "0.0.0.0/0, ::/0")
+                ProfileTextField("Reserved Bytes", text: $editor.draft.wireGuardReserved, prompt: "0, 0, 0")
+                ProfileTextField("Keepalive (s)", text: $editor.draft.wireGuardKeepAlive, prompt: "25", keyboardType: .numberPad)
+                ProfileTextField("MTU", text: $editor.draft.wireGuardMTU, prompt: "1280", keyboardType: .numberPad)
                 if !draft.wireGuardDomainStrategy.isEmpty {
                     LabeledContent("Legacy DNS Preference", value: draft.wireGuardDomainStrategy)
-                    Button("Use Default WireGuard DNS") { draft.wireGuardDomainStrategy = "" }
+                    Button("Use Default WireGuard DNS") { editor.draft.wireGuardDomainStrategy = "" }
                 }
                 if draft.wireGuardHasExplicitEndpoint {
                     DisclosureGroup("Node Endpoint") {
-                        ProfileTextField("Host", text: $draft.wireGuardFallbackHost)
-                        ProfileTextField("Port", text: $draft.wireGuardFallbackPort, keyboardType: .numberPad)
+                        ProfileTextField("Host", text: $editor.draft.wireGuardFallbackHost)
+                        ProfileTextField("Port", text: $editor.draft.wireGuardFallbackPort, keyboardType: .numberPad)
                     }
                 }
-                WireGuardPeerFields(peers: $draft.extraWireGuardPeers)
+                WireGuardPeerFields(peers: $editor.draft.extraWireGuardPeers)
             case .anyTLS:
-                ProfileTextField("Password", text: $draft.anyTLSPassword, isSecure: true)
+                ProfileTextField("Password", text: $editor.draft.anyTLSPassword, isSecure: true)
             }
             if let definition = draft.protocolDefinition {
                 advancedFields("More Options", definition: definition, path: ["settings"], allowedKeys: XrayConfigBuilder.editorProtocolKeys(draft.proto))
@@ -162,7 +171,7 @@ struct ProfileEditorView: View {
 
     private var securitySection: some View {
         Section("Security") {
-            Picker("Security", selection: $draft.securityLayer) {
+            Picker("Security", selection: $editor.draft.securityLayer) {
                 ForEach(SecurityLayer.allCases, id: \.self) { layer in
                     Text(layer.displayName).tag(layer)
                 }
@@ -173,18 +182,18 @@ struct ProfileEditorView: View {
                 Label("TLS off", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.secondary)
             case .tls:
-                ProfileTextField("SNI", text: $draft.tlsServerName, prompt: "example.com")
-                ProfileTextField("ALPN", text: $draft.tlsALPN, prompt: "h2, http/1.1")
-                UTLSFingerprintPicker(selection: $draft.tlsFingerprint)
+                ProfileTextField("SNI", text: $editor.draft.tlsServerName, prompt: "example.com")
+                ProfileTextField("ALPN", text: $editor.draft.tlsALPN, prompt: "h2, http/1.1")
+                UTLSFingerprintPicker(selection: $editor.draft.tlsFingerprint)
                 DisclosureGroup("More Options") {
-                    ProfileTextField("SHA-256 Pins", text: $draft.tlsPinnedCertificates, prompt: "hex, comma-separated")
-                    ProfileTextField("Verify Names", text: $draft.tlsVerifyNames, prompt: "example.com")
-                    ProfileTextField("ECH Config", text: $draft.tlsECHConfigList, prompt: "base64", isSecure: true)
-                    ProfileTextField("Curves", text: $draft.tlsCurves, prompt: "X25519MLKEM768")
-                    ProfileTextField("Min TLS", text: $draft.tlsMinVersion, prompt: "1.2")
-                    ProfileTextField("Max TLS", text: $draft.tlsMaxVersion, prompt: "1.3")
-                    ProfileTextField("Cipher Suites", text: $draft.tlsCipherSuites, prompt: "optional")
-                    Toggle("Session Resumption", isOn: $draft.tlsSessionResumption)
+                    ProfileTextField("SHA-256 Pins", text: $editor.draft.tlsPinnedCertificates, prompt: "hex, comma-separated")
+                    ProfileTextField("Verify Names", text: $editor.draft.tlsVerifyNames, prompt: "example.com")
+                    ProfileTextField("ECH Config", text: $editor.draft.tlsECHConfigList, prompt: "base64", isSecure: true)
+                    ProfileTextField("Curves", text: $editor.draft.tlsCurves, prompt: "X25519MLKEM768")
+                    ProfileTextField("Min TLS", text: $editor.draft.tlsMinVersion, prompt: "1.2")
+                    ProfileTextField("Max TLS", text: $editor.draft.tlsMaxVersion, prompt: "1.3")
+                    ProfileTextField("Cipher Suites", text: $editor.draft.tlsCipherSuites, prompt: "optional")
+                    Toggle("Session Resumption", isOn: $editor.draft.tlsSessionResumption)
                     existingAdvancedFields(definition: "TLSConfig", path: ["streamSettings", "tlsSettings"])
                 }
                 if draft.tlsAllowInsecure, draft.tlsPinnedCertificates.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -192,16 +201,16 @@ struct ProfileEditorView: View {
                         .font(.footnote)
                         .foregroundStyle(.red)
                     Button("Use Verified TLS") {
-                        draft.tlsAllowInsecure = false
+                        editor.draft.tlsAllowInsecure = false
                     }
                 }
             case .reality:
-                ProfileTextField("Public Key", text: $draft.realityPublicKey)
-                ProfileTextField("Short ID", text: $draft.realityShortID)
-                ProfileTextField("SNI", text: $draft.realityServerName, prompt: "camouflage domain")
-                ProfileTextField("Spider Path", text: $draft.realitySpiderX, prompt: "/")
-                ProfileTextField("ML-DSA Verify Key", text: $draft.realityMLDSA65Verify, isSecure: true)
-                UTLSFingerprintPicker(selection: $draft.realityFingerprint)
+                ProfileTextField("Public Key", text: $editor.draft.realityPublicKey)
+                ProfileTextField("Short ID", text: $editor.draft.realityShortID)
+                ProfileTextField("SNI", text: $editor.draft.realityServerName, prompt: "camouflage domain")
+                ProfileTextField("Spider Path", text: $editor.draft.realitySpiderX, prompt: "/")
+                ProfileTextField("ML-DSA Verify Key", text: $editor.draft.realityMLDSA65Verify, isSecure: true)
+                UTLSFingerprintPicker(selection: $editor.draft.realityFingerprint)
                 existingAdvancedFields(definition: "REALITYConfig", path: ["streamSettings", "realitySettings"])
             }
         }
@@ -214,7 +223,7 @@ struct ProfileEditorView: View {
             } else if draft.proto == .wireGuard {
                 LabeledContent("Type", value: "WireGuard")
             } else {
-                Picker("Type", selection: $draft.transportType) {
+                Picker("Type", selection: $editor.draft.transportType) {
                     ForEach(ProfileEditorChoices.supportedTransports, id: \.self) { type in
                         Text(type.displayName).tag(type)
                     }
@@ -224,22 +233,22 @@ struct ProfileEditorView: View {
                 case .tcp, .mKCP, .hysteria, .quic:
                     EmptyView()
                 case .websocket, .httpUpgrade:
-                    ProfileTextField("Path", text: $draft.transportPath, prompt: "/")
-                    ProfileTextField("Host Header", text: $draft.transportHost)
+                    ProfileTextField("Path", text: $editor.draft.transportPath, prompt: "/")
+                    ProfileTextField("Host Header", text: $editor.draft.transportHost)
                 case .grpc:
-                    ProfileTextField("Service Name", text: $draft.transportServiceName)
-                    ProfileTextField("Authority", text: $draft.transportHost)
+                    ProfileTextField("Service Name", text: $editor.draft.transportServiceName)
+                    ProfileTextField("Authority", text: $editor.draft.transportHost)
                 case .xhttp:
-                    ProfileTextField("Path", text: $draft.transportPath, prompt: "/")
-                    ProfileTextField("Host", text: $draft.transportHost)
-                    ProfileTextField("Mode", text: $draft.xhttpMode, prompt: "auto")
+                    ProfileTextField("Path", text: $editor.draft.transportPath, prompt: "/")
+                    ProfileTextField("Host", text: $editor.draft.transportHost)
+                    ProfileTextField("Mode", text: $editor.draft.xhttpMode, prompt: "auto")
                 }
                 if draft.transportType == .mKCP {
-                    XrayFieldsEditor(definition: "KCPConfig", value: $draft.kcpFields, allowedKeys: XrayConfigBuilder.editorTransportKeys(.mKCP))
+                    XrayFieldsEditor(definition: "KCPConfig", value: $editor.draft.kcpFields, allowedKeys: XrayConfigBuilder.editorTransportKeys(.mKCP))
                 }
                 if draft.transportType == .xhttp, draft.xhttpExtra != nil {
                     DisclosureGroup("XHTTP Options") {
-                        XrayFieldsEditor(definition: "SplitHTTPConfig", value: $draft.xhttpExtra, allowedKeys: draft.extraTransportKeys.subtracting(["extra"]))
+                        XrayFieldsEditor(definition: "SplitHTTPConfig", value: $editor.draft.xhttpExtra, allowedKeys: draft.extraTransportKeys.subtracting(["extra"]))
                     }
                 }
                 if let definition = draft.transportDefinition,
@@ -256,7 +265,7 @@ struct ProfileEditorView: View {
             if draft.proto != .wireGuard {
                 DisclosureGroup("Multiplexing") {
                     if draft.muxFields != nil || draft.advancedValue(at: ["mux"]) == nil {
-                        XrayFieldsEditor(definition: "MuxConfig", value: $draft.muxFields)
+                        XrayFieldsEditor(definition: "MuxConfig", value: $editor.draft.muxFields)
                         existingAdvancedFields(definition: "MuxConfig", path: ["mux"])
                     } else {
                         XrayFieldsEditor(definition: "MuxConfig", value: advancedBinding(["mux"]))
@@ -264,7 +273,7 @@ struct ProfileEditorView: View {
                 }
                 DisclosureGroup("Socket") {
                     if draft.socketOptions != nil {
-                        XrayFieldsEditor(definition: "SocketConfig", value: $draft.socketOptions, allowedKeys: XrayConfigBuilder.editorSocketKeys)
+                        XrayFieldsEditor(definition: "SocketConfig", value: $editor.draft.socketOptions, allowedKeys: XrayConfigBuilder.editorSocketKeys)
                         existingAdvancedFields(definition: "SocketConfig", path: ["streamSettings", "sockopt"])
                     } else {
                         XrayFieldsEditor(definition: "SocketConfig", value: advancedBinding(["streamSettings", "sockopt"]), allowedKeys: XrayConfigBuilder.editorSocketKeys)
@@ -272,7 +281,7 @@ struct ProfileEditorView: View {
                 }
                 DisclosureGroup("FinalMask") {
                     if draft.finalMask != nil || draft.advancedValue(at: ["streamSettings", "finalmask"]) == nil {
-                        XrayFieldsEditor(definition: "FinalMask", value: $draft.finalMask)
+                        XrayFieldsEditor(definition: "FinalMask", value: $editor.draft.finalMask)
                         existingAdvancedFields(definition: "FinalMask", path: ["streamSettings", "finalmask"])
                     } else {
                         XrayFieldsEditor(definition: "FinalMask", value: advancedBinding(["streamSettings", "finalmask"]))
@@ -299,7 +308,7 @@ struct ProfileEditorView: View {
     private func advancedBinding(_ path: [String]) -> Binding<JSONValue?> {
         Binding(
             get: { draft.advancedValue(at: path) },
-            set: { draft.setAdvancedValue($0, at: path) },
+            set: { editor.draft.setAdvancedValue($0, at: path) },
         )
     }
 }
@@ -409,6 +418,39 @@ private enum ProfileEditorChoices {
         default:
             value.capitalized
         }
+    }
+}
+
+struct ProfileEditorState {
+    struct Revision: Equatable {
+        let draft: UInt64
+        let profiles: UInt64
+    }
+
+    /// Track mutations because canonically equivalent strings can hold different password bytes.
+    var draft: ProfileEditorDraft {
+        didSet { draftRevision &+= 1 }
+    }
+
+    private var draftRevision: UInt64 = 0
+    private var checked: (Revision, ProfileEditorValidation)?
+
+    init(draft: ProfileEditorDraft) {
+        self.draft = draft
+    }
+
+    func revision(profiles: UInt64) -> Revision {
+        Revision(draft: draftRevision, profiles: profiles)
+    }
+
+    mutating func record(_ result: ProfileEditorValidation, for revision: Revision, currentProfiles: UInt64) {
+        guard revision == self.revision(profiles: currentProfiles) else { return }
+        checked = (revision, result)
+    }
+
+    func validation(for revision: Revision) -> ProfileEditorValidation? {
+        guard let (checkedRevision, result) = checked, checkedRevision == revision else { return nil }
+        return result
     }
 }
 
@@ -639,6 +681,11 @@ struct ProfileEditorDraft {
 
     var validation: ProfileEditorValidation {
         validation(availableProfiles: [])
+    }
+
+    @concurrent
+    func validateForEditor(availableProfiles: [ProxyProfile]) async -> ProfileEditorValidation {
+        validation(availableProfiles: availableProfiles)
     }
 
     func validation(availableProfiles: [ProxyProfile]) -> ProfileEditorValidation {

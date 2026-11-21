@@ -39,6 +39,11 @@ route, or Apple's scoped system resolver in System mode. The DoH path retains
 the upstream DNS message. In System mode, Hop reconstructs the reply from
 the records and status that Apple's DNS-SD API returns.
 
+UDP replies use the client's advertised DNS size, from 512 to 1232 bytes.
+A larger answer returns the question with the truncation flag set. Delivery
+completes that UDP exchange, and a TCP retry can receive the full answer up
+to the 65535-byte DNS message limit.
+
 `scripts/build-libxray.sh` runs the TUN lifetime, DNS flow and response handling,
 destination-IP routing, XDNS socket cleanup, and bridge tests with the race
 detector before building the framework.

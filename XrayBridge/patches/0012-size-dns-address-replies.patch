@@ -1,0 +1,381 @@
+diff --git a/proxy/dns/dns.go b/proxy/dns/dns.go
+index 1794ca1..6a06a45 100644
+--- a/proxy/dns/dns.go
++++ b/proxy/dns/dns.go
+@@ -275,6 +275,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
+ 					return err
+ 				}
+ 			case RuleAction_Hijack:
++				limit := addressReplyLimit(b.Bytes(), srcNetwork == net.Network_UDP)
+ 				b.Release()
+ 				if qType != dnsmessage.TypeA && qType != dnsmessage.TypeAAAA {
+ 					errors.LogError(ctx, "can only hijack A/AAAA records")
+@@ -282,7 +283,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
+ 						return err
+ 					}
+ 				} else {
+-					if err := h.startIPQuery(ctx, id, qType, domain, writer, timer); err != nil {
++					if err := h.startIPQuery(ctx, id, qType, domain, limit, writer, timer); err != nil {
+ 						return err
+ 					}
+ 				}
+@@ -340,7 +341,7 @@ func tryAcquireDNSLookup() bool {
+ 
+ func releaseDNSLookup() { <-dnsLookupSlots }
+ 
+-func (h *Handler) startIPQuery(ctx context.Context, id uint16, qType dnsmessage.Type, domain string, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) error {
++func (h *Handler) startIPQuery(ctx context.Context, id uint16, qType dnsmessage.Type, domain string, limit int, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) error {
+ 	if err := ctx.Err(); err != nil {
+ 		return err
+ 	}
+@@ -349,12 +350,12 @@ func (h *Handler) startIPQuery(ctx context.Context, id uint16, qType dnsmessage.
+ 	}
+ 	go func() {
+ 		defer releaseDNSLookup()
+-		h.handleIPQuery(ctx, id, qType, domain, writer, timer)
++		h.handleIPQuery(ctx, id, qType, domain, limit, writer, timer)
+ 	}()
+ 	return nil
+ }
+ 
+-func (h *Handler) handleIPQuery(ctx context.Context, id uint16, qType dnsmessage.Type, domain string, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) {
++func (h *Handler) handleIPQuery(ctx context.Context, id uint16, qType dnsmessage.Type, domain string, limit int, writer dns_proto.MessageWriter, timer *signal.ActivityTimer) {
+ 	if ctx.Err() != nil {
+ 		return
+ 	}
+@@ -388,62 +389,64 @@ func (h *Handler) handleIPQuery(ctx context.Context, id uint16, qType dnsmessage
+ 		rCode = uint16(dnsmessage.RCodeServerFailure)
+ 	}
+ 
+-	b := buf.New()
+-	rawBytes := b.Extend(buf.Size)
+-	builder := dnsmessage.NewBuilder(rawBytes[:0], dnsmessage.Header{
++	header := dnsmessage.Header{
+ 		ID:                 id,
+ 		RCode:              dnsmessage.RCode(rCode),
+ 		RecursionAvailable: true,
+ 		RecursionDesired:   true,
+ 		Response:           true,
+ 		Authoritative:      true,
+-	})
++	}
++	var scratch [512]byte
++	builder := dnsmessage.NewBuilder(scratch[:0], header)
+ 	builder.EnableCompression()
+ 	common.Must(builder.StartQuestions())
+-	common.Must(builder.Question(dnsmessage.Question{
++	question := dnsmessage.Question{
+ 		Name:  dnsmessage.MustNewName(domain),
+ 		Class: dnsmessage.ClassINET,
+ 		Type:  qType,
+-	}))
++	}
++	common.Must(builder.Question(question))
+ 	common.Must(builder.StartAnswers())
+ 
+ 	rHeader := dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName(domain), Class: dnsmessage.ClassINET, TTL: ttl}
+-	switch qType {
+-	case dnsmessage.TypeA:
+-		for _, ip := range ips {
++	// Every compressed address record occupies at least 15 bytes. Bound the
++	// builder before packing and check the exact wire size at the boundary.
++	written := 0
++	for _, ip := range ips {
++		switch qType {
++		case dnsmessage.TypeA:
+ 			ip = ip.To4()
+-			if len(ip) == net.IPv4len {
+-				var r dnsmessage.AResource
+-				copy(r.A[:], ip)
+-				common.Must(builder.AResource(rHeader, r))
++			if len(ip) != net.IPv4len {
++				continue
+ 			}
+-		}
+-	case dnsmessage.TypeAAAA:
+-		for _, ip := range ips {
++			common.Must(builder.AResource(rHeader, dnsmessage.AResource{A: [4]byte(ip)}))
++		case dnsmessage.TypeAAAA:
+ 			ip = ip.To16()
+-			if len(ip) == net.IPv6len {
+-				var r dnsmessage.AAAAResource
+-				copy(r.AAAA[:], ip)
+-				common.Must(builder.AAAAResource(rHeader, r))
++			if len(ip) != net.IPv6len {
++				continue
+ 			}
++			common.Must(builder.AAAAResource(rHeader, dnsmessage.AAAAResource{AAAA: [16]byte(ip)}))
++		}
++		written++
++		if written > limit/15 {
++			break
+ 		}
+ 	}
+ 	msgBytes, err := builder.Finish()
+-	if err != nil {
+-		errors.LogInfoInner(context.Background(), err, "pack message")
+-		b.Release()
+-		timer.SetTimeout(0)
+-		return
++	if err == nil && len(msgBytes) > limit {
++		if limit == maxDNSReplySize {
++			header.RCode = dnsmessage.RCodeServerFailure
++		} else {
++			header.Truncated = true
++		}
++		short := dnsmessage.Message{Header: header, Questions: []dnsmessage.Question{question}}
++		msgBytes, err = short.Pack()
+ 	}
+-	if len(msgBytes) > buf.Size {
+-		b.Release()
+-		timer.SetTimeout(0)
+-		errors.LogError(context.Background(), "DNS response message too large")
+-		return
++	if err == nil {
++		err = writer.WriteMessage(buf.FromBytes(msgBytes))
+ 	}
+-	b.Resize(0, int32(len(msgBytes)))
+-
+-	if err := writer.WriteMessage(b); err != nil {
++	if err != nil {
+ 		errors.LogInfoInner(context.Background(), err, "write IP answer")
+ 		timer.SetTimeout(0)
+ 	}
+diff --git a/proxy/dns/hop_lookup_limit_test.go b/proxy/dns/hop_lookup_limit_test.go
+index 9392716..e578fac 100644
+--- a/proxy/dns/hop_lookup_limit_test.go
++++ b/proxy/dns/hop_lookup_limit_test.go
+@@ -28,7 +28,7 @@ func TestHopDNSBoundsUnfinishedLookupsAcrossHandlers(t *testing.T) {
+ 	old := Handler{client: resolver}
+ 	var discarded hopDNSReply
+ 	for i := range maxConcurrentDNSLookups {
+-		if err := old.startIPQuery(ctx, uint16(i), dnsmessage.TypeA, "example.test.", &discarded, nil); err != nil {
++		if err := old.startIPQuery(ctx, uint16(i), dnsmessage.TypeA, "example.test.", 512, &discarded, nil); err != nil {
+ 			t.Fatal(err)
+ 		}
+ 	}
+@@ -44,7 +44,7 @@ func TestHopDNSBoundsUnfinishedLookupsAcrossHandlers(t *testing.T) {
+ 	cancel()
+ 	fresh := Handler{client: resolver}
+ 	var busy hopDNSReply
+-	if err := fresh.startIPQuery(context.Background(), 102, dnsmessage.TypeAAAA, ".", &busy, nil); err != nil {
++	if err := fresh.startIPQuery(context.Background(), 102, dnsmessage.TypeAAAA, ".", 512, &busy, nil); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	if len(busy.packets) != 1 {
+diff --git a/proxy/dns/hop_terminal_test.go b/proxy/dns/hop_terminal_test.go
+index 149e12b..a91775e 100644
+--- a/proxy/dns/hop_terminal_test.go
++++ b/proxy/dns/hop_terminal_test.go
+@@ -5,6 +5,8 @@ import (
+ 	"errors"
+ 	"testing"
+ 
++	wire "github.com/miekg/dns"
++
+ 	"github.com/xtls/xray-core/common/buf"
+ 	xerrors "github.com/xtls/xray-core/common/errors"
+ 	"github.com/xtls/xray-core/common/net"
+@@ -60,7 +62,7 @@ func TestHopDNSLookupReplies(t *testing.T) {
+ 				return ips, 60, tc.err
+ 			}}}
+ 			var replies hopDNSReply
+-			h.handleIPQuery(context.Background(), 1234, tc.qtype, domain, &replies, nil)
++			h.handleIPQuery(context.Background(), 1234, tc.qtype, domain, 512, &replies, nil)
+ 			if len(replies.packets) != 1 {
+ 				t.Fatalf("expected one reply, got %d", len(replies.packets))
+ 			}
+@@ -96,10 +98,78 @@ func TestHopDNSLookupCancellation(t *testing.T) {
+ 				return nil, 0, xerrors.New("stopped").Base(context.Canceled)
+ 			}}}
+ 			var replies hopDNSReply
+-			h.handleIPQuery(ctx, 1234, dnsmessage.TypeA, "resolver.example.test.", &replies, nil)
++			h.handleIPQuery(ctx, 1234, dnsmessage.TypeA, "resolver.example.test.", 512, &replies, nil)
+ 			if len(replies.packets) != 0 {
+ 				t.Fatal("sent DNS reply after cancellation")
+ 			}
+ 		})
+ 	}
+ }
++
++func TestHopAddressReplySizing(t *testing.T) {
++	for _, family := range []struct {
++		qtype dnsmessage.Type
++		ip    net.IP
++	}{
++		{dnsmessage.TypeA, net.ParseIP("192.0.2.1")},
++		{dnsmessage.TypeAAAA, net.ParseIP("2001:db8::1")},
++	} {
++		for _, tc := range []struct {
++			name         string
++			edns         uint16
++			udp          bool
++			count, limit int
++			truncated    bool
++			rcode        int
++		}{
++			{"small", 0, true, 1, 512, false, 0},
++			{"legacy-udp", 0, true, 40, 512, true, 0},
++			{"EDNS", 1232, true, 40, 1232, false, 0},
++			{"EDNS-ceiling", 4096, true, 110, 1232, true, 0},
++			{"TCP-retry", 0, false, 600, 65535, false, 0},
++			{"TCP-frame-limit", 0, false, 5000, 65535, false, wire.RcodeServerFailure},
++		} {
++			t.Run(family.qtype.String()+"/"+tc.name, func(t *testing.T) {
++				var query wire.Msg
++				query.SetQuestion("pool.example.", uint16(family.qtype))
++				if tc.edns != 0 {
++					query.SetEdns0(tc.edns, false)
++				}
++				raw, err := query.Pack()
++				if err != nil {
++					t.Fatal(err)
++				}
++				limit := addressReplyLimit(raw, tc.udp)
++				if limit != tc.limit {
++					t.Fatalf("limit %d, want %d", limit, tc.limit)
++				}
++				ips := make([]net.IP, tc.count)
++				for i := range ips {
++					ips[i] = family.ip
++				}
++				h := Handler{client: hopDNSLookup{lookup: func(_ string, o dns.IPOption) ([]net.IP, uint32, error) {
++					if !o.FakeEnable {
++						t.Fatal("lost FakeDNS address lookup")
++					}
++					return ips, 60, nil
++				}}}
++				var out hopDNSReply
++				h.handleIPQuery(context.Background(), query.Id, family.qtype, query.Question[0].Name, limit, &out, nil)
++				if len(out.packets) != 1 || len(out.packets[0]) > limit {
++					t.Fatalf("invalid reply count or size")
++				}
++				var reply wire.Msg
++				if err := reply.Unpack(out.packets[0]); err != nil {
++					t.Fatal(err)
++				}
++				wantAnswers := tc.count
++				if tc.truncated || tc.rcode != 0 {
++					wantAnswers = 0
++				}
++				if !reply.Response || reply.Id != query.Id || len(reply.Question) != 1 || reply.Question[0] != query.Question[0] || reply.Truncated != tc.truncated || reply.Rcode != tc.rcode || len(reply.Answer) != wantAnswers {
++					t.Fatalf("unexpected reply ID %d, question %v, TC %t, rcode %d, answers %d", reply.Id, reply.Question, reply.Truncated, reply.Rcode, len(reply.Answer))
++				}
++			})
++		}
++	}
++}
+diff --git a/proxy/dns/hop_wire.go b/proxy/dns/hop_wire.go
+index 8723ca1..90b2ad8 100644
+--- a/proxy/dns/hop_wire.go
++++ b/proxy/dns/hop_wire.go
+@@ -2,6 +2,7 @@ package dns
+ 
+ import (
+ 	"context"
++	"encoding/binary"
+ 	"errors"
+ 	"strings"
+ 
+@@ -62,19 +63,36 @@ func wireReply(query *wire.Msg, raw []byte, udp bool) ([]byte, error) {
+ 	if q.Qtype != r.Qtype || q.Qclass != r.Qclass || !strings.EqualFold(q.Name, r.Name) {
+ 		return nil, errors.New("unexpected DNS reply question")
+ 	}
+-	if udp {
+-		limit := wire.MinMsgSize
+-		if opt := query.IsEdns0(); opt != nil {
+-			limit = max(limit, min(1232, int(opt.UDPSize())))
+-		}
+-		if len(raw) > limit {
+-			reply.Truncated = true
+-			reply.Answer, reply.Ns, reply.Extra = nil, nil, nil
+-			if reply.Rcode > 15 {
+-				reply.SetEdns0(uint16(limit), false)
+-			}
+-			return reply.Pack()
++	if limit := udpReplyLimit(query); udp && len(raw) > limit {
++		reply.Truncated = true
++		reply.Answer, reply.Ns, reply.Extra = nil, nil, nil
++		if reply.Rcode > 15 {
++			reply.SetEdns0(uint16(limit), false)
+ 		}
++		return reply.Pack()
+ 	}
+ 	return raw, nil
+ }
++
++const maxDNSReplySize = wire.MaxMsgSize
++
++func udpReplyLimit(query *wire.Msg) int {
++	if opt := query.IsEdns0(); opt != nil {
++		return max(wire.MinMsgSize, min(1232, int(opt.UDPSize())))
++	}
++	return wire.MinMsgSize
++}
++
++func addressReplyLimit(packet []byte, udp bool) int {
++	if !udp {
++		return wire.MaxMsgSize
++	}
++	// Most legacy queries have no additional records. Only decode EDNS when present.
++	if len(packet) >= 12 && binary.BigEndian.Uint16(packet[10:12]) != 0 {
++		var query wire.Msg
++		if query.Unpack(packet) == nil {
++			return udpReplyLimit(&query)
++		}
++	}
++	return wire.MinMsgSize
++}
+diff --git a/proxy/tun/hop_dns.go b/proxy/tun/hop_dns.go
+index 817e552..563a4a3 100644
+--- a/proxy/tun/hop_dns.go
++++ b/proxy/tun/hop_dns.go
+@@ -43,9 +43,9 @@ func questionKey(packet []byte, reply bool) (dnsKey, bool) {
+ 		return dnsKey{}, false
+ 	}
+ 	flags := binary.BigEndian.Uint16(packet[2:4])
+-	if (flags&0x8000 != 0) != reply || flags&0x7a40 != 0 {
++	if (flags&0x8000 != 0) != reply || flags&0x7840 != 0 || (!reply && flags&0x0200 != 0) {
+ 		return dnsKey{}, false
+-	} // opcode, truncation or reserved Z bit
++	} // A complete TC reply delivers the instruction to retry over TCP.
+ 	an, ns, ar := int(binary.BigEndian.Uint16(packet[6:8])), int(binary.BigEndian.Uint16(packet[8:10])), int(binary.BigEndian.Uint16(packet[10:12]))
+ 	if an+ns+ar > 32 || (!reply && (an != 0 || ns != 0 || flags&15 != 0)) {
+ 		return dnsKey{}, false
+diff --git a/proxy/tun/hop_dns_test.go b/proxy/tun/hop_dns_test.go
+index 5ffd437..2fab05c 100644
+--- a/proxy/tun/hop_dns_test.go
++++ b/proxy/tun/hop_dns_test.go
+@@ -85,6 +85,32 @@ func TestHopDNSReclaimsCompletedPipelinedSources(t *testing.T) {
+ 	}
+ }
+ 
++func TestHopDNSTruncatedReplyCompletesUDPExchange(t *testing.T) {
++	u := testDNSHandler(t)
++	occupyOtherSources(u)
++	query := testDNSPacket(t, 7, dnsmessage.TypeAAAA, false)
++	c := sendTestUDP(u, 15000, testDNSGateway, query)
++	// TC completes only the matching, fully delivered wire message.
++	wrong := testDNSPacket(t, 8, dnsmessage.TypeAAAA, true)
++	wrong[2] |= 2
++	answerTestDNS(t, c, wrong)
++	if sendTestUDP(u, 15001, testDNSGateway, query) != nil {
++		t.Fatal("unmatched truncated answer released the slot")
++	}
++	reply := testDNSPacket(t, 7, dnsmessage.TypeAAAA, true)
++	reply[2] |= 2
++	malformed := append([]byte(nil), reply...)
++	malformed[7] = 1 // The declared answer is absent.
++	answerTestDNS(t, c, malformed)
++	if sendTestUDP(u, 15001, testDNSGateway, query) != nil {
++		t.Fatal("incomplete packet released the slot")
++	}
++	answerTestDNS(t, c, reply)
++	if sendTestUDP(u, 15001, testDNSGateway, query) == nil {
++		t.Fatal("delivered TC answer retained the UDP mapping")
++	}
++}
++
+ func TestHopDNSPreservesPendingAndStaleOwnership(t *testing.T) {
+ 	u := testDNSHandler(t)
+ 	occupyOtherSources(u)

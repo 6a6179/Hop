@@ -133,6 +133,116 @@ final class PersistenceTransactionTests: XCTestCase {
         }
     }
 
+    func testMissingLegacyTypedCredentialDoesNotCommitAnEmptyReplacement() throws {
+        let backend = PersistenceFaultBackend()
+        let store = makeStore(backend, authentication: .inMemory())
+        var data = sampleState()
+        data.subscriptions = []
+        let original = data.profiles[0]
+        data.profiles = [original.redactingSecrets()]
+        let bytes = try encode(data)
+        try bytes.write(to: stateURL)
+        XCTAssertThrowsError(try store.loadExisting()) { XCTAssertEqual($0 as? LibraryRecoveryError, .missingLegacyCredentials) }
+        XCTAssertEqual(try Data(contentsOf: stateURL), bytes)
+        for item in original.keychainSecretItems {
+            XCTAssertTrue(backend.setValue(item.value, forKey: item.key))
+        }
+        XCTAssertEqual(try store.loadExisting()?.profiles, [original])
+    }
+
+    func testLegacySalamanderRequiresAnObfuscationPasswordBeforeMigration() throws {
+        let store = makeStore(PersistenceFaultBackend(), authentication: .inMemory())
+        var data = sampleState()
+        data.subscriptions = []
+        for password: String? in [nil, "", "restored-secret"] {
+            data.profiles[0].options = .hysteria2(.init(password: "auth", obfs: "Salamander", obfsPassword: password))
+            let bytes = try encode(data)
+            try bytes.write(to: stateURL)
+            if password?.isEmpty != false {
+                XCTAssertThrowsError(try store.loadExisting()) { XCTAssertEqual($0 as? LibraryRecoveryError, .missingLegacyCredentials) }
+                XCTAssertEqual(try Data(contentsOf: stateURL), bytes)
+            } else {
+                XCTAssertEqual(try store.loadExisting()?.profiles, data.profiles)
+            }
+        }
+    }
+
+    func testOlderConfigurationImportCredentialsAreScrubbedOnLoad() throws {
+        let backend = PersistenceFaultBackend()
+        let store = makeStore(backend, authentication: .inMemory())
+        var data = sampleState()
+        let sentinel = "legacy-import-secret"
+        let variants: [ProtocolOptions] = [
+            .shadowsocks(.init(method: "password=\(sentinel)", password: sentinel)),
+            .http(.init(username: sentinel, password: nil)),
+            .socks(.init(username: sentinel, password: nil)),
+        ]
+        data.profiles = variants.map { options in
+            ProxyProfile(name: "Historical", endpoint: Endpoint(host: "example.org", port: 8080), options: options, security: .none)
+        }
+        try encode(data).write(to: stateURL)
+        let profiles = try XCTUnwrap(store.loadExisting()).profiles
+        XCTAssertEqual(profiles[0].options, .shadowsocks(.init(method: "", password: sentinel)))
+        XCTAssertEqual(profiles[1].options, variants[1])
+        XCTAssertEqual(profiles[2].options, variants[2])
+        XCTAssertFalse(try String(decoding: persistedStatePayload(at: stateURL), as: UTF8.self).contains(sentinel))
+        XCTAssertEqual(try store.loadExisting()?.profiles, profiles)
+    }
+
+    func testLibraryDirectoryExcludedFromBackupAndOlderRestoreExplainsMissingKey() throws {
+        let store = HopAppDataStore(url: stateURL, secretStore: .inMemory(), authenticationStore: .inMemory(), excludesDirectoryFromBackup: true)
+        XCTAssertTrue(store.save(sampleState()))
+        XCTAssertTrue(try XCTUnwrap(directory.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup))
+        let restored = makeStore(PersistenceFaultBackend(), authentication: .inMemory())
+        XCTAssertThrowsError(try restored.loadExisting()) { XCTAssertEqual($0 as? LibraryRecoveryError, .missingDeviceKey) }
+    }
+
+    @MainActor
+    func testAppBootstrapMigratesOnWorkerAndPublishesHydratedLibrary() async throws {
+        let backend = PersistenceFaultBackend(checksMigrationThread: true)
+        let store = makeStore(backend, authentication: .inMemory())
+        let original = sampleState()
+        try encode(original).write(to: stateURL)
+        let app = await HopStore.openLibrary {
+            XCTAssertFalse(Thread.isMainThread)
+            return store
+        }
+        // Publishing this pre-configuration fixture also schedules a save of its
+        // migrated routing presets. Finish it before reading or removing the file.
+        app.flushPendingPersists()
+        XCTAssertFalse(app.libraryLoadFailed)
+        XCTAssertEqual(app.profiles, original.profiles)
+        XCTAssertNotNil(try readPayload().secretGeneration)
+    }
+
+    @MainActor
+    func testInterruptedResetRequiresRetryEvenIfEmptyEnvelopeAlreadyCommitted() async throws {
+        let backend = PersistenceFaultBackend()
+        let store = makeStore(backend, authentication: .inMemory())
+        XCTAssertTrue(store.save(sampleState()))
+        let oldAccounts = try backend.allValues()
+        try Data("corrupt".utf8).write(to: stateURL)
+        let app = HopStore(dataStore: store)
+        do {
+            try await app.resetUnreadableLibrary { _ in throw CocoaError(.userCancelled) }
+            XCTFail("A failed VPN removal must abort the reset")
+        } catch CocoaError.userCancelled {}
+        XCTAssertEqual(try backend.allValues(), oldAccounts)
+        XCTAssertEqual(try String(contentsOf: stateURL, encoding: .utf8), "corrupt")
+        XCTAssertThrowsError(try store.loadExisting()) { XCTAssertEqual($0 as? LibraryRecoveryError, .incompleteReset) }
+        backend.failNextKeyEnumeration()
+        do {
+            try await app.resetUnreadableLibrary { _ in }
+            XCTFail("A failed prune must leave reset pending")
+        } catch CocoaError.fileWriteUnknown {}
+        XCTAssertTrue(try readPayload().profiles.isEmpty)
+        XCTAssertThrowsError(try store.loadExisting()) { XCTAssertEqual($0 as? LibraryRecoveryError, .incompleteReset) }
+        let reopened = HopStore(dataStore: store)
+        try await reopened.resetUnreadableLibrary { _ in }
+        XCTAssertTrue(try XCTUnwrap(store.loadExisting()).profiles.isEmpty)
+        XCTAssertTrue(try backend.allValues().isEmpty)
+    }
+
     func testStateAndSidecarReadsAreBoundedAndRejectNonregularFiles() throws {
         let backend = PersistenceFaultBackend()
         let auth = SecretStore.inMemory()
@@ -767,6 +877,11 @@ private final class PersistenceFaultBackend: SecretBackend, @unchecked Sendable 
     private var matchesUntilFailure = 0
     private var rejectBulkRead = false
     private var rejectKeyEnumeration = false
+    private let checksMigrationThread: Bool
+
+    init(checksMigrationThread: Bool = false) {
+        self.checksMigrationThread = checksMigrationThread
+    }
 
     func failNextBulkRead() {
         lock.withLock { rejectBulkRead = true }
@@ -784,6 +899,9 @@ private final class PersistenceFaultBackend: SecretBackend, @unchecked Sendable 
     }
 
     func setValue(_ value: String, forKey key: String) -> Bool {
+        if checksMigrationThread {
+            XCTAssertFalse(Thread.isMainThread, "Launch migration must not write Keychain items on the main thread")
+        }
         let reject = lock.withLock {
             guard failurePredicate?(key) == true else { return false }
             if matchesUntilFailure > 0 {

@@ -66,6 +66,17 @@ struct ProxyGroupTestOptions: Hashable, Codable {
 }
 
 struct ProxyGroup: Identifiable, Hashable, Codable {
+    /// A user may select "First Member" even when the provider sets an explicit default.
+    enum LocalSelection: Hashable, Codable {
+        case provider
+        case member(OutboundTarget?)
+
+        var target: OutboundTarget? {
+            guard case let .member(target) = self else { return nil }
+            return target
+        }
+    }
+
     var id: UUID
     /// Subscription provenance. `nil` means the group was created manually or
     /// predates provenance tracking; it must never match a remote refresh.
@@ -74,6 +85,14 @@ struct ProxyGroup: Identifiable, Hashable, Codable {
     var type: ProxyGroupType
     var members: [OutboundTarget]
     var defaultTarget: OutboundTarget?
+    var localSelection: LocalSelection?
+    var effectiveDefaultTarget: OutboundTarget? {
+        if case let .member(target) = localSelection, target.map(members.contains) ?? true {
+            return target
+        }
+        return defaultTarget
+    }
+
     var testOptions: ProxyGroupTestOptions
     var isEnabled: Bool
     var importedType: String?
@@ -87,6 +106,7 @@ struct ProxyGroup: Identifiable, Hashable, Codable {
         type: ProxyGroupType,
         members: [OutboundTarget],
         defaultTarget: OutboundTarget? = nil,
+        localSelection: LocalSelection? = nil,
         testOptions: ProxyGroupTestOptions = ProxyGroupTestOptions(),
         isEnabled: Bool = true,
         importedType: String? = nil,
@@ -99,6 +119,7 @@ struct ProxyGroup: Identifiable, Hashable, Codable {
         self.type = type
         self.members = members
         self.defaultTarget = defaultTarget
+        self.localSelection = localSelection
         self.testOptions = testOptions
         self.isEnabled = isEnabled
         self.importedType = importedType
@@ -193,6 +214,7 @@ struct ImportResult: Hashable, Codable {
         copy.groups = groups.map {
             var group = $0
             group.subscriptionID = subscriptionID
+            group.localSelection = group.type == .select ? .provider : nil
             return group
         }
         copy.groups = Self.bindingOwnedNamedReferences(
@@ -209,26 +231,22 @@ struct ImportResult: Hashable, Codable {
         profiles: [ProxyProfile],
         groups: [ProxyGroup],
     ) -> [ProxyGroup] {
-        var profileIDs: [SubscriptionSource.ID: [String: ProxyProfile.ID]] = [:]
+        var targets: [SubscriptionSource.ID: [String: [OutboundTarget]]] = [:]
         for profile in profiles {
             guard let owner = profile.subscriptionID else { continue }
             let name = normalizedTargetName(profile.name)
-            if profileIDs[owner]?[name] == nil {
-                profileIDs[owner, default: [:]][name] = profile.id
-            }
+            targets[owner, default: [:]][name, default: []].append(.profile(profile.id))
         }
-        var groupIDs: [SubscriptionSource.ID: [String: ProxyGroup.ID]] = [:]
         for group in groups {
             guard let owner = group.subscriptionID else { continue }
             let name = normalizedTargetName(group.name)
-            if groupIDs[owner]?[name] == nil {
-                groupIDs[owner, default: [:]][name] = group.id
-            }
+            targets[owner, default: [:]][name, default: []].append(.group(group.id))
         }
 
         return groups.map { original in
             guard let owner = original.subscriptionID else { return original }
             var group = original
+            var ambiguous = false
             func bound(_ target: OutboundTarget) -> OutboundTarget? {
                 if case .selectedProxy = target {
                     return nil
@@ -243,12 +261,11 @@ struct ImportResult: Hashable, Codable {
                 case "proxy":
                     return nil
                 default:
-                    if let id = profileIDs[owner]?[normalized] {
-                        return .profile(id)
+                    guard let candidates = targets[owner]?[normalized] else { return nil }
+                    if candidates.count == 1 {
+                        return candidates[0]
                     }
-                    if let id = groupIDs[owner]?[normalized] {
-                        return .group(id)
-                    }
+                    ambiguous = true
                     return nil
                 }
             }
@@ -261,7 +278,10 @@ struct ImportResult: Hashable, Codable {
             {
                 group.defaultTarget = group.members.first
             }
-            if group.members.isEmpty {
+            if ambiguous {
+                group.warning = Self.ambiguousSubscriptionGroupWarning
+            }
+            if group.members.isEmpty || ambiguous {
                 group.isEnabled = false
             }
             return group
@@ -297,6 +317,9 @@ struct ImportResult: Hashable, Codable {
     }
 
     static let subscriptionGroupReviewWarning = "Subscription groups disabled. Review members and default targets before enabling."
+    static let ambiguousSubscriptionGroupWarning = "Multiple subscription items share a member name. Select the intended members and default before enabling."
+    static let newGroupReviewPrompt = "Review subscription routing before enabling."
+    static let changedGroupReviewPrompt = "Refresh changed group or nested routing. Review before enabling."
 
     /// Provider-controlled groups can hide DIRECT/REJECT defaults and nested
     /// routing behavior behind a count-only preview. Keep new groups available,
@@ -308,7 +331,9 @@ struct ImportResult: Hashable, Codable {
         copy.groups = groups.map {
             var group = $0
             group.isEnabled = false
-            group.warning = "Review subscription routing before enabling."
+            if group.warning != Self.ambiguousSubscriptionGroupWarning {
+                group.warning = Self.newGroupReviewPrompt
+            }
             return group
         }
         if !warnings.contains(where: { $0.message == Self.subscriptionGroupReviewWarning }) {

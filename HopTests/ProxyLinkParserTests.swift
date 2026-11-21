@@ -145,6 +145,65 @@ final class ProxyLinkParserTests: XCTestCase {
         }
     }
 
+    func testConfigurationCredentialsStayInSecretFields() throws {
+        let malformed = try importService.importText("[Proxy]\nNode = ss, edge.example, 8388, password=private-value")
+        XCTAssertTrue(malformed.profiles.isEmpty)
+        XCTAssertEqual(malformed.incompleteSubscriptionInventory, true)
+        XCTAssertFalse(malformed.warnings.contains { $0.message.contains("private-value") })
+
+        for kind in ["https", "socks5-tls"] {
+            for (arguments, expectedUsername, expectedPassword) in [
+                ("sni=test.example, alpn=h2", nil, nil),
+                (", private-value, sni=test.example", "", "private-value"),
+                ("password=private-value, username=account", "account", "private-value"),
+                ("sni=test.example, private-value", nil, "private-value"),
+                (#"account, "private-value=a,b""#, "account", "private-value=a,b"),
+            ] as [(String, String?, String?)] {
+                let profile = try parse("[Proxy]\nNode = \(kind), edge.example, 443, \(arguments)")
+                switch profile.options {
+                case let .http(options):
+                    XCTAssertEqual(options.username, expectedUsername)
+                    XCTAssertEqual(options.password, expectedPassword)
+                case let .socks(options):
+                    XCTAssertEqual(options.username, expectedUsername)
+                    XCTAssertEqual(options.password, expectedPassword)
+                default:
+                    XCTFail("Unexpected protocol")
+                }
+                let redacted = try JSONEncoder().encode(profile.redactingSecrets())
+                XCTAssertFalse(String(decoding: redacted, as: UTF8.self).contains("private-value"))
+            }
+        }
+        let padded = try parse("[Proxy]\nNode = ss, edge.example, 8388, 2022-blake3-aes-128-gcm, YWJjZA==")
+        XCTAssertEqual(padded.options, .shadowsocks(ShadowsocksOptions(method: "2022-blake3-aes-128-gcm", password: "YWJjZA==")))
+    }
+
+    func testUnknownExplicitSecurityAndTransportCannotFallBackToPlainTCP() throws {
+        for query in ["security=unrecognized", "security=", "security", "security=none&tls=true", "type=unrecognized", "net="] {
+            XCTAssertThrowsError(try importService.importText("http://edge.example:8080?\(query)"))
+        }
+        XCTAssertThrowsError(try importService.importText("https://edge.example:443?security=none"))
+        for configuration in ["security=unrecognized", "type=unrecognized", "security=", "type="] {
+            let result = try importService.importText("[Proxy]\nNode = trojan, edge.example, 443, secret, \(configuration)")
+            XCTAssertTrue(result.profiles.isEmpty)
+            XCTAssertEqual(result.incompleteSubscriptionInventory, true)
+        }
+        for jsonField in [#""tls":"unknown""#, #""net":"unknown""#] {
+            let json = #"{"add":"edge.example","port":"8080","id":"test",\#(jsonField)}"#
+            XCTAssertThrowsError(try importService.importText("vmess://" + Data(json.utf8).base64EncodedString()))
+        }
+        XCTAssertEqual(try parse("socks://edge.example:1080?type=raw").transport.type, .tcp)
+    }
+
+    func testDetectsOnlyWholeConfigurationHeaderLinesIgnoringCase() throws {
+        let config = "; notes\n  [pRoXy]  \nNode = trojan, edge.example, 443, secret"
+        for text in [config, Data(config.utf8).base64EncodedString()] {
+            XCTAssertEqual(try parse(text).name, "Node")
+        }
+        let result = try importService.importText("socks://first.example:1080#Node[Rule]\nsocks://second.example:1080#Other")
+        XCTAssertEqual(result.profiles.map(\.name), ["Node[Rule]", "Other"])
+    }
+
     func testVMessConfigurationKeepsKeyedPasswordOutOfCipherAndRedactedState() throws {
         let id = "11111111-1111-4111-8111-111111111111"
         for (arguments, cipher) in [

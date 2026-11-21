@@ -28,7 +28,8 @@ enum ProfileImportPayloadDetector {
     }
 
     private static func subscriptionURL(from value: String) -> URL? {
-        guard let components = URLComponents(string: value),
+        guard value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              let components = URLComponents(string: value),
               components.scheme?.lowercased() == "https",
               components.host?.isEmpty == false,
               components.user == nil,

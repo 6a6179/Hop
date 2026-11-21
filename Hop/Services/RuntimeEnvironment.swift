@@ -282,6 +282,19 @@ struct SharedTunnelConfigurationStore {
             .appendingPathComponent(RuntimeEnvironment.configFileName)
     }
 
+    static func eraseAllSnapshots(in container: URL) throws {
+        let legacy = container.appendingPathComponent(RuntimeEnvironment.configFileName)
+        let urls = [container.appendingPathComponent("TunnelSnapshots", isDirectory: true), legacy,
+                    TunnelConfigAuthenticator.signatureURL(forConfigURL: legacy)]
+        for url in urls {
+            do {
+                try FileManager.default.removeItem(at: url)
+            } catch CocoaError.fileNoSuchFile {
+                continue
+            }
+        }
+    }
+
     func pruneSnapshots(keeping nonces: Set<String>) throws {
         guard FileManager.default.fileExists(atPath: snapshotDirectory.path) else { return }
         for directory in try FileManager.default.contentsOfDirectory(at: snapshotDirectory, includingPropertiesForKeys: nil) {

@@ -77,7 +77,7 @@ final class LatencyTesterTests: XCTestCase {
 
         await store.testLatency(for: profile)
 
-        XCTAssertEqual(store.nodeLatencies[profile.id], .failure("Endpoint host is not permitted for latency testing"))
+        XCTAssertEqual(store.latency(for: profile.id), .failure("Endpoint host is not permitted for latency testing"))
     }
 
     @MainActor
@@ -108,7 +108,50 @@ final class LatencyTesterTests: XCTestCase {
 
         await store.testLatency(for: profile)
 
-        XCTAssertEqual(store.nodeLatencies[profile.id], .failure("Endpoint host is not permitted for latency testing"))
+        XCTAssertEqual(store.latency(for: profile.id), .failure("Endpoint host is not permitted for latency testing"))
+    }
+
+    @MainActor
+    func testUDPNodeSkipsTCPProbeAndDropsResultsWhenMethodChanges() async {
+        var profile = ProxyProfile(name: "UDP", endpoint: Endpoint(host: "node.example", port: 443),
+                                   options: .trojan(TrojanOptions(password: "sample")), security: .none)
+        profile.transport.type = .mKCP
+        let store = HopStore(profiles: [profile], dataStore: HopAppDataStore(
+            url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory(),
+        ), latencyProbeHostResolver: { _ in XCTFail("UDP-only profiles should skip TCP resolution"); return nil })
+        await store.testLatency(for: profile)
+        XCTAssertEqual(store.latency(for: profile.id), .udpOnly)
+        profile.name = "Renamed"
+        store.updateProfile(profile)
+        XCTAssertEqual(store.latency(for: profile.id), .udpOnly)
+        store.settings.latencyTestMethod = .icmp
+        XCTAssertNil(store.latency(for: profile.id))
+        XCTAssertTrue(LatencyProbeInput(profile: profile, method: .icmp).canProbe)
+    }
+
+    @MainActor
+    func testEditingEndpointDiscardsInFlightResult() async {
+        let started = XCTestExpectation(description: "Resolving original endpoint")
+        let releaseResolver = DispatchSemaphore(value: 0)
+        var profile = ProxyProfile(name: "Node", endpoint: Endpoint(host: "original.example", port: 443),
+                                   options: .trojan(TrojanOptions(password: "sample")), security: .none)
+        let store = HopStore(profiles: [profile], dataStore: HopAppDataStore(
+            url: tempStateURL(), secretStore: .inMemory(), authenticationStore: .inMemory(),
+        ), latencyProbeHostResolver: { _ in
+            started.fulfill()
+            _ = releaseResolver.wait(timeout: .now() + 5)
+            return nil
+        })
+        let original = profile
+        let task = Task { await store.testLatency(for: original) }
+        let result = await XCTWaiter.fulfillment(of: [started], timeout: 2)
+        XCTAssertEqual(result, .completed)
+        profile.endpoint.host = "replacement.example"
+        store.updateProfile(profile)
+        XCTAssertNil(store.latency(for: profile.id))
+        releaseResolver.signal()
+        await task.value
+        XCTAssertNil(store.latency(for: profile.id))
     }
 
     func testWireGuardProbeUsesFirstEffectivePeerEndpoint() {

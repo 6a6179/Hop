@@ -3,7 +3,7 @@ name: Build Unsigned IPA
 on:
   workflow_dispatch:
   push:
-    paths:
+    paths: &build_paths
       - ".github/workflows/unsigned-ipa.yml"
       - "Frameworks/LibXray.xcframework.sha256"
       - "Geodata/**"
@@ -16,6 +16,8 @@ on:
       - "XrayBridge/**"
       - "project.yml"
       - "scripts/**"
+  pull_request:
+    paths: *build_paths
 
 permissions:
   contents: read
@@ -36,6 +38,9 @@ jobs:
     name: Build unsigned IPA
     runs-on: macos-26
     timeout-minutes: 60
+    outputs:
+      ipa_id: ${{ steps.upload_ipa.outputs.artifact-id }}
+      checksum_id: ${{ steps.upload_checksum.outputs.artifact-id }}
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
 
@@ -99,10 +104,20 @@ jobs:
 
       - name: Run unit tests
         run: |
+          set -euo pipefail
+
+          sdk_version="$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          runtime="com.apple.CoreSimulator.SimRuntime.iOS-${sdk_version//./-}"
+          if ! xcrun simctl list runtimes -j | jq -e --arg runtime "$runtime" \
+            'any(.runtimes[]; .identifier == $runtime and .isAvailable)' > /dev/null; then
+            xcodebuild -downloadPlatform iOS -buildVersion "$sdk_version"
+          fi
+
+          device="$(xcrun simctl create 'Hop CI' com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro "$runtime")"
           xcodebuild test \
             -project Hop.xcodeproj \
             -scheme Hop \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -destination "platform=iOS Simulator,id=$device" \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Build unsigned app
@@ -178,6 +193,7 @@ jobs:
             | cmp - XrayBridge/Acknowledgments.txt
 
       - name: Summarize artifact
+        if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
 
@@ -202,6 +218,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload IPA artifact
+        if: github.event_name != 'pull_request'
+        id: upload_ipa
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Hop-unsigned.ipa
@@ -211,6 +229,8 @@ jobs:
           retention-days: 14
 
       - name: Upload checksum artifact
+        if: github.event_name != 'pull_request'
+        id: upload_checksum
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: Hop-unsigned.ipa.sha256
@@ -221,6 +241,7 @@ jobs:
 
   publish-release:
     name: Publish unsigned IPA release
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: unsigned-ipa
     runs-on: ubuntu-latest
     permissions:
@@ -231,22 +252,16 @@ jobs:
       - name: Download build artifacts
         env:
           GH_TOKEN: ${{ github.token }}
+          IPA_ID: ${{ needs.unsigned-ipa.outputs.ipa_id }}
+          CHECKSUM_ID: ${{ needs.unsigned-ipa.outputs.checksum_id }}
         run: |
           set -euo pipefail
           mkdir -p build/UnsignedIPA
 
           download_artifact() {
-            name="$1"
-            output="$2"
-            artifact_id="$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
-              --jq ".artifacts[] | select(.name == \"${name}\" and .expired == false) | .id" \
-              | head -n 1)"
-
-            if [[ -z "$artifact_id" ]]; then
-              echo "::error title=Artifact not found::${name}"
+            local artifact_id="$1" output="$2"
+            if [[ ! "$artifact_id" =~ ^[0-9]+$ ]]; then
+              echo "::error::Missing or invalid build artifact ID for $output"
               exit 1
             fi
 
@@ -259,8 +274,8 @@ jobs:
             test -s "$output"
           }
 
-          download_artifact "Hop-unsigned.ipa" "build/UnsignedIPA/Hop-unsigned.ipa"
-          download_artifact "Hop-unsigned.ipa.sha256" "build/UnsignedIPA/Hop-unsigned.ipa.sha256"
+          download_artifact "$IPA_ID" "build/UnsignedIPA/Hop-unsigned.ipa"
+          download_artifact "$CHECKSUM_ID" "build/UnsignedIPA/Hop-unsigned.ipa.sha256"
 
       - name: Publish GitHub release
         env:

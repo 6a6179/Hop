@@ -10,7 +10,6 @@ extension ProxyImportService {
         var sawInventorySection = false
         var sawRuleSection = false
         var attemptedInventoryItem = false
-        var wasTruncated = false
         var remainingGroupMembers = ImportPolicy.maxImportedGroupMembers
         var groupFilters = GroupFilterCache()
 
@@ -34,7 +33,11 @@ extension ProxyImportService {
             case "proxy":
                 attemptedInventoryItem = true
                 let count = result.profiles.count
-                parseProxyLine(line, into: &result)
+                do {
+                    try parseProxyLine(line, into: &result)
+                } catch {
+                    result.warnings.append(ImportWarning(message: error.localizedDescription))
+                }
                 if result.profiles.count == count {
                     result.incompleteSubscriptionInventory = true
                 }
@@ -52,33 +55,9 @@ extension ProxyImportService {
             }
         }
 
-        // `components(separatedBy:).prefix(...)` allocates every line before
-        // applying the cap. Walk Unicode scalars so CharacterSet newline
-        // semantics (including CRLF as two separators) stay identical, but
-        // stop as soon as the first line beyond the budget is proven to exist.
-        let scalars = text.unicodeScalars
-        var lineStart = scalars.startIndex
-        var scalarIndex = scalars.startIndex
-        var parsedLineCount = 0
-        while scalarIndex < scalars.endIndex {
-            let scalar = scalars[scalarIndex]
-            let nextIndex = scalars.index(after: scalarIndex)
-            if CharacterSet.newlines.contains(scalar) {
-                parseLine(text[lineStart ..< scalarIndex])
-                parsedLineCount += 1
-                if parsedLineCount >= ImportPolicy.maxLines {
-                    // A separator after the max-th component guarantees the
-                    // same `lines.count > maxLines` result as the eager split,
-                    // even when the following component is empty.
-                    wasTruncated = true
-                    break
-                }
-                lineStart = nextIndex
-            }
-            scalarIndex = nextIndex
-        }
-        if !wasTruncated, parsedLineCount < ImportPolicy.maxLines {
-            parseLine(text[lineStart ..< scalars.endIndex])
+        let wasTruncated = scanConfigurationLines(text) { line in
+            parseLine(line)
+            return true
         }
 
         if wasTruncated {
@@ -101,9 +80,38 @@ extension ProxyImportService {
         return result
     }
 
-    private func parseProxyLine(_ line: String, into result: inout ImportResult) {
-        let parts = csvParts(line)
-        guard let nameAndType = parts.first?.split(separator: "=", maxSplits: 1).map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }),
+    func looksLikeProxyConfiguration(_ text: String) -> Bool {
+        guard text.contains("[") else { return false }
+        var found = false
+        _ = scanConfigurationLines(text) { line in
+            let header = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if header.first == "[", header.last == "]" {
+                found = ["[proxy]", "[proxy group]", "[rule]"].contains(header.lowercased())
+            }
+            return !found
+        }
+        return found
+    }
+
+    /// Shares newline semantics and the line budget between detection and parsing.
+    /// A false visit result ends the scan early. The return value indicates truncation.
+    private func scanConfigurationLines(_ text: String, visit: (Substring) -> Bool) -> Bool {
+        let scalars = text.unicodeScalars
+        var lineStart = scalars.startIndex
+        var lineCount = 0
+        for index in scalars.indices where CharacterSet.newlines.contains(scalars[index]) {
+            guard visit(text[lineStart ..< index]) else { return false }
+            lineCount += 1
+            guard lineCount < ImportPolicy.maxLines else { return true }
+            lineStart = scalars.index(after: index)
+        }
+        _ = visit(text[lineStart...])
+        return false
+    }
+
+    private func parseProxyLine(_ line: String, into result: inout ImportResult) throws {
+        let parts = csvFields(line)
+        guard let nameAndType = parts.first?.text.split(separator: "=", maxSplits: 1).map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) }),
               nameAndType.count == 2
         else {
             result.warnings.append(ImportWarning(message: "Skipped malformed proxy line: \(ImportPolicy.redactForLog(line))"))
@@ -112,53 +120,53 @@ extension ProxyImportService {
 
         let name = nameAndType[0]
         let type = nameAndType[1].lowercased()
-        let values = Array(parts.dropFirst())
-        let keyed = keyedOptions(values)
-
-        guard values.count >= 2,
-              let port = Int(values[1].trimmingCharacters(in: .whitespacesAndNewlines)),
-              (1 ... 65535).contains(port)
+        let values = parts.dropFirst()
+        guard let host = values.first?.text, !host.isEmpty,
+              let portText = values.dropFirst().first?.text,
+              let port = Int(portText), (1 ... 65535).contains(port)
         else {
-            result.warnings.append(ImportWarning(message: "Skipped \(name): missing or out-of-range port."))
+            result.warnings.append(ImportWarning(message: "Skipped \(name): missing host or out-of-range port."))
             return
         }
-
-        let host = values[0].trimmingCharacters(in: .whitespacesAndNewlines)
-        let security = configurationSecurity(keyed: keyed, host: host, type: type)
+        let arguments = values.dropFirst(2)
+        let keyed = keyedOptions(arguments.filter(\.isNamed).map(\.text))
+        var positional = arguments.filter { !$0.isNamed }.map(\.text)[...]
+        let security = try configurationSecurity(keyed: keyed, host: host, type: type)
 
         let profile: ProxyProfile?
         switch type {
         case "ss", "shadowsocks":
-            guard let password = keyed["password"] ?? values[safe: 3],
-                  let method = keyed["method"] ?? keyed["encrypt-method"] ?? values[safe: 2]
+            // A positional SS2022 password can contain base64 padding.
+            var fields = arguments.filter { !$0.isNamed || $0.isPaddedBase64 }.map(\.text)[...]
+            guard let method = keyed["method"] ?? keyed["encrypt-method"] ?? fields.popFirst(), !method.isEmpty, !method.contains("="),
+                  let password = keyed["password"] ?? fields.popFirst(), !password.isEmpty
             else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Shadowsocks requires method and password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .shadowsocks(ShadowsocksOptions(method: method, password: password)), security: security)
+            profile = try ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .shadowsocks(ShadowsocksOptions(method: method, password: password)), security: security, transport: configurationTransport(keyed: keyed))
         case "vmess":
-            var positional = values.dropFirst(2).filter { !$0.contains("=") }[...]
             let hasPositionalMethod = keyed["password"] != nil || positional.count > 1
             let method = keyed["method"] ?? (hasPositionalMethod ? positional.popFirst() : nil) ?? "auto"
-            guard let password = keyed["password"] ?? positional.popFirst() else {
+            guard let password = keyed["password"] ?? positional.popFirst(), !password.isEmpty else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): VMess requires password UUID."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vmess(VMessOptions(uuid: password, security: method, alterID: Int(keyed["alterid"] ?? keyed["alter-id"] ?? "0") ?? 0)), security: security, transport: configurationTransport(keyed: keyed))
+            profile = try ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vmess(VMessOptions(uuid: password, security: method, alterID: Int(keyed["alterid"] ?? keyed["alter-id"] ?? "0") ?? 0)), security: security, transport: configurationTransport(keyed: keyed))
         case "vless":
-            guard let password = keyed["password"] ?? keyed["uuid"] ?? values[safe: 2] else {
+            guard let password = keyed["password"] ?? keyed["uuid"] ?? positional.popFirst(), !password.isEmpty else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): VLESS requires password UUID."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vless(VLESSOptions(uuid: password, flow: keyed["flow"], encryption: keyed["encryption"])), security: security, transport: configurationTransport(keyed: keyed))
+            profile = try ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .vless(VLESSOptions(uuid: password, flow: keyed["flow"], encryption: keyed["encryption"])), security: security, transport: configurationTransport(keyed: keyed))
         case "trojan":
-            guard let password = keyed["password"] ?? values[safe: 2] else {
+            guard let password = keyed["password"] ?? positional.popFirst(), !password.isEmpty else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Trojan requires password."))
                 return
             }
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .trojan(TrojanOptions(password: password)), security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security, transport: configurationTransport(keyed: keyed))
+            profile = try ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .trojan(TrojanOptions(password: password)), security: security, transport: configurationTransport(keyed: keyed))
         case "hysteria", "hysteria2":
-            guard let auth = keyed["auth"] ?? keyed["password"] ?? values[safe: 2] else {
+            guard let auth = keyed["auth"] ?? keyed["password"] ?? positional.popFirst(), !auth.isEmpty else {
                 result.warnings.append(ImportWarning(message: "Skipped \(name): Hysteria2 requires auth/password."))
                 return
             }
@@ -175,16 +183,21 @@ extension ProxyImportService {
                     hopIntervalSeconds: Int(keyedValue(keyed, "hop-interval", "hop_interval") ?? ""),
                     udpIdleTimeoutSeconds: Int(keyedValue(keyed, "udp-idle-timeout", "udp_idle_timeout") ?? ""),
                 )),
-                security: security.layer == .none ? .tls(TLSOptions(serverName: host)) : security,
+                security: security,
                 transport: TransportOptions(type: .hysteria),
             )
         case "tuic":
             result.warnings.append(ImportWarning(message: "Skipped \(name): TUIC is not supported by Xray-core \(XrayAdvancedDocument.currentSchemaVersion)."))
             profile = nil
-        case "http", "https":
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .http(HTTPOptions(username: values[safe: 2], password: values[safe: 3])), security: security)
-        case "socks5", "socks5-tls":
-            profile = ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: .socks(SOCKSOptions(username: values[safe: 2], password: values[safe: 3])), security: security)
+        case "http", "https", "socks5", "socks5-tls":
+            // Never shift a later positional password into a missing username slot.
+            let username = keyed["username"] ?? arguments.first?.positionalValue
+            let password = keyed["password"] ?? (keyed["username"] == nil
+                ? arguments.dropFirst().first?.positionalValue : positional.first)
+            let options: ProtocolOptions = ["http", "https"].contains(type)
+                ? .http(HTTPOptions(username: username, password: password))
+                : .socks(SOCKSOptions(username: username, password: password))
+            profile = try ProxyProfile(name: name, endpoint: Endpoint(host: host, port: port), options: options, security: security, transport: configurationTransport(keyed: keyed))
         default:
             result.warnings.append(ImportWarning(message: "Imported unsupported proxy \(name) with type \(type) as a warning."))
             profile = nil
@@ -332,13 +345,18 @@ extension ProxyImportService {
         result.rules.append(RoutingRule(kind: kind, value: value, target: configurationTarget(targetName)))
     }
 
-    private func configurationSecurity(keyed: [String: String], host: String, type: String) -> ProxySecurity {
-        let security = (keyedValue(keyed, "security", "tls") ?? "").lowercased()
+    private func configurationSecurity(keyed: [String: String], host: String, type: String) throws -> ProxySecurity {
+        let requiresSecurity = ["https", "socks5-tls", "hysteria", "hysteria2"].contains(type)
+        let inferredLayer: SecurityLayer = requiresSecurity || type == "trojan" ? .tls : .none
+        let layer = try importedSecurityLayer(keyed["security"], tls: keyed["tls"], defaultLayer: inferredLayer)
+        guard layer != .none || !requiresSecurity, layer != .reality || type == "vless" else {
+            throw ProxyLinkParseError.invalidSecurity
+        }
         let serverName = keyedValue(keyed, "peer", "sni", "servername", "server_name", "server-name") ?? host
         let alpn = alpnValues(from: keyedValue(keyed, "alpn"))
         let fingerprint = keyedValue(keyed, "fingerprint", "fp", "utlsfingerprint", "utls_fingerprint", "utls-fingerprint", "clientfingerprint", "client_fingerprint", "client-fingerprint") ?? "chrome"
         let hasRealityFields = keyedValue(keyed, "pbk", "publickey", "public_key", "public-key", "sid", "shortid", "short_id", "short-id", "spx", "spiderx", "spider_x", "spider-x", "pqv", "mldsa65verify", "mldsa65_verify", "mldsa65-verify") != nil
-        let isReality = type == "vless" && (security == "reality" || boolOption(keyedValue(keyed, "reality")) || hasRealityFields)
+        let isReality = type == "vless" && (layer == .reality || boolOption(keyedValue(keyed, "reality")) || hasRealityFields)
 
         if isReality {
             return ProxySecurity(
@@ -360,9 +378,7 @@ extension ProxyImportService {
             )
         }
 
-        let isTLS = security == "tls" || boolOption(keyedValue(keyed, "tls"))
-            || ["https", "socks5-tls", "trojan", "hysteria", "hysteria2"].contains(type)
-        guard isTLS else {
+        guard layer == .tls else {
             return .none
         }
 
@@ -384,8 +400,10 @@ extension ProxyImportService {
         )
     }
 
-    private func configurationTransport(keyed: [String: String]) -> TransportOptions {
-        switch (keyed["obfs"] ?? keyed["type"] ?? "").lowercased() {
+    private func configurationTransport(keyed: [String: String]) throws -> TransportOptions {
+        switch (keyed["obfs"] ?? keyed["type"])?.lowercased() {
+        case nil, "none", "raw", "tcp":
+            .tcp
         case "websocket", "ws":
             TransportOptions(type: .websocket, path: keyed["path"] ?? keyed["obfs-uri"], host: keyed["host"] ?? keyed["obfs-host"], serviceName: nil)
         case "grpc":
@@ -403,7 +421,7 @@ extension ProxyImportService {
         case "hysteria":
             TransportOptions(type: .hysteria)
         default:
-            .tcp
+            throw ProxyLinkParseError.invalidTransport
         }
     }
 
@@ -445,30 +463,59 @@ extension ProxyImportService {
         }
     }
 
-    /// Splits a proxy configuration line on commas, honoring double-quoted segments.
+    private struct CSVField {
+        let text: String
+        let isNamed: Bool
+
+        var positionalValue: String? {
+            isNamed ? nil : text
+        }
+
+        var isPaddedBase64: Bool {
+            guard text.contains("=") else { return false }
+            return text.split(separator: ":", omittingEmptySubsequences: false).allSatisfy { key in
+                guard let data = Data(base64Encoded: String(key)) else { return false }
+                return !data.isEmpty && data.base64EncodedString() == key
+            }
+        }
+    }
+
     private func csvParts(_ line: String) -> [String] {
-        var result: [String] = []
+        csvFields(line).map(\.text).filter { !$0.isEmpty }
+    }
+
+    /// Keep empty slots and distinguish a quoted literal ("a=b") from an option (password="a=b").
+    private func csvFields(_ line: String) -> [CSVField] {
+        var result: [CSVField] = []
         var current = ""
         var isQuoted = false
+        var hasUnquotedEquals = false
 
+        func finishField() {
+            let text = current.trimmingCharacters(in: .whitespacesAndNewlines)
+            result.append(CSVField(text: text, isNamed: hasUnquotedEquals))
+            current = ""
+            hasUnquotedEquals = false
+        }
         for character in line {
             if character == "\"" {
                 isQuoted.toggle()
             } else if character == ",", !isQuoted {
-                result.append(current.trimmingCharacters(in: .whitespacesAndNewlines))
-                current = ""
+                finishField()
             } else {
+                if character == "=", !isQuoted {
+                    hasUnquotedEquals = true
+                }
                 current.append(character)
             }
         }
-
-        result.append(current.trimmingCharacters(in: .whitespacesAndNewlines))
-        return result.filter { !$0.isEmpty }
+        finishField()
+        return result
     }
 
     private func keyedOptions(_ values: [String]) -> [String: String] {
         values.reduce(into: [:]) { result, value in
-            let parts = value.split(separator: "=", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            let parts = value.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false).map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             guard parts.count == 2 else {
                 return
             }
@@ -518,11 +565,5 @@ private struct GroupFilterCache {
         }
         matches[filter] = (profiles.count, members)
         return members
-    }
-}
-
-private extension Array {
-    subscript(safe index: Int) -> Element? {
-        indices.contains(index) ? self[index] : nil
     }
 }

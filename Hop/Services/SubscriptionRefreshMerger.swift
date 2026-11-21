@@ -121,7 +121,8 @@ struct SubscriptionSecurityChange: Hashable, Identifiable {
         case .tlsCipherSuites: return safeText(tls?.cipherSuites)
         case .certificatePins: return safeText(tls?.pinnedPeerCertSHA256)
         case .verificationNames: return safeText(tls?.verifyPeerCertByName)
-        case .postQuantumCurves: return safeText(tls?.curvePreferences.joined(separator: ", "))
+        case .postQuantumCurves:
+            return tls?.curvePreferences.isEmpty == false ? safeText(tls?.curvePreferences.joined(separator: ", ")) : "Core defaults"
         case .realityPublicKey: return publicFingerprint(profile.security.reality?.publicKey)
         case .realityMLDSA: return publicFingerprint(profile.security.reality?.mldsa65Verify)
         case .ech: return tls?.echConfigList?.isEmpty == false ? "Configured" : "Not set"
@@ -586,6 +587,10 @@ struct SubscriptionRefreshMerger {
     }
 
     private static func changedPostQuantumPolicy(_ old: [String], _ new: [String]) -> Bool {
+        // The core defaults offer hybrid curves even though no names are stored.
+        if old.isEmpty != new.isEmpty {
+            return true
+        }
         guard old.contains(where: isPostQuantumCurve) || new.contains(where: isPostQuantumCurve) else { return false }
         return old.map { $0.lowercased() } != new.map { $0.lowercased() }
     }
@@ -660,8 +665,17 @@ struct SubscriptionRefreshMerger {
                 let existingGroup = groups[groupIndex]
                 var updatedGroup = importedGroup
                 updatedGroup.id = existingGroup.id
-                updatedGroup.isEnabled = existingGroup.isEnabled
-                updatedGroup.warning = existingGroup.warning
+                if updatedGroup.type == .select {
+                    // Older saves mixed the provider and local defaults. Keep a differing
+                    // previous choice while the routing comparison below prompts for review.
+                    updatedGroup.localSelection = existingGroup.localSelection
+                        ?? (existingGroup.defaultTarget == updatedGroup.defaultTarget ? .provider : .member(existingGroup.defaultTarget))
+                }
+                if importedGroup.warning != ImportResult.ambiguousSubscriptionGroupWarning {
+                    updatedGroup.isEnabled = existingGroup.isEnabled
+                    updatedGroup.warning = existingGroup.warning == ImportResult.ambiguousSubscriptionGroupWarning
+                        ? importedGroup.warning : existingGroup.warning
+                }
                 updatedGroup.lastLatencyMilliseconds = existingGroup.lastLatencyMilliseconds
                 groups[groupIndex] = updatedGroup
                 adjustReferences(in: updatedGroup, by: 1)
@@ -709,6 +723,11 @@ struct SubscriptionRefreshMerger {
         }
         if !importedGroupIDMap.isEmpty || !groupIDReplacements.isEmpty {
             replaceTargetReferences(groupIDMap: importedGroupIDMap.merging(groupIDReplacements) { current, _ in current })
+            for index in groups.indices {
+                if let selected = groups[index].localSelection?.target, !groups[index].members.contains(selected) {
+                    groups[index].localSelection = .provider
+                }
+            }
         }
         return importedGroupIDMap
     }
@@ -745,6 +764,9 @@ struct SubscriptionRefreshMerger {
         groups = groups.map { group in
             var group = group
             group.members.removeAll(where: wasRemoved)
+            if let selected = group.localSelection?.target, wasRemoved(selected) {
+                group.localSelection = .provider
+            }
             if let defaultTarget = group.defaultTarget, wasRemoved(defaultTarget) {
                 group.defaultTarget = group.members.first
             }
@@ -787,7 +809,7 @@ struct SubscriptionRefreshMerger {
             currentGroupByID[group.id] = group
             guard let previousGroup = previousGroupByID[group.id],
                   previousGroup.isEnabled,
-                  routingChanged(
+                  !group.isEnabled || routingChanged(
                       from: previousGroup,
                       resolvedBy: previousTargets,
                       to: group,
@@ -831,7 +853,9 @@ struct SubscriptionRefreshMerger {
         if !invalidatedGroupIDs.isEmpty {
             for index in groups.indices where invalidatedGroupIDs.contains(groups[index].id) {
                 groups[index].isEnabled = false
-                groups[index].warning = "Refresh changed group or nested routing. Review before enabling."
+                if groups[index].warning != ImportResult.ambiguousSubscriptionGroupWarning {
+                    groups[index].warning = ImportResult.changedGroupReviewPrompt
+                }
                 let name = ImportPolicy.sanitizeImportedName(groups[index].name, fallback: "Imported Group")
                 securityDowngradeWarnings.append(
                     "\(name): disabled after a group or nested routing change. Review before enabling.",
@@ -1014,6 +1038,10 @@ struct SubscriptionRefreshMerger {
     ) -> ProxyGroup {
         var group = group
         group.members = uniquedTargets(group.members.map { remappedTarget($0, profileIDMap: profileIDMap, groupIDMap: groupIDMap) })
+        if let target = group.localSelection?.target {
+            let remapped = remappedTarget(target, profileIDMap: profileIDMap, groupIDMap: groupIDMap)
+            group.localSelection = .member(remapped)
+        }
         group.defaultTarget = group.defaultTarget.map { remappedTarget($0, profileIDMap: profileIDMap, groupIDMap: groupIDMap) }
         if let defaultTarget = group.defaultTarget, !group.members.contains(defaultTarget) {
             group.defaultTarget = group.members.first

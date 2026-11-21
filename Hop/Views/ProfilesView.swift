@@ -108,8 +108,14 @@ struct ProfilesView: View {
                         store.applyImport(result)
                         selectedSection = .nodes
                         importNotice = ProfileImportNotice(title: "Import Complete", message: result.summary)
-                    case let .subscription(subscription, result):
-                        saveImportedSubscription(subscription, result: result, addedTitle: "Subscription Added")
+                    case let .subscription(subscription, result, sourceAtPreview):
+                        let outcome = store.saveSubscriptionPreview(result, for: subscription, sourceAtPreview: sourceAtPreview)
+                        if case let .applied(summary) = outcome {
+                            selectedSection = .subscriptions
+                            importNotice = ProfileImportNotice(title: sourceAtPreview == nil ? "Subscription Added" : "Subscription Updated", message: summary)
+                        } else {
+                            handleRefreshOutcome(outcome, for: sourceAtPreview ?? subscription)
+                        }
                     }
                 }
             case .securityReview:
@@ -296,7 +302,7 @@ struct ProfilesView: View {
                     Button {
                         store.selectedTarget = .profile(profile.id)
                     } label: {
-                        ProfileRow(profile: profile, isSelected: store.selectedTarget == .profile(profile.id), latency: store.nodeLatencies[profile.id])
+                        ProfileRow(profile: profile, isSelected: store.selectedTarget == .profile(profile.id), latency: store.latency(for: profile.id))
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -360,7 +366,7 @@ struct ProfilesView: View {
                     }
                     .controlSize(.small)
                     .font(.caption)
-                    .disabled(store.nodeLatencies.values.contains(.testing))
+                    .disabled(store.isTestingLatency)
                 }
             }
         }
@@ -514,62 +520,6 @@ struct ProfilesView: View {
             for: pending.subscription,
         )
         handleRefreshOutcome(outcome, for: pending.subscription)
-    }
-
-    /// Sheet flows already ran the allow-insecure confirmation before handing
-    /// the result over; manual refreshes gate new insecure nodes separately.
-    private func saveImportedSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
-        if let existing = store.subscriptions.first(where: { normalizedSubscriptionURL($0.url) == normalizedSubscriptionURL(subscription.url) }) {
-            var refreshedSubscription = subscription
-            refreshedSubscription.id = existing.id
-            if isDefaultSubscriptionName(subscription.name, for: subscription.url) {
-                refreshedSubscription.name = existing.name
-            }
-
-            if store.applySubscriptionRefresh(result, updating: refreshedSubscription) {
-                selectedSection = .subscriptions
-                importNotice = ProfileImportNotice(
-                    title: "Subscription Updated",
-                    message: "\(result.summary)\n\nMatching nodes updated, not duplicated.",
-                )
-            } else {
-                importNotice = ProfileImportNotice(
-                    title: "Subscription Not Updated",
-                    message: result.incompleteSubscriptionInventory == true ? ImportResult.incompleteInventoryMessage : "Subscription storage limit exceeded.",
-                )
-            }
-        } else {
-            addNewSubscription(subscription, result: result, addedTitle: addedTitle)
-        }
-    }
-
-    private func addNewSubscription(_ subscription: SubscriptionSource, result: ImportResult, addedTitle: String) {
-        if store.applySubscriptionImport(result, adding: subscription) {
-            selectedSection = .subscriptions
-            importNotice = ProfileImportNotice(title: addedTitle, message: result.summary)
-        } else {
-            importNotice = ProfileImportNotice(
-                title: "Subscription Not Added",
-                message: "Subscription storage limit exceeded.",
-            )
-        }
-    }
-
-    private func normalizedSubscriptionURL(_ value: String) -> String {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard var components = URLComponents(string: trimmed) else {
-            return trimmed
-        }
-        components.scheme = components.scheme?.lowercased()
-        components.host = components.host?.lowercased()
-        return components.url?.absoluteString ?? trimmed
-    }
-
-    private func isDefaultSubscriptionName(_ name: String, for urlString: String) -> Bool {
-        guard let url = URL(string: urlString) else {
-            return name == "Subscription"
-        }
-        return name == (url.host() ?? "Subscription")
     }
 
     private func refreshSubscription(_ subscription: SubscriptionSource) {
@@ -818,9 +768,12 @@ private struct LatencyBadge: View {
 
             StatusPill("\(milliseconds) ms", tint: color, systemImage: "bolt.horizontal.fill")
                 .accessibilityLabel("Latency \(milliseconds) milliseconds")
-        case .failure:
+        case .udpOnly:
+            StatusPill("UDP · use ICMP", tint: .secondary, systemImage: "info.circle")
+                .accessibilityLabel("UDP-only node. Select ICMP in latency settings to test the host.")
+        case let .failure(reason):
             StatusPill("Failed", tint: .red, systemImage: "exclamationmark.triangle.fill")
-                .accessibilityLabel("Latency test failed")
+                .accessibilityLabel("Latency test failed. \(reason)")
         }
     }
 }

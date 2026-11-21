@@ -18,6 +18,8 @@ There is no App Store build. Use the unsigned IPA from [Releases](../../releases
 - Tools: node search, latency tests, logs, and subscription refresh
 - iOS safety: a hard 50 MiB Network Extension budget with preflight limits and a runtime memory watchdog
 
+In Rule mode, enable **Settings → Protocol Sniffing** for domain, domain suffix, keyword, regex, GeoSite, and protocol rules. The tunnel uses sniffing to recover hostnames and identify protocols from IP packets. FakeDNS also requires this setting to map its synthetic addresses back to hostnames. IP, GeoIP, port, and network rules work with sniffing off. Rule evaluation stops at the first **Final** rule.
+
 ## Install
 
 1. Download `Hop-unsigned.ipa` from a **Hop main build** on the [Releases page](../../releases). A **Hop preview (branch)** release contains work from the named branch. Older releases identify their branch under **Branch/ref**.
@@ -54,7 +56,7 @@ Hop registers:
 
 ```text
 hop
-vless vmess trojan ss hysteria2 hy2 socks socks5 wireguard wg
+vless vmess trojan ss hysteria2 hy2 socks socks5 socks5+tls wireguard wg
 ```
 
 Examples:
@@ -100,6 +102,7 @@ Unsigned IPA packaging is in [`.github/workflows/unsigned-ipa.yml`](.github/work
 ## Security notes
 
 - Secrets are stored in the iOS Keychain, not in the app state file.
+- The library and its authentication keys are device-only. A backup will not transfer your library to a new iPhone. Keep your original subscription URLs and share links for re-import.
 - Imports and subscriptions are untrusted input. They are size-limited, sanitized, and previewed before saving.
 - Subscription servers must support HTTPS over HTTP/1.1. Hop checks every resolved address, connects to an approved IP, and verifies the certificate against the URL hostname. The 30-second deadline includes redirects. Compressed and expanded responses each have a 5 MiB limit.
 - Subscription refreshes cannot silently weaken an existing profile's TLS posture.

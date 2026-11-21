@@ -1,3 +1,5 @@
+import Dispatch
+
 /// Pure memory-budget decisions shared by the packet tunnel and its tests.
 /// Values leave enough headroom for an orderly LibXray shutdown below iOS's
 /// approximately 50 MiB Network Extension ceiling.
@@ -33,5 +35,27 @@ enum TunnelMemoryPolicy {
             return Decision(action: .none, softWarningActive: false)
         }
         return Decision(action: .none, softWarningActive: softWarningActive)
+    }
+}
+
+/// Serializes the watchdog's hard stop and NetworkExtension lifecycle callbacks.
+/// Both can release the same borrowed utun and must finish in order.
+final class TunnelServiceQueue: Sendable {
+    private let queue = DispatchQueue(
+        label: "cat.string.hop.tunnel-service",
+        qos: .userInitiated,
+        autoreleaseFrequency: .workItem,
+    )
+
+    func async(_ operation: @escaping @Sendable () -> Void) {
+        queue.async(execute: operation)
+    }
+
+    func makeMemoryWatchdog(_ sample: @escaping @Sendable () -> Void) -> DispatchSourceTimer {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        let interval = DispatchTimeInterval.milliseconds(TunnelMemoryPolicy.watchdogSampleMilliseconds)
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .milliseconds(50))
+        timer.setEventHandler(handler: sample)
+        return timer
     }
 }

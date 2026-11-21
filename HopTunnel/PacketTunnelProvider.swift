@@ -22,16 +22,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     private lazy var platformInterface = HopPlatformInterface(provider: self)
     private let serviceStateLock = NSLock()
     /// Serializes the full start/stop lifecycle around LibXray's single core.
-    private let serviceQueue = DispatchQueue(
-        label: "cat.string.hop.tunnel-service",
-        qos: .userInitiated,
-        autoreleaseFrequency: .workItem,
-    )
-    private let memoryQueue = DispatchQueue(
-        label: "cat.string.hop.tunnel-memory",
-        qos: .utility,
-        autoreleaseFrequency: .workItem,
-    )
+    private let serviceQueue = TunnelServiceQueue()
     private let tunnelLogLock = NSLock()
 
     private var xrayStarted = false
@@ -217,16 +208,7 @@ final class PacketTunnelProvider: NEPacketTunnelProvider, @unchecked Sendable {
     }
 
     private func startMemoryWatchdog() {
-        let timer = DispatchSource.makeTimerSource(queue: memoryQueue)
-        // A saturated download can fill several TCP receive windows before a
-        // one-second timer fires. Sample cheaply at 4 Hz so the hard stop still
-        // has room to run before iOS jetsams the extension.
-        timer.schedule(
-            deadline: .now() + .milliseconds(TunnelMemoryPolicy.watchdogSampleMilliseconds),
-            repeating: .milliseconds(TunnelMemoryPolicy.watchdogSampleMilliseconds),
-            leeway: .milliseconds(50),
-        )
-        timer.setEventHandler { [weak self] in
+        let timer = serviceQueue.makeMemoryWatchdog { [weak self] in
             self?.sampleMemoryAndEnforceLimits()
         }
         timer.resume()

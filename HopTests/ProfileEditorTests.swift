@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class ProfileEditorTests: XCTestCase {
+    func testProfileEditorOnlyOffersTheExactDraftAndLibraryRevisionThatPassed() async throws {
+        var editor = ProfileEditorState(draft: ProfileEditorDraft(profile: SampleData.trojanTLS))
+        editor.draft.trojanPassword = "\u{E9}"
+        let opening = editor.revision(profiles: 4)
+        let first = await editor.draft.validateForEditor(availableProfiles: [])
+        editor.record(first, for: opening, currentProfiles: 4)
+        XCTAssertNotNil(editor.validation(for: opening)?.profile)
+        editor.draft.trojanPassword = "e\u{301}"
+        let edited = editor.revision(profiles: 4)
+        XCTAssertNotEqual(opening, edited)
+        XCTAssertNil(editor.validation(for: edited))
+        let second = await editor.draft.validateForEditor(availableProfiles: [])
+        editor.record(second, for: edited, currentProfiles: 4)
+        editor.record(first, for: opening, currentProfiles: 4)
+        let saved = try XCTUnwrap(editor.validation(for: edited)?.profile)
+        guard case let .trojan(options) = saved.options else { return XCTFail("Expected Trojan") }
+        XCTAssertEqual(Array(options.password.utf8), Array("e\u{301}".utf8))
+        XCTAssertNil(editor.validation(for: editor.revision(profiles: 5)))
+    }
+
     private func wireGuardKey(_ byte: UInt8) -> String {
         Data(repeating: byte, count: 32).base64EncodedString()
     }

@@ -2,6 +2,13 @@
 import XCTest
 
 final class ProfileImportPayloadDetectorTests: XCTestCase {
+    func testListStartingWithHTTPSStaysInLocalPreview() {
+        for separator in ["\n", "\r\n", "\t", " "] {
+            let links = ["https://first.example:443/path", "socks://second.example:1080"].joined(separator: separator)
+            XCTAssertEqual(ProfileImportPayloadDetector.detect(links), .importText(links))
+        }
+    }
+
     func testDetectsPlainHTTPSURLAsSubscription() throws {
         let payload = ProfileImportPayloadDetector.detect(" https://sub.example.com/path/token?target=hop ")
 

@@ -38,6 +38,7 @@
 				<string>hy2</string>
 				<string>socks</string>
 				<string>socks5</string>
+				<string>socks5+tls</string>
 				<string>wireguard</string>
 				<string>wg</string>
 			</array>

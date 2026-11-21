@@ -14,27 +14,31 @@ struct DashboardView: View {
         @Bindable var store = store
         let state = store.tunnel.state
         let enabledGroups = store.groups.filter(\.isEnabled)
-        let selectedTarget = store.selectedTarget
+        let selectedTarget: OutboundTarget? = store.routingMode == .direct ? .direct : store.selectedTarget
         let installed = store.tunnel.installedConnection
         let showingInstalled = state.isConnected || state == .disconnecting
-        let needsProfile = store.profiles.isEmpty && !state.isConnected
-        let connectionActionDisabled = state.isInFlight || (!state.isConnected && !needsProfile && selectedTarget == nil)
+        let action = DashboardConnectionAction(
+            state: state, target: selectedTarget,
+            hasSelectableProxies: !store.profiles.isEmpty || !enabledGroups.isEmpty,
+        )
 
         Form {
             Section {
                 ConnectWidget(
                     state: state,
-                    profileName: showingInstalled ? installed?.targetName : store.selectedTargetDisplayName,
+                    profileName: showingInstalled ? installed?.targetName : selectedTarget.map(store.displayName(for:)),
                     routingMode: showingInstalled ? installed?.routingMode : store.routingMode,
-                    isDisabled: connectionActionDisabled,
-                    showsSetupAction: needsProfile,
+                    isDisabled: action == .unavailable,
+                    showsSetupAction: action == .addProfile,
+                    failureHint: store.tunnel.configurationFailureHint,
                 ) {
                     Task {
-                        if store.tunnel.state.isConnected {
+                        switch action {
+                        case .disconnect:
                             await store.tunnel.disconnect()
-                        } else if needsProfile {
+                        case .addProfile:
                             openProfiles()
-                        } else if let selectedTarget {
+                        case let .connect(selectedTarget):
                             await store.tunnel.connect(
                                 target: selectedTarget,
                                 targetName: store.displayName(for: selectedTarget),
@@ -44,6 +48,8 @@ struct DashboardView: View {
                                 rules: store.rules,
                                 settings: store.settings,
                             )
+                        case .unavailable:
+                            break
                         }
                     }
                 }
@@ -57,13 +63,13 @@ struct DashboardView: View {
                     }
                 }
 
-                if store.profiles.isEmpty {
-                    LabeledContent("Outbound") {
-                        Text("Not configured")
-                            .foregroundStyle(.secondary)
-                    }
+                if store.routingMode == .direct {
+                    LabeledContent("Outbound", value: "Direct")
                 } else {
                     Picker("Outbound", selection: $store.selectedTarget) {
+                        if store.selectedTarget == nil {
+                            Text("Select Outbound").tag(nil as OutboundTarget?)
+                        }
                         Text("Direct").tag(Optional(OutboundTarget.direct))
 
                         if !enabledGroups.isEmpty {
@@ -119,6 +125,26 @@ struct DashboardView: View {
     }
 }
 
+enum DashboardConnectionAction: Equatable {
+    case connect(OutboundTarget)
+    case disconnect
+    case addProfile
+    case unavailable
+
+    init(state: TunnelConnectionState, target: OutboundTarget?, hasSelectableProxies: Bool) {
+        switch state {
+        case .connected, .connecting: self = .disconnect
+        case .disconnecting: self = .unavailable
+        case .disconnected, .failed:
+            if let target {
+                self = .connect(target)
+            } else {
+                self = hasSelectableProxies ? .unavailable : .addProfile
+            }
+        }
+    }
+}
+
 private extension TunnelConnectionState {
     var accent: Color {
         switch self {
@@ -140,7 +166,7 @@ private extension TunnelConnectionState {
         case .connected:
             "Disconnect"
         case .connecting:
-            "Connecting"
+            "Cancel"
         case .disconnecting:
             "Stopping"
         case .failed, .disconnected:
@@ -154,7 +180,7 @@ private extension TunnelConnectionState {
 
     var buttonTint: Color {
         switch self {
-        case .connected, .disconnecting:
+        case .connected, .connecting, .disconnecting:
             .red
         default:
             .accentColor
@@ -175,10 +201,6 @@ private extension TunnelConnectionState {
             "xmark"
         }
     }
-
-    var isInFlight: Bool {
-        self == .connecting || self == .disconnecting
-    }
 }
 
 private struct ConnectWidget: View {
@@ -190,6 +212,7 @@ private struct ConnectWidget: View {
     let routingMode: RoutingMode?
     let isDisabled: Bool
     let showsSetupAction: Bool
+    let failureHint: String?
     let action: () -> Void
 
     var body: some View {
@@ -216,9 +239,14 @@ private struct ConnectWidget: View {
             .background(buttonTint.opacity(isDisabled ? 0.45 : 1), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
             .disabled(isDisabled)
             .accessibilityLabel(actionAccessibilityLabel)
-            .accessibilityHint(isDisabled && !state.isInFlight ? "Select an outbound before connecting." : "")
+            .accessibilityHint(isDisabled && state != .disconnecting ? "Select an outbound before connecting." : "")
 
             if state == .failed {
+                if let failureHint {
+                    Text(failureHint)
+                        .font(.callout)
+                        .accessibilityLabel("Connection failed. " + failureHint)
+                }
                 NavigationLink("View Error Logs") {
                     LogsView()
                 }
@@ -234,6 +262,8 @@ private struct ConnectWidget: View {
     private var actionAccessibilityLabel: Text {
         if showsSetupAction {
             Text("Open Profiles to add a profile")
+        } else if state == .connecting {
+            Text("Cancel VPN connection")
         } else if state.isConnected {
             Text("Disconnect VPN")
         } else {

@@ -6,6 +6,7 @@ import Foundation
 enum ProfileSecretField: String, CaseIterable {
     case uuid
     case vlessEncryption
+    case username
     case password
     case obfsPassword
     case privateKey
@@ -61,6 +62,26 @@ extension SubscriptionSource {
 }
 
 extension ProxyProfile {
+    /// Legacy state blanked typed credentials and had no manifest. Check the
+    /// hydrated values before making a missing Keychain alias permanent.
+    var missingRequiredCredential: Bool {
+        if security.layer == .reality, security.reality?.publicKey.isEmpty != false {
+            return true
+        }
+        return switch options {
+        case let .vless(value): value.uuid.isEmpty
+        case let .vmess(value): value.uuid.isEmpty
+        case let .trojan(value): value.password.isEmpty
+        case let .shadowsocks(value): value.password.isEmpty
+        case let .wireGuard(value): value.privateKey.isEmpty
+        case let .hysteria2(value):
+            value.password.isEmpty || (value.obfs?.lowercased() == "salamander" && value.obfsPassword?.isEmpty != false)
+        case let .tuic(value): value.uuid.isEmpty || value.password.isEmpty
+        case let .anyTLS(value): value.password.isEmpty
+        case .http, .socks: false
+        }
+    }
+
     /// July's Shadowsocks 2022 client hashed oversized base64 PSKs before use.
     /// November expects the effective keys. Only runtime snapshots use this copy.
     func normalizingShadowsocks2022Keys() throws -> ProxyProfile {
@@ -129,8 +150,10 @@ extension ProxyProfile {
         case let .vmess(options):
             values[.uuid] = options.uuid
         case let .http(options):
+            values[.username] = options.username
             values[.password] = options.password
         case let .socks(options):
+            values[.username] = options.username
             values[.password] = options.password
         case let .wireGuard(options):
             values[.privateKey] = options.privateKey
@@ -276,9 +299,9 @@ extension ProxyProfile {
         case let .vmess(options):
             copy.options = .vmess(VMessOptions(uuid: transform(ProfileSecretField.uuid.rawValue, options.uuid), security: options.security, alterID: options.alterID))
         case let .http(options):
-            copy.options = .http(HTTPOptions(username: options.username, password: options.password.map { transform(ProfileSecretField.password.rawValue, $0) }))
+            copy.options = .http(HTTPOptions(username: options.username.map { transform(ProfileSecretField.username.rawValue, $0) }, password: options.password.map { transform(ProfileSecretField.password.rawValue, $0) }))
         case let .socks(options):
-            copy.options = .socks(SOCKSOptions(username: options.username, password: options.password.map { transform(ProfileSecretField.password.rawValue, $0) }))
+            copy.options = .socks(SOCKSOptions(username: options.username.map { transform(ProfileSecretField.username.rawValue, $0) }, password: options.password.map { transform(ProfileSecretField.password.rawValue, $0) }))
         case let .wireGuard(options):
             let peers = options.peers?.map { peer in
                 var copy = peer

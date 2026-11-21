@@ -21,6 +21,7 @@ XRAY_PATCHES=(
   XrayBridge/patches/0009-bound-dns-lookups.patch
   XrayBridge/patches/0010-forward-dns-records.patch
   XrayBridge/patches/0011-honor-ios-mux-concurrency.patch
+  XrayBridge/patches/0012-size-dns-address-replies.patch
 )
 
 # A FIPS-enabled Go build defaults the runtime to FIPS mode. Its entropy path

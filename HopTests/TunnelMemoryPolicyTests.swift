@@ -2,6 +2,24 @@
 import XCTest
 
 final class TunnelMemoryPolicyTests: XCTestCase {
+    func testSystemStopWaitsForWatchdogShutdown() {
+        let lifecycle = TunnelServiceQueue()
+        let watchdogEntered = DispatchSemaphore(value: 0)
+        let finishShutdown = DispatchSemaphore(value: 0)
+        let systemStop = DispatchSemaphore(value: 0)
+        let watchdog = lifecycle.makeMemoryWatchdog {
+            watchdogEntered.signal()
+            _ = finishShutdown.wait(timeout: .now() + .seconds(3))
+        }
+        watchdog.resume()
+        XCTAssertEqual(watchdogEntered.wait(timeout: .now() + .seconds(3)), .success)
+        watchdog.cancel()
+        lifecycle.async { systemStop.signal() }
+        XCTAssertEqual(systemStop.wait(timeout: .now() + .milliseconds(100)), .timedOut)
+        finishShutdown.signal()
+        XCTAssertEqual(systemStop.wait(timeout: .now() + .seconds(3)), .success)
+    }
+
     func testResourceLimitsStayBelowExtensionCeiling() {
         XCTAssertEqual(TunnelMemoryPolicy.maximumConfigurationBytes, 512 * 1024)
         XCTAssertEqual(TunnelMemoryPolicy.watchdogSampleMilliseconds, 250)

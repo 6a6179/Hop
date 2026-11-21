@@ -139,9 +139,9 @@ enum LatencyTestMethod: String, CaseIterable, Codable, Identifiable {
     var footnote: String {
         switch self {
         case .tcp:
-            "TCP handshake."
+            "TCP handshake. Use ICMP for UDP-only nodes."
         case .connect:
-            "TCP + TLS; TCP only for non-TLS nodes."
+            "TCP handshake, plus TLS for secure nodes. Use ICMP for UDP-only nodes."
         case .icmp:
             "Host ping; may be blocked."
         }

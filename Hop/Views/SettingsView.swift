@@ -6,6 +6,7 @@ struct SettingsView: View {
 
     var body: some View {
         @Bindable var store = store
+        let onDemandAvailable = !RuntimeEnvironment.usesInlineResolvedTunnelConfiguration
 
         Form {
             Section("Appearance") {
@@ -26,14 +27,15 @@ struct SettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Toggle(isOn: $store.settings.connectOnDemand) {
+                Toggle(isOn: onDemandAvailable ? $store.settings.connectOnDemand : .constant(false)) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Connect On Demand")
-                        Text("Manual disconnect pauses this until next connect.")
+                        Text(onDemandAvailable ? "Manual disconnect pauses this until next connect." : "On Demand requires a shared App Group in the app and tunnel signatures.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
                 }
+                .disabled(!onDemandAvailable)
             } header: {
                 Text("Tunnel")
             } footer: {

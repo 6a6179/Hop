@@ -4,6 +4,164 @@ import XCTest
 
 @MainActor
 final class TunnelControllerLogTests: XCTestCase {
+    func testNetworkReassertionDoesNotDisarmOnDemand() async {
+        let controller = TunnelController()
+        let saved = StatusTestTunnelManager(status: .connected)
+        saved.isOnDemandEnabled = true
+        for status: NEVPNStatus in [.connected, .reasserting, .disconnected] {
+            saved.testConnection.currentStatus = status
+            await controller.refreshStatus { [saved] }
+        }
+        await Task.yield()
+        XCTAssertEqual(controller.state, .disconnected)
+        XCTAssertTrue(saved.savedOnDemandFlags.isEmpty)
+        XCTAssertTrue(saved.isOnDemandEnabled)
+    }
+
+    func testRetryAfterFailedIdleDisarmSavesBeforeStopping() async {
+        let controller = TunnelController()
+        let saved = StatusTestTunnelManager(status: .disconnected)
+        saved.isOnDemandEnabled = true
+        saved.saveError = NSError(domain: "test.save", code: 1)
+        await controller.refreshStatus { [saved] }
+        await controller.disconnect { [saved] }
+        XCTAssertTrue(saved.isOnDemandEnabled)
+        saved.saveError = nil
+        saved.testConnection.currentStatus = .connected
+        await controller.refreshStatus { [saved] }
+        await controller.disconnect { [saved] }
+        XCTAssertEqual(saved.savedOnDemandFlags, [false, false])
+        XCTAssertEqual(saved.testConnection.stopCount, 1)
+    }
+
+    func testRejectedInstallCannotDisarmOrOverwriteThePreviouslySavedVPN() async throws {
+        let controller = TunnelController()
+        let attempted = StatusTestTunnelManager(status: .disconnected)
+        attempted.saveError = NSError(domain: "test.preferences", code: 1)
+        let previouslyInstalled = StatusTestTunnelManager(status: .disconnected)
+        previouslyInstalled.isOnDemandEnabled = true
+        (previouslyInstalled.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration = ["secretNonce": UUID().uuidString]
+        var reads = 0
+        await controller.connect(
+            target: .direct, targetName: "Direct", profiles: [], groups: [], routingMode: .direct,
+            rules: [], settings: .defaults, loadManagers: {
+                reads += 1
+                return reads == 1 ? [attempted] : [previouslyInstalled]
+            },
+        )
+        XCTAssertEqual(controller.state, .failed)
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(attempted.savedOnDemandFlags.count, 1)
+        let cached = try await controller.loadManager()
+        XCTAssertTrue(cached === previouslyInstalled)
+        XCTAssertTrue(previouslyInstalled.isOnDemandEnabled)
+        XCTAssertTrue(previouslyInstalled.savedOnDemandFlags.isEmpty)
+    }
+
+    func testCancelDuringInstallCannotLaunchOrOverwriteLaterPreferences() async {
+        let controller = TunnelController()
+        let saved = StatusTestTunnelManager(status: .disconnected)
+        saved.isOnDemandEnabled = true
+        let entered = expectation(description: "connect reads preferences")
+        var resumeLoad: CheckedContinuation<Void, Never>?
+        let connect = Task {
+            await controller.connect(
+                target: .direct, targetName: "Direct", profiles: [], groups: [],
+                routingMode: .direct, rules: [], settings: .defaults,
+                loadManagers: {
+                    await withCheckedContinuation { continuation in
+                        resumeLoad = continuation
+                        entered.fulfill()
+                    }
+                    return [saved]
+                },
+            )
+        }
+        let result = await XCTWaiter.fulfillment(of: [entered], timeout: 5)
+        guard result == .completed else {
+            XCTFail("Did not reach preferences. \(controller.logs)")
+            return
+        }
+        let cancel = Task { await controller.disconnect { [saved] } }
+        let deadline = ContinuousClock.now + .seconds(2)
+        while controller.state == .connecting, ContinuousClock.now < deadline {
+            await Task.yield()
+        }
+        XCTAssertEqual(controller.state, .disconnecting)
+        XCTAssertTrue(saved.savedOnDemandFlags.isEmpty)
+        resumeLoad?.resume()
+        await connect.value
+        await cancel.value
+        XCTAssertEqual(saved.savedOnDemandFlags, [false])
+        XCTAssertEqual(saved.testConnection.stopCount, 1)
+        XCTAssertNil((saved.protocolConfiguration as? NETunnelProviderProtocol)?.providerConfiguration?["secretNonce"])
+        XCTAssertEqual(controller.state, .disconnected)
+    }
+
+    func testEraseDisablesAndStopsOnlyHopManagersAndRetriesCleanup() async throws {
+        let controller = TunnelController()
+        let first = StatusTestTunnelManager(status: .connected)
+        let second = StatusTestTunnelManager(status: .reasserting)
+        let other = StatusTestTunnelManager(status: .connected, provider: "other.tunnel")
+        for manager in [first, second, other] {
+            manager.isEnabled = true
+            manager.isOnDemandEnabled = true
+        }
+        let managers = [first, other, second]
+        do {
+            try await controller.eraseInstalledTunnel(loadManagers: { managers }, eraseSnapshots: { _ in
+                throw CocoaError(.fileWriteNoPermission)
+            })
+            XCTFail("Cleanup failure must leave Erase retryable")
+        } catch {}
+        for manager in [first, second] {
+            XCTAssertEqual(manager.savedOnDemandFlags, [false])
+            XCTAssertEqual(manager.testConnection.stopCount, 1)
+            XCTAssertEqual(manager.removalCount, 0)
+        }
+        try await controller.eraseInstalledTunnel(loadManagers: { managers }, eraseSnapshots: { _ in })
+        XCTAssertEqual(first.removalCount, 1)
+        XCTAssertEqual(second.removalCount, 1)
+        XCTAssertEqual(other.removalCount, 0)
+        XCTAssertTrue(other.isOnDemandEnabled)
+        XCTAssertEqual(other.testConnection.stopCount, 0)
+        XCTAssertEqual(controller.state, .disconnected)
+    }
+
+    func testEraseWithoutManagerStillRemovesSnapshotFiles() async throws {
+        let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: container) }
+        let directory = container.appendingPathComponent("TunnelSnapshots/old", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacy = container.appendingPathComponent(RuntimeEnvironment.configFileName)
+        for url in [legacy, TunnelConfigAuthenticator.signatureURL(forConfigURL: legacy), directory.appendingPathComponent("settings")] {
+            try Data("old".utf8).write(to: url)
+        }
+        try await TunnelController().eraseInstalledTunnel(loadManagers: { [] }, eraseSnapshots: { _ in
+            try SharedTunnelConfigurationStore.eraseAllSnapshots(in: container)
+        })
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: container.path).isEmpty)
+    }
+
+    func testDashboardCanCancelAndUseStandaloneOutbounds() {
+        XCTAssertEqual(DashboardConnectionAction(state: .connecting, target: nil, hasSelectableProxies: false), .disconnect)
+        XCTAssertEqual(DashboardConnectionAction(state: .disconnected, target: .direct, hasSelectableProxies: false), .connect(.direct))
+        let group = OutboundTarget.group(UUID())
+        XCTAssertEqual(DashboardConnectionAction(state: .disconnected, target: group, hasSelectableProxies: true), .connect(group))
+        XCTAssertEqual(DashboardConnectionAction(state: .disconnected, target: nil, hasSelectableProxies: false), .addProfile)
+    }
+
+    func testValidationHintIncludesTheLimitWithoutEchoingUntrustedValues() {
+        let controller = TunnelController()
+        let value = "SECRET_MARKER"
+        let limit = 16
+        let issue = XrayValidationIssue(path: "/observatory/\(value)", message: "Group \(value) exceeds the \(limit)-target limit.")
+        controller.appendTunnelStartFailure(XrayConfigError.validationFailed([issue]))
+        XCTAssertEqual(controller.configurationFailureHint, "URL-test groups. Group “…” exceeds the 16-target limit.")
+        XCTAssertFalse(controller.logs.joined().contains(value))
+        XCTAssertFalse(controller.logs.joined().contains("16-target"))
+    }
+
     func testFailedOnDemandSaveKeepsDisconnectAvailableAndRetriesSaveBeforeStopping() async {
         let controller = TunnelController()
         let saved = StatusTestTunnelManager(status: .connected)
@@ -362,6 +520,18 @@ final class TunnelControllerLogTests: XCTestCase {
 
     // MARK: - maximumLogEntries trimming
 
+    func testLowerRetentionIsPersistedWithoutAnotherAppend() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathComponent("state.json")
+        let dataStore = HopAppDataStore(url: url, secretStore: .inMemory(), authenticationStore: .inMemory())
+        let store = HopStore(dataStore: dataStore)
+        store.settings.logRetention = .oneThousand
+        store.tunnel.appendLogs((1 ... 150).map(String.init))
+        store.settings.logRetention = .oneHundred
+        XCTAssertEqual(store.tunnel.logs.count, 100)
+        store.flushPendingPersists()
+        XCTAssertEqual(try dataStore.loadExisting()?.logs, store.tunnel.logs)
+    }
+
     func testMaximumLogEntriesTrimmingEnforced() {
         let controller = TunnelController(logs: [], maximumLogEntries: 3)
 
@@ -446,6 +616,12 @@ private final class StatusTestTunnelManager: NETunnelProviderManager, @unchecked
     let testConnection = StatusTestConnection()
     var saveError: Error?
     var savedOnDemandFlags: [Bool] = []
+    var removalCount = 0
+
+    override func removeFromPreferences(completionHandler: (@Sendable (Error?) -> Void)? = nil) {
+        removalCount += 1
+        completionHandler?(nil)
+    }
 
     override func saveToPreferences(completionHandler: (@Sendable (Error?) -> Void)? = nil) {
         savedOnDemandFlags.append(isOnDemandEnabled)

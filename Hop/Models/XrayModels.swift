@@ -88,6 +88,47 @@ struct XraySecretSidecar: Hashable, Sendable {
     var valuesByJSONPointer: [String: String] = [:]
 }
 
+/// Compiler-authored literals are safe for the connection UI. String
+/// interpolations can contain imported names, JSON keys or credentials.
+struct XrayValidationMessage: ExpressibleByStringInterpolation {
+    let detail: String
+    let publicReason: String
+
+    init(stringLiteral value: String) {
+        detail = value
+        publicReason = value
+    }
+
+    init(stringInterpolation: StringInterpolation) {
+        detail = stringInterpolation.detail
+        publicReason = stringInterpolation.publicReason
+    }
+
+    struct StringInterpolation: StringInterpolationProtocol {
+        var detail = ""
+        var publicReason = ""
+
+        init(literalCapacity: Int, interpolationCount _: Int) {
+            detail.reserveCapacity(literalCapacity)
+            publicReason.reserveCapacity(literalCapacity)
+        }
+
+        mutating func appendLiteral(_ literal: String) {
+            detail += literal
+            publicReason += literal
+        }
+
+        mutating func appendInterpolation(_ number: Int) {
+            appendLiteral(String(number))
+        }
+
+        mutating func appendInterpolation(_ value: some Any) {
+            detail += String(describing: value)
+            publicReason += "“…”"
+        }
+    }
+}
+
 struct XrayValidationIssue: Identifiable, Hashable, Codable, Sendable {
     enum Severity: String, Hashable, Codable, Sendable {
         case error
@@ -96,7 +137,37 @@ struct XrayValidationIssue: Identifiable, Hashable, Codable, Sendable {
 
     var path: String
     var message: String
+    var publicReason: String?
     var severity: Severity = .error
+
+    init(path: String, message: XrayValidationMessage, severity: Severity = .error) {
+        self.path = path
+        self.message = message.detail
+        publicReason = message.publicReason
+        self.severity = severity
+    }
+
+    /// Only use known field labels. Unknown JSON keys can themselves be secret.
+    var publicField: String {
+        let parts = path.split(separator: "/")
+        switch parts.first {
+        case "profiles":
+            switch parts.dropFirst(2).first {
+            case "endpoint": return "Server endpoint"
+            case "transport", "streamSettings": return "Profile transport"
+            case "security", "tlsSettings", "realitySettings": return "Profile security"
+            case "options": return "Protocol options"
+            default: return "Profile"
+            }
+        case "observatory": return "URL-test groups"
+        case "groups": return "Proxy groups"
+        case "selectedTarget", "outbounds": return "Outbound selection"
+        case "routing": return "Routing rules"
+        case "dns", "fakeDns": return "DNS settings"
+        case "settings": return "Advanced settings"
+        default: return "Configuration"
+        }
+    }
 
     var id: String {
         "\(severity.rawValue):\(path):\(message)"

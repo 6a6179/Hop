@@ -36,9 +36,13 @@ private struct RetainedSubscriptionState: Encodable {
 final class HopStore {
     var profiles: [ProxyProfile] {
         didSet {
+            profilesRevision &+= 1
+            invalidateChangedLatencyProbes()
             persistUnlessBatched()
         }
     }
+
+    private(set) var profilesRevision: UInt64 = 0
 
     var groups: [ProxyGroup] {
         didSet {
@@ -86,6 +90,9 @@ final class HopStore {
 
     var settings: AppSettings {
         didSet {
+            if oldValue.latencyTestMethod != settings.latencyTestMethod {
+                latencyProbes.removeAll()
+            }
             tunnel.maximumLogEntries = settings.logRetention.rawValue
             persistUnlessBatched()
         }
@@ -95,7 +102,36 @@ final class HopStore {
 
     /// Transient per-node latency probe results, keyed by profile id. Not
     /// persisted — latency is only meaningful for the current session.
-    var nodeLatencies: [ProxyProfile.ID: NodeLatencyResult] = [:]
+    private struct Probe {
+        let id = UUID()
+        let input: LatencyProbeInput
+        var result: NodeLatencyResult
+    }
+
+    private var latencyProbes: [ProxyProfile.ID: Probe] = [:]
+
+    func latency(for id: ProxyProfile.ID) -> NodeLatencyResult? {
+        latencyProbes[id]?.result
+    }
+
+    var isTestingLatency: Bool {
+        latencyProbes.values.contains { $0.result == .testing }
+    }
+
+    private func invalidateChangedLatencyProbes() {
+        guard !latencyProbes.isEmpty else { return }
+        var obsolete = Set(latencyProbes.keys)
+        for profile in profiles {
+            if let probe = latencyProbes[profile.id],
+               probe.input == LatencyProbeInput(profile: profile, method: settings.latencyTestMethod)
+            {
+                obsolete.remove(profile.id)
+            }
+        }
+        for id in obsolete {
+            latencyProbes[id] = nil
+        }
+    }
 
     /// Subscriptions with a fetch in flight (manual or auto-refresh). Drives
     /// the per-row spinner and prevents overlapping refreshes of one source.
@@ -123,11 +159,20 @@ final class HopStore {
     @ObservationIgnored private let maxRetainedSubscriptionBytes: Int
     /// Log-only changes must not create a library before the first user edit.
     @ObservationIgnored private var hasPersistableState: Bool
+    @ObservationIgnored private var resetInProgress = false
     /// Serial queue for state saves: each save encodes the full state, rewrites
     /// the Keychain secret set, and writes the file — work that visibly stalls
     /// the main thread when run inline. Serial ordering keeps the newest
     /// snapshot the last one written.
     @ObservationIgnored private let persistQueue = DispatchQueue(label: "cat.string.hop.persist", qos: .utility)
+
+    static func openLibrary(makeDataStore: @escaping @Sendable () -> HopAppDataStore = { HopAppDataStore() }) async -> HopStore {
+        let (dataStore, loaded) = await Task.detached(priority: .userInitiated) {
+            let dataStore = makeDataStore()
+            return (dataStore, Result { try dataStore.loadExisting() })
+        }.value
+        return HopStore(dataStore: dataStore, loadedState: loaded)
+    }
 
     init(
         profiles: [ProxyProfile]? = nil,
@@ -141,6 +186,7 @@ final class HopStore {
         settings: AppSettings? = nil,
         tunnel: TunnelController? = nil,
         dataStore: HopAppDataStore = HopAppDataStore(),
+        loadedState: Result<HopAppData?, any Error>? = nil,
         importService: ProxyImportService = ProxyImportService(),
         latencyProbeHostResolver: @escaping @Sendable (String) -> String? = {
             ImportPolicy.resolvedPublicAddressForProbe($0)
@@ -158,7 +204,7 @@ final class HopStore {
 
         let loaded: HopAppData?
         do {
-            loaded = try dataStore.loadExisting()
+            loaded = try (loadedState ?? Result { try dataStore.loadExisting() }).get()
             libraryLoadFailed = false
             libraryRecoveryMessage = nil
         } catch {
@@ -223,7 +269,8 @@ final class HopStore {
 
         // Persist once if we upgraded an existing file from legacy rules, so the
         // migrated configuration IDs are stable across launches.
-        if resolved.didMigrate || didBindLoadedGroupReferences {
+        let exceededLogRetention = (loaded?.logs.count ?? 0) > self.settings.logRetention.rawValue
+        if resolved.didMigrate || didBindLoadedGroupReferences || exceededLogRetention {
             persistLoadedState()
         }
     }
@@ -386,9 +433,6 @@ final class HopStore {
         withBatchedPersist {
             bindNamedReferences(toProfiles: [id], groups: [], removing: true)
             profiles.removeAll { $0.id == id }
-            nodeLatencies[id] = nil
-            // Shared repair also drops routing rules that target the profile —
-            // a dangling rule target fails the next tunnel config build.
             repairReferences(removingProfiles: [id], groups: [])
             normalizeSelectedTarget()
         }
@@ -407,6 +451,14 @@ final class HopStore {
         guard let index = groups.firstIndex(where: { $0.id == group.id }) else {
             return
         }
+        var group = group
+        let original = groups[index]
+        if original.subscriptionID != nil, original.type == .select, group.type == .select,
+           group.defaultTarget != original.defaultTarget
+        {
+            group.localSelection = .member(group.defaultTarget)
+            group.defaultTarget = original.defaultTarget
+        }
         withBatchedPersist {
             if groups[index].name != group.name {
                 bindNamedReferences(toProfiles: [], groups: [group.id], introducing: group.name)
@@ -420,8 +472,6 @@ final class HopStore {
         withBatchedPersist {
             bindNamedReferences(toProfiles: [], groups: [id], removing: true)
             groups.removeAll { $0.id == id }
-            // Shared repair also drops routing rules that target the group —
-            // a dangling rule target fails the next tunnel config build.
             repairReferences(removingProfiles: [], groups: [id])
             normalizeSelectedTarget()
         }
@@ -432,6 +482,35 @@ final class HopStore {
             return
         }
         subscriptions[index] = subscription
+    }
+
+    func subscription(at url: String) -> SubscriptionSource? {
+        func normalized(_ value: String) -> String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard var components = URLComponents(string: trimmed) else { return trimmed }
+            components.scheme = components.scheme?.lowercased()
+            components.host = components.host?.lowercased()
+            return components.url?.absoluteString ?? trimmed
+        }
+        let key = normalized(url)
+        return subscriptions.first { normalized($0.url) == key }
+    }
+
+    /// The sheet confirms every insecure node in this exact result before Save.
+    func saveSubscriptionPreview(_ result: ImportResult, for source: SubscriptionSource, sourceAtPreview: SubscriptionSource?) -> SubscriptionRefreshOutcome {
+        let current = subscription(at: source.url)
+        guard current?.id == sourceAtPreview?.id,
+              current?.url == sourceAtPreview?.url,
+              current?.lastUpdatedAt == sourceAtPreview?.lastUpdatedAt
+        else { return .failed(message: "The subscription changed after preview. Preview it again.") }
+
+        if let sourceAtPreview {
+            return reviewSubscriptionRefresh(result, for: sourceAtPreview, reviewedInsecureProfileNames: result.insecureTLSProfileNames)
+        }
+        guard applySubscriptionImport(result, adding: source) else {
+            return .failed(message: "The subscription has no runnable items or exceeds the storage limit.")
+        }
+        return .applied(summary: result.summary)
     }
 
     func deleteSubscription(id: SubscriptionSource.ID) {
@@ -467,11 +546,12 @@ final class HopStore {
         }
     }
 
-    func updateRuleConfiguration(_ configuration: RuleConfiguration) {
-        guard let index = ruleConfigurations.firstIndex(where: { $0.id == configuration.id }) else {
-            return
-        }
+    @discardableResult
+    func updateRuleConfiguration(_ configuration: RuleConfiguration, ifUnchangedSince original: RuleConfiguration? = nil) -> Bool {
+        guard let index = ruleConfigurations.firstIndex(where: { $0.id == configuration.id }),
+              original == nil || ruleConfigurations[index] == original else { return false }
         ruleConfigurations[index] = configuration
+        return true
     }
 
     func deleteRuleConfiguration(id: RuleConfiguration.ID) {
@@ -649,7 +729,6 @@ final class HopStore {
                 groups: merger.removedGroupIDs,
                 remappingProfiles: merger.profileIDReplacements,
                 remappingGroups: merger.groupIDReplacements,
-                rejectRemovedRuleTargets: true,
                 invalidatedRuleTargets: changedNamedRuleTargets,
             )
             normalizeSelectedTarget()
@@ -946,6 +1025,9 @@ final class HopStore {
         for index in groups.indices {
             groups[index].members = groups[index].members.map(bound)
             groups[index].defaultTarget = groups[index].defaultTarget.map(bound)
+            if let selected = groups[index].localSelection?.target {
+                groups[index].localSelection = .member(bound(selected))
+            }
         }
         for index in ruleConfigurations.indices {
             for row in ruleConfigurations[index].rules.indices {
@@ -964,7 +1046,6 @@ final class HopStore {
         groups groupIDs: Set<ProxyGroup.ID>,
         remappingProfiles profileIDMap: [ProxyProfile.ID: ProxyProfile.ID] = [:],
         remappingGroups groupIDMap: [ProxyGroup.ID: ProxyGroup.ID] = [:],
-        rejectRemovedRuleTargets: Bool = false,
         invalidatedRuleTargets: Set<OutboundTarget> = [],
     ) {
         guard !profileIDs.isEmpty || !groupIDs.isEmpty || !profileIDMap.isEmpty || !groupIDMap.isEmpty || !invalidatedRuleTargets.isEmpty else { return }
@@ -991,6 +1072,9 @@ final class HopStore {
             let hadDefaultTarget = group.defaultTarget != nil
             group.members = group.members.compactMap(repaired)
             group.defaultTarget = group.defaultTarget.flatMap(repaired)
+            if let selected = group.localSelection?.target {
+                group.localSelection = repaired(selected).map { .member($0) } ?? .provider
+            }
             if hadDefaultTarget,
                group.defaultTarget.map({ !group.members.contains($0) }) ?? true
             {
@@ -1000,12 +1084,9 @@ final class HopStore {
         }
         var blockedRuleCount = 0
         for index in ruleConfigurations.indices {
-            ruleConfigurations[index].rules = ruleConfigurations[index].rules.compactMap { rule in
+            ruleConfigurations[index].rules = ruleConfigurations[index].rules.map { rule in
                 let target = invalidatedRuleTargets.contains(rule.target) ? nil : repaired(rule.target)
-                guard target != nil || rejectRemovedRuleTargets else { return nil }
                 var rule = rule
-                // A provider removing an outbound must not delete local policy
-                // and expose its traffic to a later Direct/fallback rule.
                 rule.target = target ?? .reject
                 if target == nil {
                     blockedRuleCount += 1
@@ -1014,7 +1095,7 @@ final class HopStore {
             }
         }
         if blockedRuleCount > 0 {
-            tunnel.appendLog("Refresh warning: Blocked \(blockedRuleCount) routing rule(s) whose targets changed or were removed. Review Rules.")
+            tunnel.appendLog("Blocked \(blockedRuleCount) routing rule(s) whose targets changed or were removed. Review Rules.")
         }
         if let selectedTarget {
             self.selectedTarget = repaired(selectedTarget)
@@ -1037,29 +1118,44 @@ final class HopStore {
     }
 
     func testLatency(for profile: ProxyProfile) async {
+        await testLatency(for: profile, fromRevision: nil)
+    }
+
+    private func testLatency(for profile: ProxyProfile, fromRevision revision: UInt64?) async {
         // Don't let a latency probe (TCP/TLS handshake or ICMP echo) reach a
         // private/loopback/link-local address. An imported subscription could
         // otherwise turn the "test latency" action into a LAN scanner. This
         // mirrors the SSRF policy applied to subscription fetches.
-        let endpoint = profile.probeEndpoint
-        let host = endpoint.host
+        let input = LatencyProbeInput(profile: profile, method: settings.latencyTestMethod)
+        // Bulk tests schedule more rows as earlier probes finish. The row may
+        // already have been edited or removed while waiting for a slot.
+        if revision != profilesRevision {
+            guard let current = profiles.first(where: { $0.id == profile.id }),
+                  input == LatencyProbeInput(profile: current, method: settings.latencyTestMethod) else { return }
+        }
+        let probe = Probe(input: input, result: input.canProbe ? .testing : .udpOnly)
+        latencyProbes[profile.id] = probe
+        guard input.canProbe else { return }
+        let host = input.endpoint.host
         let resolver = latencyProbeHostResolver
-        nodeLatencies[profile.id] = .testing
         let probeHost = await Task.detached(priority: .userInitiated) {
             resolver(host)
         }.value
+        guard latencyProbes[profile.id]?.id == probe.id else { return }
         guard let probeHost else {
-            nodeLatencies[profile.id] = .failure("Endpoint host is not permitted for latency testing")
+            latencyProbes[profile.id]?.result = .failure("Endpoint host is not permitted for latency testing")
             return
         }
         let result = await latencyTester.measure(
             host: probeHost,
-            port: endpoint.port,
-            serverName: profile.security.tls?.serverName ?? host,
-            usesTLS: profile.security.layer != .none,
-            method: settings.latencyTestMethod,
+            port: input.endpoint.port,
+            serverName: input.tlsServerName,
+            usesTLS: input.tlsServerName != nil,
+            method: input.method,
         )
-        nodeLatencies[profile.id] = result
+        if latencyProbes[profile.id]?.id == probe.id {
+            latencyProbes[profile.id]?.result = result
+        }
     }
 
     /// Probes the given nodes (all profiles by default) with bounded
@@ -1067,18 +1163,20 @@ final class HopStore {
     /// `testLatency`, so an imported list can't fan a bulk test out into a
     /// LAN scan.
     func testAllLatencies(_ profilesToTest: [ProxyProfile]? = nil, maxConcurrent: Int = 6) async {
-        let snapshot = profilesToTest ?? profiles
+        let ids = profilesToTest.map { Set($0.map(\.id)) }
+        let snapshot = ids.map { selected in profiles.filter { selected.contains($0.id) } } ?? profiles
+        let revision = profilesRevision
         await withTaskGroup(of: Void.self) { group in
             var index = 0
             while index < snapshot.count, index < maxConcurrent {
                 let profile = snapshot[index]
-                group.addTask { await self.testLatency(for: profile) }
+                group.addTask { await self.testLatency(for: profile, fromRevision: revision) }
                 index += 1
             }
             while await group.next() != nil {
                 if index < snapshot.count {
                     let profile = snapshot[index]
-                    group.addTask { await self.testLatency(for: profile) }
+                    group.addTask { await self.testLatency(for: profile, fromRevision: revision) }
                     index += 1
                 }
             }
@@ -1119,9 +1217,19 @@ final class HopStore {
         }
     }
 
-    func resetUnreadableLibrary() -> Bool {
-        guard libraryLoadFailed else { return false }
-        return dataStore.resetUnreadableLibrary(legacyExtensionLogPurgePending: tunnel.requiresLegacyExtensionLogPurge)
+    func resetUnreadableLibrary(
+        eraseInstalledTunnel: (TunnelController) async throws -> Void = { try await $0.eraseInstalledTunnel() },
+    ) async throws {
+        guard libraryLoadFailed, !resetInProgress else { throw CocoaError(.userCancelled) }
+        resetInProgress = true
+        defer { resetInProgress = false }
+        let dataStore = dataStore
+        try await Task.detached(priority: .userInitiated) { try dataStore.beginLibraryReset() }.value
+        try await eraseInstalledTunnel(tunnel)
+        let purgePending = tunnel.requiresLegacyExtensionLogPurge
+        try await Task.detached(priority: .userInitiated) {
+            try dataStore.finishLibraryReset(legacyExtensionLogPurgePending: purgePending)
+        }.value
     }
 
     func persist() {

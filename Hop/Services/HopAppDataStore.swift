@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 struct XrayMigrationReport: Codable, Equatable {
@@ -122,6 +123,9 @@ struct AppStateEnvelope: Codable {
 enum LibraryRecoveryError: LocalizedError {
     case conflictingLibraries
     case newerSchema
+    case missingDeviceKey
+    case missingLegacyCredentials
+    case incompleteReset
 
     var errorDescription: String? {
         switch self {
@@ -129,6 +133,12 @@ enum LibraryRecoveryError: LocalizedError {
             "Hop found conflicting saved libraries from previous installations. Restore a backup containing the library you want to use, then retry. Resetting erases the saved credentials."
         case .newerSchema:
             "This library was saved by a newer version of Hop. Install that version or a later one to open it."
+        case .missingDeviceKey:
+            "The device-only key for this library is missing. A backup from another device cannot open it. If you moved devices, reset the library and import your profiles again."
+        case .missingLegacyCredentials:
+            "A saved profile is missing credentials from the previous installation. Restore access to its Keychain and retry."
+        case .incompleteReset:
+            "Library erasure was interrupted. Choose Reset Library to finish removing the saved VPN and its credentials."
         }
     }
 }
@@ -146,6 +156,7 @@ struct HopAppDataStore {
     private let secretWriteCache = SecretWriteCache()
     private let legacyURLs: [URL]
     private let maximumFileBytes: Int
+    private let excludesDirectoryFromBackup: Bool
 
     init(
         url: URL? = nil,
@@ -154,10 +165,12 @@ struct HopAppDataStore {
         sharedLogStore: SharedTunnelLogStore = SharedTunnelLogStore(),
         legacyURLs: [URL]? = nil,
         maximumFileBytes: Int = Self.maximumStateFileBytes,
+        excludesDirectoryFromBackup: Bool? = nil,
     ) {
         self.url = url ?? RuntimeEnvironment.stateFileURL
         self.legacyURLs = legacyURLs ?? (url == nil ? RuntimeEnvironment.legacyStateFileURLs : [])
         self.maximumFileBytes = maximumFileBytes
+        self.excludesDirectoryFromBackup = excludesDirectoryFromBackup ?? (url == nil)
         self.secretStore = secretStore
         self.authenticationStore = authenticationStore
         self.sharedLogStore = sharedLogStore
@@ -170,6 +183,29 @@ struct HopAppDataStore {
     /// Only an absent state file represents a new library. All other read,
     /// authentication, and migration failures must preserve the existing library.
     func loadExisting() throws -> HopAppData? {
+        let directory = url.deletingLastPathComponent()
+        if excludesDirectoryFromBackup {
+            if FileManager.default.fileExists(atPath: directory.path) {
+                try excludeFromBackup(directory)
+            }
+            // Earlier migrations may have deliberately kept an obsolete library
+            // outside this directory in case the owner needed to recover it.
+            for legacy in legacyURLs where FileManager.default.fileExists(atPath: legacy.path) {
+                do {
+                    let values = try legacy.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                    if values.isRegularFile == true, values.isSymbolicLink != true {
+                        try excludeFromBackup(legacy)
+                    }
+                } catch {
+                    // Re-signing can leave this historical path read-only. The
+                    // current private library remains usable; retry next launch.
+                    NSLog("Hop: unable to update backup exclusion for a historical library")
+                }
+            }
+        }
+        if try TunnelConfigAuthenticator.readRegularFileIfPresent(at: resetMarkerURL, limit: 1) != nil {
+            throw LibraryRecoveryError.incompleteReset
+        }
         guard let data = try readState(at: url) else {
             return try adoptLegacyLibraryIfPresent()
         }
@@ -181,8 +217,6 @@ struct HopAppDataStore {
         // subscriptionID field and legacy rules had no provenance.
         let didMigrateSubscriptionProvenance = migrateSubscriptionProvenanceIfNeeded(&decoded)
         let didMigrateAdvancedTLS = migrateAdvancedTLSIfNeeded(&decoded)
-        let didMigrateLegacyLogState = migrateLegacyLogStateIfNeeded(&decoded)
-        let didRemoveVMessCredential = removeLegacyVMessCipherCredentials(&decoded)
 
         // Legacy/plaintext state (written before Keychain migration for
         // profiles, or before subscription URLs were treated as bearer
@@ -198,7 +232,12 @@ struct HopAppDataStore {
             decoded.profiles = decoded.profiles.map { $0.hydratingSecrets(from: storedSecrets) }
             decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: storedSecrets) }
         }
-        if stored.legacy || hadInlineProfileSecrets || hadInlineSubscriptionURLs || didMigrateToXray || didMigrateSubscriptionProvenance || didMigrateAdvancedTLS || didMigrateLegacyLogState || didRemoveVMessCredential {
+        let didScrubCipher = scrubLegacyCipherCredentials(&decoded)
+        if decoded.secretGeneration == nil || decoded.secretKeys == nil, decoded.profiles.contains(where: \.missingRequiredCredential) {
+            throw LibraryRecoveryError.missingLegacyCredentials
+        }
+        let didMigrateLegacyLogState = migrateLegacyLogStateIfNeeded(&decoded)
+        if stored.legacy || hadInlineProfileSecrets || hadInlineSubscriptionURLs || didMigrateToXray || didMigrateSubscriptionProvenance || didMigrateAdvancedTLS || didMigrateLegacyLogState || didScrubCipher {
             guard save(decoded) else { throw CocoaError(.fileWriteUnknown) }
         }
         return decoded
@@ -209,7 +248,8 @@ struct HopAppDataStore {
         let payload: Data
         let key = try authenticationStore.readValue(forKey: SecretStore.appStateAuthenticationKey)
         if let envelope {
-            guard let key, TunnelConfigAuthenticator.isValidSignature(envelope.signature, for: envelope.payload, secret: key) else {
+            guard let key else { throw LibraryRecoveryError.missingDeviceKey }
+            guard TunnelConfigAuthenticator.isValidSignature(envelope.signature, for: envelope.payload, secret: key) else {
                 throw CocoaError(.fileReadNoPermission)
             }
             payload = envelope.payload
@@ -297,6 +337,8 @@ struct HopAppDataStore {
                 recoverable.append((candidate, result.state, SHA256.hash(data: bytes)))
             } catch is DecodingError {
                 continue
+            } catch LibraryRecoveryError.missingDeviceKey {
+                continue
             } catch let error as CocoaError where error.code == .fileReadNoPermission || error.code == .fileReadCorruptFile {
                 continue
             }
@@ -309,15 +351,31 @@ struct HopAppDataStore {
         return choice.store
     }
 
-    private func removeLegacyVMessCipherCredentials(_ data: inout HopAppData) -> Bool {
+    private func scrubLegacyCipherCredentials(_ data: inout HopAppData) -> Bool {
+        func misplacedPassword(_ field: String) -> String? {
+            guard let delimiter = field.firstIndex(of: "="),
+                  field[..<delimiter].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "password"
+            else { return nil }
+            return String(field[field.index(after: delimiter)...])
+        }
         var changed = false
         for index in data.profiles.indices {
-            guard case var .vmess(options) = data.profiles[index].options,
-                  let delimiter = options.security.firstIndex(of: "="),
-                  options.security[..<delimiter].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "password"
-            else { continue }
-            options.security = "auto"
-            data.profiles[index].options = .vmess(options)
+            switch data.profiles[index].options {
+            case var .vmess(options):
+                guard misplacedPassword(options.security) != nil else { continue }
+                options.security = "auto"
+                data.profiles[index].options = .vmess(options)
+            case var .shadowsocks(options):
+                guard let password = misplacedPassword(options.method) else { continue }
+                // The original CSV supplied no cipher. Leave the choice to the user.
+                options.method = ""
+                if options.password.isEmpty {
+                    options.password = password
+                }
+                data.profiles[index].options = .shadowsocks(options)
+            default:
+                continue
+            }
             changed = true
         }
         return changed
@@ -839,33 +897,71 @@ struct HopAppDataStore {
         write(data, reason: .save)
     }
 
-    /// Invoked only after the user explicitly confirms replacement. Commit the
-    /// fresh envelope before pruning any credentials from the rejected library.
-    func resetUnreadableLibrary(legacyExtensionLogPurgePending: Bool) -> Bool {
+    private var resetMarkerURL: URL {
+        url.appendingPathExtension("reset-pending")
+    }
+
+    func beginLibraryReset() throws {
+        try prepareLibraryDirectory()
+        try Data().write(to: resetMarkerURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+    }
+
+    /// The marker keeps recovery active across termination, including if the new
+    /// envelope committed just before old credentials or files failed to prune.
+    func finishLibraryReset(legacyExtensionLogPurgePending: Bool) throws {
         secretWriteCache.invalidate()
-        return write(HopAppData(
+        guard write(HopAppData(
             profiles: [], groups: [], subscriptions: [], routingMode: .rule,
             selectedTarget: nil, settings: .defaults, logs: [],
             ruleConfigurations: RuleConfiguration.builtInConfigurations,
             activeRuleConfigurationID: RuleConfiguration.defaultConfiguration.id,
             legacyExtensionLogPurgePending: legacyExtensionLogPurgePending ? true : nil,
-        ), reason: .reset)
+        ), reason: .reset) else { throw CocoaError(.fileWriteUnknown) }
+        for legacy in Set(legacyURLs).subtracting([url]) {
+            try removeFileIfPresent(legacy)
+            try removeFileIfPresent(TunnelConfigAuthenticator.signatureURL(forConfigURL: legacy))
+        }
+        try removeFileIfPresent(signatureURL)
+        try removeFileIfPresent(initialCommitURL)
+        try FileManager.default.removeItem(at: resetMarkerURL)
+    }
+
+    private func removeFileIfPresent(_ file: URL) throws {
+        guard unlink(file.path) == 0 || errno == ENOENT else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    private func prepareLibraryDirectory() throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if excludesDirectoryFromBackup {
+            try excludeFromBackup(url.deletingLastPathComponent())
+        }
+    }
+
+    private func excludeFromBackup(_ location: URL) throws {
+        var location = location
+        guard try location.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup != true else { return }
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try location.setResourceValues(values)
     }
 
     private enum WriteReason { case save, adoptLegacyLibrary, reset }
 
-    private func write(_ data: HopAppData, reason: WriteReason) -> Bool {
+    private func write(_ input: HopAppData, reason: WriteReason) -> Bool {
         do {
             let isFirstCommit = !FileManager.default.fileExists(atPath: url.path)
             if reason == .save, isFirstCommit {
                 try prepareEmptyLibrary()
             }
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try prepareLibraryDirectory()
+            var data = input
+            _ = scrubLegacyCipherCredentials(&data)
             let secretItems = Dictionary(data.profiles.flatMap(\.keychainSecretItems) + data.subscriptions.compactMap(\.keychainURLItem), uniquingKeysWith: { _, last in last })
             let snapshot = secretWriteCache.prepare(secretItems)
             var redacted = data
             redacted.profiles = data.profiles.map { $0.redactingSecrets() }
-            _ = removeLegacyVMessCipherCredentials(&redacted)
             redacted.subscriptions = data.subscriptions.map { $0.redactingSecrets() }
             redacted.secretGeneration = snapshot.generation
             redacted.secretKeys = secretItems.keys.sorted()

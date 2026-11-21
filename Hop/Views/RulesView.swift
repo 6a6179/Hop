@@ -57,8 +57,9 @@ struct RulesView: View {
             ConfigurationEditorView(configuration: state.configuration, isNew: state.isNew) { configuration in
                 if state.isNew {
                     store.addRuleConfiguration(configuration)
+                    return true
                 } else {
-                    store.updateRuleConfiguration(configuration)
+                    return store.updateRuleConfiguration(configuration, ifUnchangedSince: state.configuration)
                 }
             }
         }
@@ -113,11 +114,13 @@ private struct ConfigurationEditorView: View {
     @Environment(HopStore.self) private var store
     @State private var draft: RuleConfiguration
     @State private var ruleEditor: RuleEditorState?
+    @State private var editMode = EditMode.inactive
+    @State private var showingConflict = false
 
     let isNew: Bool
-    let onSave: (RuleConfiguration) -> Void
+    let onSave: (RuleConfiguration) -> Bool
 
-    init(configuration: RuleConfiguration, isNew: Bool, onSave: @escaping (RuleConfiguration) -> Void) {
+    init(configuration: RuleConfiguration, isNew: Bool, onSave: @escaping (RuleConfiguration) -> Bool) {
         _draft = State(initialValue: configuration)
         self.isNew = isNew
         self.onSave = onSave
@@ -132,21 +135,13 @@ private struct ConfigurationEditorView: View {
                 }
 
                 Section {
-                    ForEach(draft.rules) { rule in
-                        Button {
-                            ruleEditor = .edit(rule)
-                        } label: {
-                            RuleRow(rule: rule, targetName: store.displayName(for: rule.target))
-                                .contentShape(Rectangle())
+                    let movable = draft.rules.prefix { $0.kind != .final }
+                    ForEach(movable) { rule in editableRow(rule) }
+                        .onMove { source, destination in
+                            draft.moveActiveRules(fromOffsets: source, toOffset: destination)
                         }
-                        .buttonStyle(.plain)
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) {
-                                draft.rules.removeAll { $0.id == rule.id }
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
+                    ForEach(draft.rules.dropFirst(movable.count)) { rule in
+                        editableRow(rule)
                     }
 
                     Button {
@@ -156,11 +151,20 @@ private struct ConfigurationEditorView: View {
                     }
                     .controlSize(.small)
                 } header: {
-                    Text("Rules")
+                    HStack {
+                        Text("Rules")
+                        Spacer()
+                        if editMode.isEditing || draft.rules.prefix(while: { $0.kind != .final }).count > 1 {
+                            Button(editMode.isEditing ? "Done" : "Reorder") {
+                                withAnimation { editMode = editMode.isEditing ? .inactive : .active }
+                            }
+                        }
+                    }
                 } footer: {
-                    Text("Unmatched traffic uses the Dashboard outbound.")
+                    Text("The first matching rule wins. Unmatched traffic uses the Dashboard outbound.")
                 }
             }
+            .environment(\.editMode, $editMode)
             .navigationTitle(isNew ? "New Configuration" : "Edit Configuration")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -173,8 +177,11 @@ private struct ConfigurationEditorView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         draft.name = draft.name.trimmingCharacters(in: .whitespacesAndNewlines)
-                        onSave(draft)
-                        dismiss()
+                        if onSave(draft) {
+                            dismiss()
+                        } else {
+                            showingConflict = true
+                        }
                     }
                     .disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -184,7 +191,38 @@ private struct ConfigurationEditorView: View {
                     draft.saveRule(rule)
                 }
             }
+            .alert("Configuration changed or removed", isPresented: $showingConflict) {
+                Button("OK") {}
+            } message: {
+                Text("Reopen the configuration to edit its current rules.")
+            }
         }
+    }
+
+    private func editableRow(_ rule: RoutingRule) -> some View {
+        Button {
+            ruleEditor = .edit(rule)
+        } label: {
+            RuleRow(rule: rule, targetName: store.displayName(for: rule.target))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            Button(role: .destructive) {
+                draft.rules.removeAll { $0.id == rule.id }
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        }
+    }
+}
+
+extension RuleConfiguration {
+    /// Rows after a legacy Final are unreachable. Moving a rule must never activate them.
+    mutating func moveActiveRules(fromOffsets offsets: IndexSet, toOffset destination: Int) {
+        let end = rules.firstIndex { $0.kind == .final } ?? rules.endIndex
+        guard offsets.allSatisfy((0 ..< end).contains), (0 ... end).contains(destination) else { return }
+        rules.move(fromOffsets: offsets, toOffset: destination)
     }
 }
 
@@ -194,7 +232,7 @@ private struct RuleRow: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(rule.value)
+            Text(rule.matchDescription)
                 .font(.body.weight(.semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -247,12 +285,15 @@ private struct RuleEditorView: View {
 
     var body: some View {
         let enabledGroups = store.groups.filter(\.isEnabled)
+        let ruleKinds = RoutingRuleKind.allCases.filter { kind in
+            kind == draft.kind || (kind.isAvailableInXray && (kind != .final || !hasOtherFinal))
+        }
 
         NavigationStack {
             Form {
                 Section {
                     Picker("Type", selection: $draft.kind) {
-                        ForEach(RoutingRuleKind.allCases.filter { $0.isAvailableInXray || $0 == draft.kind }, id: \.self) { kind in
+                        ForEach(ruleKinds, id: \.self) { kind in
                             Text(kind.displayName).tag(kind)
                                 .disabled(!kind.isAvailableInXray || (kind == .final && hasOtherFinal))
                         }
@@ -261,7 +302,9 @@ private struct RuleEditorView: View {
                         draft.value = newKind.defaultValue
                     }
 
-                    if draft.kind.isBoolean {
+                    if draft.kind == .final {
+                        LabeledContent("Match", value: draft.rule.matchDescription)
+                    } else if draft.kind.isBoolean {
                         Picker("Match", selection: $draft.value) {
                             Text("Yes").tag("true")
                             if draft.value != "true" {
@@ -327,7 +370,7 @@ private struct RuleEditorView: View {
                         validationError = nil
                         Task { @MainActor in
                             do {
-                                try await draft.validate(sniffTraffic: store.settings.sniffTraffic)
+                                try await draft.validate(settings: store.settings)
                                 onSave(draft.rule)
                                 dismiss()
                             } catch {
@@ -388,18 +431,27 @@ struct RuleEditorDraft {
         if kind.isBoolean, value != "true" {
             return "Xray can match private IPs only with Yes. Choose Yes or a different rule type."
         }
-        if kind == .protocolSniff, !sniffTraffic {
-            return "Enable traffic sniffing in Settings to use protocol rules."
+        if !sniffTraffic {
+            return kind.sniffingRequirement
         }
         return nil
     }
 
     func validate(sniffTraffic: Bool = true) async throws {
+        var settings = AppSettings.defaults
+        settings.sniffTraffic = sniffTraffic
+        try await validate(settings: settings)
+    }
+
+    func validate(settings currentSettings: AppSettings) async throws {
         // Validate the matcher independently of unrelated outbound credentials.
         var candidate = rule
         candidate.target = .direct
         var settings = AppSettings.defaults
-        settings.sniffTraffic = sniffTraffic
+        settings.sniffTraffic = currentSettings.sniffTraffic
+        if let pool = currentSettings.xrayAdvanced?.values["fakeDns"] {
+            settings.xrayAdvanced = XrayAdvancedDocument(["fakeDns": pool])
+        }
         let json = try XrayConfigBuilder().build(
             profiles: [], groups: [], selectedTarget: .direct,
             routingMode: .rule, rules: [candidate], settings: settings,

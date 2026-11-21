@@ -81,6 +81,19 @@ final class ExternalImportPayloadTests: XCTestCase {
         }
     }
 
+    func testExportedTLSSOCKSLinkOpensTheImportPreview() throws {
+        let profile = ProxyProfile(
+            name: "SOCKS TLS",
+            endpoint: Endpoint(host: "edge.example", port: 443),
+            options: .socks(SOCKSOptions()),
+            security: .tls(TLSOptions()),
+        )
+        let link = try XCTUnwrap(ProxyShareLink.shareLink(for: profile))
+        let url = try XCTUnwrap(URL(string: link))
+        XCTAssertEqual(url.scheme, "socks5+tls")
+        XCTAssertEqual(AppShellView.importPayload(from: url), link)
+    }
+
     func testProxyLinkSchemeIsCaseInsensitive() throws {
         let url = try XCTUnwrap(URL(string: "VLESS://uuid@host.example.com:443#Tokyo"))
         XCTAssertEqual(AppShellView.importPayload(from: url), "VLESS://uuid@host.example.com:443#Tokyo")

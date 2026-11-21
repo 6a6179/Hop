@@ -36,7 +36,7 @@ enum ProxyShareLink {
             return link(scheme: "vless", userInfo: options.uuid, profile: profile, query: query)
 
         case let .trojan(options):
-            var query = securityQuery(profile.security)
+            var query = profile.security.layer == .none ? [("security", "none")] : securityQuery(profile.security)
             query += transportQuery(profile.transport)
             return link(scheme: "trojan", userInfo: options.password, profile: profile, query: query)
 

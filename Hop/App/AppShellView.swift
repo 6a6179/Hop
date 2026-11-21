@@ -49,15 +49,16 @@ struct AppShellView: View {
             .tag(AppTab.settings)
         }
         .preferredColorScheme(preferredColorScheme)
-        .task { await store.tunnel.refreshStatus() }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active {
                 Task { await store.tunnel.refreshStatus() }
                 Task { await store.autoRefreshStaleSubscriptions() }
             }
         }
-        .onOpenURL { url in
-            handleExternalURL(url)
+        .onChange(of: store.pendingExternalImportText, initial: true) { _, payload in
+            if payload != nil {
+                selectedTab = .profiles
+            }
         }
         .alert(
             "Xray Migration Complete",
@@ -104,7 +105,7 @@ struct AppShellView: View {
     /// import payload. Mirrors the Xray-compatible schemes parsed by
     /// `ProxyImportService`.
     static let proxyLinkSchemes: Set<String> = [
-        "vless", "vmess", "trojan", "ss", "hysteria2", "hy2", "socks", "socks5", "wireguard", "wg",
+        "vless", "vmess", "trojan", "ss", "hysteria2", "hy2", "socks", "socks5", "socks5+tls", "wireguard", "wg",
     ]
 
     /// Accepts `hop://import?url=<https-subscription>`,
@@ -113,14 +114,6 @@ struct AppShellView: View {
     /// app can open a URL), so they are never applied directly: each lands in
     /// the same preview-and-confirm import sheet as pasted text, with every
     /// import gate intact.
-    private func handleExternalURL(_ url: URL) {
-        guard let payload = Self.importPayload(from: url) else {
-            return
-        }
-        store.pendingExternalImportText = payload
-        selectedTab = .profiles
-    }
-
     static func importPayload(from url: URL) -> String? {
         guard let scheme = url.scheme?.lowercased() else {
             return nil
@@ -158,10 +151,11 @@ struct AppShellView: View {
 
 struct LibraryRecoveryView: View {
     let message: String?
-    let retry: () -> Void
-    let reset: () -> Bool
+    let retry: () async -> Void
+    let reset: () async throws -> Void
     @State private var confirmingReset = false
-    @State private var resetFailed = false
+    @State private var busy = false
+    @State private var resetError: String?
 
     var body: some View {
         ContentUnavailableView {
@@ -169,18 +163,31 @@ struct LibraryRecoveryView: View {
         } description: {
             Text(message ?? "Hop couldn’t open your saved library. Unlock your device and try again.")
         } actions: {
-            Button("Retry", action: retry)
-                .buttonStyle(.borderedProminent)
+            Button("Retry") {
+                busy = true
+                Task {
+                    await retry()
+                    busy = false
+                }
+            }.buttonStyle(.borderedProminent)
             Button("Reset Library", role: .destructive) { confirmingReset = true }
-            if resetFailed {
-                Text("Reset failed. Check that your device is unlocked and try again.")
+            if let resetError {
+                Text("Reset failed. \(resetError)")
             }
         }
+        .disabled(busy)
         .alert("Erase the saved library?", isPresented: $confirmingReset) {
             Button("Cancel", role: .cancel) {}
-            Button("Erase Library", role: .destructive) { resetFailed = !reset() }
+            Button("Erase Library", role: .destructive) {
+                busy = true
+                Task {
+                    defer { busy = false }
+                    do { try await reset() }
+                    catch { resetError = error.localizedDescription }
+                }
+            }
         } message: {
-            Text("This permanently replaces your profiles, subscriptions, routing rules, settings, and saved credentials with a new library.")
+            Text("This stops Hop’s VPN, removes its saved VPN configuration, and permanently erases your profiles, subscriptions, routing rules, settings, and credentials.")
         }
     }
 }

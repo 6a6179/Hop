@@ -148,6 +148,18 @@ final class ProxyShareLinkTests: XCTestCase {
 
     // MARK: - Trojan + TLS
 
+    func testPrivateTrojanWithoutTLSRoundTripsAndOmittedSecurityStillDefaultsToTLS() throws {
+        let profile = ProxyProfile(
+            name: "Private",
+            endpoint: Endpoint(host: "node.internal", port: 443),
+            options: .trojan(TrojanOptions(password: "test")),
+            security: .none,
+        )
+        XCTAssertEqual(try roundTrip(profile).security.layer, .none)
+        let implicit = try XCTUnwrap(importService.importText("trojan://test@node.internal:443").profiles.first)
+        XCTAssertEqual(implicit.security.layer, .tls)
+    }
+
     func testTrojanTLSRoundTrip() throws {
         let profile = ProxyProfile(
             name: "Trojan TLS",

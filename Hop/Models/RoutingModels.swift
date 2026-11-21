@@ -134,7 +134,7 @@ enum RoutingRuleKind: String, CaseIterable, Codable, Identifiable {
         case .protocolSniff:
             "tls, http, quic"
         case .geoSite:
-            "category-ads-all"
+            VerifiedXrayGeodata.geoSiteCategories.sorted().joined(separator: ", ")
         case .geoIP:
             "private"
         case .sourceGeoIP:
@@ -167,6 +167,17 @@ enum RoutingRuleKind: String, CaseIterable, Codable, Identifiable {
         switch self {
         case .networkType, .networkIsExpensive, .networkIsConstrained, .wifiSSID, .wifiBSSID: false
         default: true
+        }
+    }
+
+    var sniffingRequirement: String? {
+        switch self {
+        case .protocolSniff:
+            "Enable traffic sniffing in Settings to use protocol rules."
+        case .domain, .domainSuffix, .domainKeyword, .domainRegex, .geoSite:
+            "Enable traffic sniffing in Settings so the tunnel can match destination domains."
+        default:
+            nil
         }
     }
 
@@ -235,14 +246,42 @@ enum RoutingRuleKind: String, CaseIterable, Codable, Identifiable {
 
 struct RoutingRule: Identifiable, Hashable, Codable {
     var id: UUID
-    var kind: RoutingRuleKind
-    var value: String
+    var kind: RoutingRuleKind {
+        didSet {
+            if kind == .final {
+                value = kind.defaultValue
+            }
+        }
+    }
+
+    var value: String {
+        didSet {
+            if kind == .final {
+                value = kind.defaultValue
+            }
+        }
+    }
+
     var target: OutboundTarget
+
+    var matchDescription: String {
+        kind == .final ? "All remaining traffic" : value
+    }
 
     init(id: UUID = UUID(), kind: RoutingRuleKind, value: String, target: OutboundTarget) {
         self.id = id
         self.kind = kind
-        self.value = value
+        self.value = kind == .final ? kind.defaultValue : value
         self.target = target
+    }
+
+    init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            id: fields.decode(UUID.self, forKey: .id),
+            kind: fields.decode(RoutingRuleKind.self, forKey: .kind),
+            value: fields.decode(String.self, forKey: .value),
+            target: fields.decode(OutboundTarget.self, forKey: .target),
+        )
     }
 }
