@@ -82,12 +82,19 @@ def acknowledgments(bridge):
         document("Hop", ROOT / "LICENSE"),
     ]
     # Go ships some vendored standard-library packages with additional notices.
-    std_notices = sorted(
-        p for directory in go_dirs for p in directory.iterdir() if p.is_file() and NOTICE.fullmatch(p.name)
-    )
-    if goroot / "LICENSE" not in std_notices:
-        raise SystemExit("Go toolchain license is missing")
-    sections.extend(document(f"{goversion} / {p.relative_to(goroot)}", p) for p in std_notices)
+    std_notices = {
+        p.relative_to(goroot): p
+        for directory in go_dirs for p in directory.iterdir() if p.is_file() and NOTICE.fullmatch(p.name)
+    }
+    license_name = Path("LICENSE")
+    if license_name not in std_notices:
+        # Homebrew keeps GOROOT in libexec and installs Go's LICENSE at the keg root.
+        keg_license = goroot.parent / license_name
+        homebrew_layout = goroot.name == "libexec" and (goroot.parent / "INSTALL_RECEIPT.json").is_file()
+        if not homebrew_layout or not keg_license.is_file():
+            raise SystemExit(f"Go toolchain license is missing for GOROOT {goroot}")
+        std_notices[license_name] = keg_license
+    sections.extend(document(f"{goversion} / {name}", path) for name, path in sorted(std_notices.items()))
     for module, source in sorted(modules.items()):
         # Include secondary licenses and package-specific exceptions as well as
         # the root license. Missing upstream notices must fail the release check.
