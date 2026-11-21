@@ -8,6 +8,7 @@ struct HopApp: App {
         WindowGroup {
             if store.libraryLoadFailed {
                 LibraryRecoveryView(
+                    message: store.libraryRecoveryMessage,
                     retry: { store = HopStore() },
                     reset: {
                         guard store.resetUnreadableLibrary() else { return false }

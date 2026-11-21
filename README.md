@@ -20,8 +20,8 @@ There is no App Store build. Use the unsigned IPA from [Releases](../../releases
 
 ## Install
 
-1. Download `Hop-unsigned.ipa` from [Releases](../../releases).
-2. Re-sign it with provisioning that can include the Network Extension `packet-tunnel-provider` entitlement.
+1. Download `Hop-unsigned.ipa` from a **Hop main build** on the [Releases page](../../releases). A **Hop preview (branch)** release contains work from the named branch. Older releases identify their branch under **Branch/ref**.
+2. Re-sign the app and its embedded extension using the provisioning setup below.
 3. Install the signed IPA.
 
 After upgrading to the November engine, open Hop and reconnect once. This rebuilds the tunnel configuration for the new core so Connect On Demand can use it.
@@ -38,10 +38,10 @@ Signing support:
 | Paid Apple Developer Program | Yes | Enable Network Extensions on the App ID. |
 | Enterprise certificate | Maybe | Only works if the profile includes Network Extension support. |
 
-Your signer must preserve these entitlements on both `Hop.app` and `PlugIns/HopTunnel.appex`:
+Register an App ID for the app and another for the extension on your team. Enable Network Extensions and App Groups on both. Create one App Group on your team, assign it to both App IDs, and regenerate both provisioning profiles. Keep each profile in its signed bundle so Hop can discover the shared group.
 
-- `com.apple.security.application-groups`: `group.cat.string.hop`
-- `keychain-access-groups`: `<team-prefix>.cat.string.hop`
+- `com.apple.security.application-groups`: use the **same registered group** on both binaries. Re-map the placeholder `group.cat.string.hop` to your team’s group.
+- `keychain-access-groups`: use the same `<AppIdentifierPrefix>cat.string.hop` on both binaries. The signing prefix includes the trailing period. Keep the `cat.string.hop` suffix, which the Keychain lookup uses.
 - `com.apple.developer.networking.networkextension`: `packet-tunnel-provider`
 
 If the signer strips the extension or its entitlements, the app may open but the VPN will disconnect immediately.
@@ -72,14 +72,14 @@ iOS does not let users choose a handler when multiple apps register the same cus
 
 Requirements:
 
-- Xcode
+- Xcode 26.5 (17F42), with iOS and Simulator SDKs 26.5 (23F73). Use `DEVELOPER_DIR` to select it when multiple Xcode versions are installed.
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-- Go 1.27.4, only needed to rebuild the pinned Xray bridge
+- Go 1.27.4 for the initial bridge build and later engine rebuilds
 
 Build:
 
 ```sh
-./scripts/build-libxray.sh
+GOTOOLCHAIN=go1.27.4 ./scripts/build-libxray.sh
 ./scripts/verify-geodata.sh
 xcodegen generate
 xcodebuild -project Hop.xcodeproj -scheme Hop \
@@ -101,6 +101,7 @@ Unsigned IPA packaging is in [`.github/workflows/unsigned-ipa.yml`](.github/work
 
 - Secrets are stored in the iOS Keychain, not in the app state file.
 - Imports and subscriptions are untrusted input. They are size-limited, sanitized, and previewed before saving.
+- Subscription servers must support HTTPS over HTTP/1.1. Hop checks every resolved address, connects to an approved IP, and verifies the certificate against the URL hostname. The 30-second deadline includes redirects. Compressed and expanded responses each have a 5 MiB limit.
 - Subscription refreshes cannot silently weaken an existing profile's TLS posture.
 - Xray configurations that disable TLS verification are rejected; legacy nodes remain blocked until normal verification or certificate pins are selected.
 - Tunnel config passed through the shared App Group is authenticated before the extension resolves secret references.
@@ -119,3 +120,5 @@ Report security issues through [Issues](../../issues).
 ## License
 
 [GPL-3.0-or-later](LICENSE)
+
+Each IPA includes `Hop.app/Acknowledgments.txt` with licenses and credits for the linked Go dependencies and bundled routing data. The Iran IP list includes GeoLite2 data created by MaxMind. [MaxMind](https://www.maxmind.com) · [Acknowledgments](XrayBridge/Acknowledgments.txt)

@@ -9,10 +9,12 @@ struct ProxyGroupEditorView: View {
     @State private var isSaving = false
     @State private var validationError: String?
 
-    let onSave: (ProxyGroup) -> Void
+    let isNew: Bool
+    let onSave: (ProxyGroup) -> Bool
 
-    init(group: ProxyGroup, onSave: @escaping (ProxyGroup) -> Void) {
+    init(group: ProxyGroup, isNew: Bool, onSave: @escaping (ProxyGroup) -> Bool) {
         _draft = State(initialValue: ProxyGroupEditorDraft(group: group))
+        self.isNew = isNew
         self.onSave = onSave
     }
 
@@ -92,7 +94,7 @@ struct ProxyGroupEditorView: View {
                 }
             }
             .disabled(isSaving)
-            .navigationTitle(store.groups.contains(where: { $0.id == draft.id }) ? "Edit Group" : "New Group")
+            .navigationTitle(isNew ? "New Group" : "Edit Group")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -104,30 +106,26 @@ struct ProxyGroupEditorView: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button(isSaving ? "Saving..." : "Save") {
                         let draft = draft
-                        let profiles = store.profiles
-                        let otherGroups = store.groups.filter { $0.id != draft.id }
                         validationError = nil
                         isSaving = true
                         Task { @MainActor in
-                            guard let group = await draft.resolvedGroup() else {
-                                isSaving = false
-                                return
-                            }
-                            if group.isEnabled, group.type == .urlTest {
-                                let issue = await Task.detached(priority: .userInitiated) {
-                                    XrayConfigBuilder().validationIssues(
-                                        profiles: profiles, groups: otherGroups + [group], selectedTarget: .group(group.id),
-                                        routingMode: .global, rules: [],
-                                    ).first
-                                }.value
-                                if let issue {
-                                    validationError = issue.message
-                                    isSaving = false
+                            let profiles = store.profiles
+                            let otherGroups = store.groups.filter { $0.id != draft.id }
+                            defer { isSaving = false }
+                            do {
+                                guard let group = try await draft.validatedGroup(profiles: profiles, otherGroups: otherGroups) else { return }
+                                guard !group.isEnabled || (store.profiles == profiles && store.groups.filter { $0.id != draft.id } == otherGroups) else {
+                                    validationError = "The node or group list changed. Save again to check the current members."
                                     return
                                 }
+                                guard onSave(group) else {
+                                    validationError = "This group changed or was removed. Reopen it to edit its current settings."
+                                    return
+                                }
+                                dismiss()
+                            } catch {
+                                validationError = error.localizedDescription
                             }
-                            onSave(group)
-                            dismiss()
                         }
                     }
                     .disabled(!draft.isStructurallyValid || isSaving)
@@ -189,6 +187,20 @@ struct ProxyGroupEditorDraft {
             && !members.isEmpty
             && Int(trimmed(intervalSeconds)) != nil
             && (!isEnabled || type != .urlTest || (!members.contains(.direct) && !members.contains(.reject)))
+    }
+
+    @MainActor
+    func validatedGroup(profiles: [ProxyProfile], otherGroups: [ProxyGroup]) async throws -> ProxyGroup? {
+        guard let group = await resolvedGroup() else { return nil }
+        if group.isEnabled {
+            _ = try await Task.detached(priority: .userInitiated) {
+                try XrayConfigBuilder().build(
+                    profiles: profiles, groups: otherGroups + [group], selectedTarget: .group(group.id),
+                    routingMode: .global, rules: [],
+                )
+            }.value
+        }
+        return group
     }
 
     /// DNS resolution may block for seconds, so it must never run from a

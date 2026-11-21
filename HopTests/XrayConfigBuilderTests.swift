@@ -4,6 +4,87 @@ import XCTest
 final class XrayConfigBuilderTests: XCTestCase {
     private let builder = XrayConfigBuilder()
 
+    func testSelectedProfileFollowsOnlyTransitiveDialerDependencies() async throws {
+        var first = basicVLESS()
+        var second = basicVLESS()
+        let third = basicVLESS()
+        var unused = basicVLESS()
+        unused.security = .tls(TLSOptions(allowInsecure: true))
+        func tag(_ profile: ProxyProfile) -> String {
+            "proxy-\(profile.id.uuidString.lowercased())"
+        }
+        first.transport.socketOptions = .object(["dialerProxy": .string(tag(second))])
+        second.xrayAdvanced = XrayAdvancedDocument(["proxySettings": .object(["tag": .string(tag(third)), "transportLayer": .bool(true)])])
+        let inventory = [unused, third, first, second]
+        let json = try builder.build(profiles: inventory, groups: [], selectedTarget: .profile(first.id), routingMode: .global, rules: [])
+        let tags = try XCTUnwrap(parse(json)["outbounds"] as? [[String: Any]]).compactMap { $0["tag"] as? String }
+        XCTAssertEqual(tags.filter { $0.hasPrefix("proxy-") }, [tag(third), tag(first), tag(second)])
+        try await XrayCoreClient.validate(configJSON: json)
+        let draft = ProfileEditorDraft(profile: first)
+        XCTAssertNotNil(draft.validation(availableProfiles: inventory).profile)
+        XCTAssertNil(draft.validation(availableProfiles: [third, first]).profile)
+
+        var chain = (0 ..< IOSRuntimeLimits.default.maxReachableOutbounds).map { _ in basicVLESS() }
+        for index in 0 ..< chain.count - 1 {
+            let next = tag(chain[index + 1])
+            chain[index].transport.socketOptions = .object(["dialerProxy": .string(next)])
+        }
+        XCTAssertThrowsError(try builder.build(profiles: chain, groups: [], selectedTarget: .profile(chain[0].id), routingMode: .global, rules: [])) {
+            XCTAssertTrue($0.localizedDescription.contains("outbounds"))
+        }
+    }
+
+    func testXHTTPFixedConnectionLimitRejectsIncompatibleXMuxConcurrency() async throws {
+        var profile = basicVLESS()
+        profile.transport = TransportOptions(type: .xhttp, xhttpExtra: .object(["xmux": .object(["maxConcurrency": .number(1)])]))
+        assertRejected(profile, contains: "fixed connection limit")
+        profile.transport.xhttpExtra = .object(["xmux": .object(["maxConcurrency": .number(0)])])
+        try await XrayCoreClient.validate(configJSON: builder.build(profile: profile, routingMode: .global, rules: []))
+    }
+
+    func testFakeDNSRequiresUsablePoolAtValidationTime() async throws {
+        var settings = AppSettings.defaults
+        let invalid: [JSONValue] = [
+            .array([]), .object([:]),
+            .object(["ipPool": .string("198.18.0.0/24")]),
+            .object(["poolSize": .number(1)]),
+            .object(["poolSize": .number(0), "ipPool": .string("198.18.0.0/24")]),
+            .object(["poolSize": .number(1), "ipPool": .string("invalid")]),
+            .object(["poolSize": .number(4), "ipPool": .string("198.18.0.0/30")]),
+            .object(["poolSize": .number(2), "ipPool": .string("fd00::/127")]),
+        ]
+        for pool in invalid {
+            settings.xrayAdvanced = XrayAdvancedDocument(["fakeDns": pool])
+            XCTAssertThrowsError(try builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings))
+        }
+        settings.xrayAdvanced = XrayAdvancedDocument(["fakeDns": .array([
+            .object(["poolSize": .number(3), "ipPool": .string("198.18.0.0/30")]),
+            .object(["poolSize": .number(1), "ipPool": .string("fd00::/127")]),
+        ])])
+        try await XrayCoreClient.validate(configJSON: builder.build(profile: basicVLESS(), routingMode: .global, rules: [], settings: settings))
+    }
+
+    func testWireGuardRejectsMalformedFallbackAndExplicitPeerHosts() throws {
+        let key = Data(repeating: 1, count: 32).base64EncodedString()
+        let options = WireGuardOptions(privateKey: key, peerPublicKey: key, localAddress: ["192.0.2.1/32"])
+        var profile = ProxyProfile(name: "WG", endpoint: Endpoint(host: "peer.example", port: 51820), options: .wireGuard(options), security: .none)
+        for host in ["192.0.2.2", "fd00::1", "[::1]", "wg.example.", "xn--bcher-kva.example", "local-peer"] {
+            profile.endpoint.host = host
+            XCTAssertNoThrow(try builder.build(profile: profile, routingMode: .global, rules: []), host)
+        }
+        for host in ["not a host", "server:abc", "[host]", "one..two", "999.1.2.3", "-invalid.example", "1.2.3.4\u{0}extra"] {
+            profile.endpoint.host = host
+            profile.options = .wireGuard(options)
+            assertRejected(profile, contains: "endpoint")
+            let peer = WireGuardPeer(publicKey: key, endpoint: profile.endpoint)
+            profile.endpoint.host = "good.example"
+            var explicit = options
+            explicit.peers = [peer]
+            profile.options = .wireGuard(explicit)
+            assertRejected(profile, contains: "endpoint")
+        }
+    }
+
     func testBuilderDisablesEngineLogOutputsBeforeCoreValidation() throws {
         let json = try builder.build(profile: basicVLESS(), routingMode: .global, rules: [])
         let config = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
@@ -643,6 +724,65 @@ final class XrayConfigBuilderTests: XCTestCase {
                 transport: TransportOptions(type: .hysteria),
             )
             assertRejected(profile, contains: "between 2 and 600")
+        }
+    }
+
+    func testMuxCountsPreserveTypedAdvancedAndOmittedValuesThroughCoreValidation() async throws {
+        var profile = basicVLESS()
+        func renderedMux() async throws -> [String: Any]? {
+            let json = try builder.build(profile: profile, routingMode: .global, rules: [])
+            try await XrayCoreClient.validate(configJSON: json)
+            return try profileOutbound(parse(json))["mux"] as? [String: Any]
+        }
+
+        let noMux = try await renderedMux()
+        XCTAssertNil(noMux)
+        for count in [0, 1, 3, IOSRuntimeLimits.default.maxMuxConcurrency] {
+            profile.transport.mux = XrayMuxOptions(enabled: true, concurrency: count)
+            let typed = try await renderedMux()
+            XCTAssertEqual(typed?["concurrency"] as? Int, count)
+            XCTAssertEqual(typed?["xudpConcurrency"] as? Int, IOSRuntimeLimits.default.maxXUDPConcurrency)
+        }
+
+        profile.transport.mux = nil
+        for count in [nil, 0, 1, 3, IOSRuntimeLimits.default.maxMuxConcurrency] as [Int?] {
+            var mux: [String: JSONValue] = ["enabled": .bool(true)]
+            if let count {
+                mux["concurrency"] = .number(Double(count))
+            }
+            profile.xrayAdvanced = XrayAdvancedDocument(["mux": .object(mux)])
+            let advanced = try await renderedMux()
+            XCTAssertEqual(advanced?["enabled"] as? Bool, true)
+            XCTAssertEqual(advanced?["concurrency"] as? Int, count)
+            XCTAssertNil(advanced?["xudpConcurrency"])
+        }
+    }
+
+    func testLinkedCoreEnforcesMuxBudgetWithoutSwiftBuilder() async throws {
+        func config(concurrency: Int) -> String {
+            #"{"outbounds":[{"protocol":"freedom","tag":"direct","mux":{"enabled":true,"concurrency":\#(concurrency)}}]}"#
+        }
+
+        try await XrayCoreClient.validate(configJSON: config(concurrency: 8))
+        do {
+            try await XrayCoreClient.validate(configJSON: config(concurrency: 9))
+            XCTFail("Linked Xray core accepted Mux concurrency above 8")
+        } catch let XrayCoreClientError.validationFailed(code) {
+            XCTAssertEqual(code, "invalid_config")
+        }
+    }
+
+    func testMuxRejectsCountsAboveIOSBudgetAndPreservesNegativeCountPolicy() {
+        let excess = IOSRuntimeLimits.default.maxMuxConcurrency + 1
+        var profile = basicVLESS()
+        profile.transport.mux = XrayMuxOptions(enabled: true, concurrency: excess)
+        assertRejected(profile, contains: "exceeds")
+        profile.transport.mux = XrayMuxOptions(enabled: true, concurrency: -1)
+        assertRejected(profile, contains: "negative")
+        profile.transport.mux = nil
+        for (count, reason) in [(excess, "exceeds"), (-1, "negative")] {
+            profile.xrayAdvanced = XrayAdvancedDocument(["mux": .object(["enabled": .bool(true), "concurrency": .number(Double(count))])])
+            assertRejected(profile, contains: reason)
         }
     }
 

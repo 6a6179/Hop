@@ -18,13 +18,19 @@ struct RuleConfiguration: Identifiable, Hashable, Codable {
     mutating func saveRule(_ rule: RoutingRule) -> Bool {
         if rule.kind == .final {
             guard !rules.contains(where: { $0.kind == .final && $0.id != rule.id }) else { return false }
+            if let index = rules.firstIndex(where: { $0.id == rule.id && $0.kind == .final }) {
+                rules[index] = rule
+                return true
+            }
             rules.removeAll { $0.id == rule.id }
             rules.append(rule)
         } else {
-            let previous = rules.firstIndex { $0.id == rule.id } ?? rules.endIndex
-            rules.removeAll { $0.id == rule.id }
-            let final = rules.firstIndex { $0.kind == .final } ?? rules.endIndex
-            rules.insert(rule, at: min(previous, final))
+            if let index = rules.firstIndex(where: { $0.id == rule.id }) {
+                rules[index] = rule
+            } else {
+                let final = rules.firstIndex { $0.kind == .final } ?? rules.endIndex
+                rules.insert(rule, at: final)
+            }
         }
         return true
     }

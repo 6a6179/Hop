@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct XrayMigrationReport: Codable, Equatable {
@@ -66,6 +67,7 @@ struct HopAppData: Codable {
     var selectedTarget: OutboundTarget?
     var settings: AppSettings
     var logs: [String]
+    var extensionLogCursor: ExtensionLogCursor?
     var ruleConfigurations: [RuleConfiguration]?
     var activeRuleConfigurationID: UUID?
     /// Legacy single rule list from before named configurations. Read on load to
@@ -85,6 +87,7 @@ struct HopAppData: Codable {
         selectedTarget: OutboundTarget?,
         settings: AppSettings,
         logs: [String],
+        extensionLogCursor: ExtensionLogCursor? = nil,
         ruleConfigurations: [RuleConfiguration]? = nil,
         activeRuleConfigurationID: UUID? = nil,
         rules: [RoutingRule]? = nil,
@@ -102,6 +105,7 @@ struct HopAppData: Codable {
         self.selectedTarget = selectedTarget
         self.settings = settings
         self.logs = logs
+        self.extensionLogCursor = extensionLogCursor
         self.ruleConfigurations = ruleConfigurations
         self.activeRuleConfigurationID = activeRuleConfigurationID
         self.rules = rules
@@ -115,21 +119,45 @@ struct AppStateEnvelope: Codable {
     var signature: String
 }
 
+enum LibraryRecoveryError: LocalizedError {
+    case conflictingLibraries
+    case newerSchema
+
+    var errorDescription: String? {
+        switch self {
+        case .conflictingLibraries:
+            "Hop found conflicting saved libraries from previous installations. Restore a backup containing the library you want to use, then retry. Resetting erases the saved credentials."
+        case .newerSchema:
+            "This library was saved by a newer version of Hop. Install that version or a later one to open it."
+        }
+    }
+}
+
 struct HopAppDataStore {
+    // Includes the base64 envelope. Leave headroom above the retained
+    // subscription budget for manual profiles, named rules, logs and metadata.
+    static let maximumStateFileBytes = 64 * 1024 * 1024
+    private static let maximumLegacyMACBytes = 128
     var url: URL
     var secretStore: SecretStore
     var authenticationStore: SecretStore
     var sharedLogStore: SharedTunnelLogStore
     /// Shared across value copies of this store; see `SecretWriteCache`.
     private let secretWriteCache = SecretWriteCache()
+    private let legacyURLs: [URL]
+    private let maximumFileBytes: Int
 
     init(
-        url: URL = RuntimeEnvironment.stateFileURL,
+        url: URL? = nil,
         secretStore: SecretStore = .shared,
         authenticationStore: SecretStore = .runtime,
         sharedLogStore: SharedTunnelLogStore = SharedTunnelLogStore(),
+        legacyURLs: [URL]? = nil,
+        maximumFileBytes: Int = Self.maximumStateFileBytes,
     ) {
-        self.url = url
+        self.url = url ?? RuntimeEnvironment.stateFileURL
+        self.legacyURLs = legacyURLs ?? (url == nil ? RuntimeEnvironment.legacyStateFileURLs : [])
+        self.maximumFileBytes = maximumFileBytes
         self.secretStore = secretStore
         self.authenticationStore = authenticationStore
         self.sharedLogStore = sharedLogStore
@@ -142,7 +170,41 @@ struct HopAppDataStore {
     /// Only an absent state file represents a new library. All other read,
     /// authentication, and migration failures must preserve the existing library.
     func loadExisting() throws -> HopAppData? {
-        guard let data = try Self.readIfPresent(url) else { return nil }
+        guard let data = try readState(at: url) else {
+            return try adoptLegacyLibraryIfPresent()
+        }
+        let stored = try readAuthenticatedState(data)
+        var decoded = stored.state
+        let storedSecrets = stored.secrets
+        let didMigrateToXray = migrateToXrayIfNeeded(&decoded)
+        // Must run while the state is still pre-v3: legacy groups had no
+        // subscriptionID field and legacy rules had no provenance.
+        let didMigrateSubscriptionProvenance = migrateSubscriptionProvenanceIfNeeded(&decoded)
+        let didMigrateAdvancedTLS = migrateAdvancedTLSIfNeeded(&decoded)
+        let didMigrateLegacyLogState = migrateLegacyLogStateIfNeeded(&decoded)
+        let didRemoveVMessCredential = removeLegacyVMessCipherCredentials(&decoded)
+
+        // Legacy/plaintext state (written before Keychain migration for
+        // profiles, or before subscription URLs were treated as bearer
+        // secrets) still carries inline values — detect that so we can migrate
+        // it in place.
+        let hadInlineProfileSecrets = decoded.profiles.contains { !$0.keychainSecretItems.isEmpty }
+        let hadInlineSubscriptionURLs = decoded.subscriptions.contains { !$0.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        if !decoded.profiles.isEmpty || !decoded.subscriptions.isEmpty {
+            // One Keychain snapshot replaces a separate SecItem lookup for
+            // every protocol, REALITY, WireGuard-peer, advanced-JSON, and
+            // subscription-URL field. App-state loading already hydrates all
+            // of these values into memory; only the round-trip count changes.
+            decoded.profiles = decoded.profiles.map { $0.hydratingSecrets(from: storedSecrets) }
+            decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: storedSecrets) }
+        }
+        if stored.legacy || hadInlineProfileSecrets || hadInlineSubscriptionURLs || didMigrateToXray || didMigrateSubscriptionProvenance || didMigrateAdvancedTLS || didMigrateLegacyLogState || didRemoveVMessCredential {
+            guard save(decoded) else { throw CocoaError(.fileWriteUnknown) }
+        }
+        return decoded
+    }
+
+    private func readAuthenticatedState(_ data: Data) throws -> (state: HopAppData, secrets: [String: String], legacy: Bool) {
         let envelope = try? JSONDecoder().decode(AppStateEnvelope.self, from: data)
         let payload: Data
         let key = try authenticationStore.readValue(forKey: SecretStore.appStateAuthenticationKey)
@@ -152,11 +214,11 @@ struct HopAppDataStore {
             }
             payload = envelope.payload
         } else {
-            let sidecar = try Self.readIfPresent(signatureURL)
+            let sidecar = try readLegacySignature()
             if let sidecar {
                 // Resume only a verified pending-key bootstrap.
-                let secret = try key ?? prepareAuthenticationSecret()
-                guard let signature = String(data: sidecar, encoding: .utf8),
+                let secret = try key ?? authenticationStore.readValue(forKey: Self.pendingAuthenticationKey)
+                guard let secret, let signature = String(data: sidecar, encoding: .utf8),
                       TunnelConfigAuthenticator.isValidSignature(signature, for: data, secret: secret)
                 else { throw CocoaError(.fileReadNoPermission) }
             } else if key != nil {
@@ -165,7 +227,7 @@ struct HopAppDataStore {
             payload = data
         }
 
-        var decoded = try JSONDecoder.hop.decode(HopAppData.self, from: payload)
+        let decoded = try JSONDecoder.hop.decode(SupportedState.self, from: payload).data
         guard envelope == nil || (decoded.secretGeneration != nil && decoded.secretKeys != nil) else {
             throw CocoaError(.fileReadCorruptFile)
         }
@@ -185,33 +247,80 @@ struct HopAppDataStore {
             }
         } else if !decoded.profiles.isEmpty || !decoded.subscriptions.isEmpty {
             storedSecrets = try secretStore.allValues()
+            guard !decoded.subscriptions.contains(where: {
+                $0.url.isEmpty && storedSecrets[HopSecret.subscriptionURLKey(subscriptionID: $0.id)]?.isEmpty != false
+            }), !decoded.profiles.contains(where: { $0.hasMissingLegacyAdvancedSecret(in: storedSecrets) })
+            else { throw CocoaError(.fileReadNoPermission) }
         }
 
-        let didMigrateToXray = migrateToXrayIfNeeded(&decoded)
-        // Must run while the state is still pre-v3: legacy groups had no
-        // subscriptionID field and legacy rules had no provenance.
-        let didMigrateSubscriptionProvenance = migrateSubscriptionProvenanceIfNeeded(&decoded)
-        let didMigrateAdvancedTLS = migrateAdvancedTLSIfNeeded(&decoded)
-        let didMigrateLegacyLogState = migrateLegacyLogStateIfNeeded(&decoded)
+        return (decoded, storedSecrets, envelope == nil)
+    }
 
-        // Legacy/plaintext state (written before Keychain migration for
-        // profiles, or before subscription URLs were treated as bearer
-        // secrets) still carries inline values — detect that so we can migrate
-        // it in place.
-        let hadInlineProfileSecrets = decoded.profiles.contains { !$0.keychainSecretItems.isEmpty }
-        let hadInlineSubscriptionURLs = decoded.subscriptions.contains { !$0.url.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-        if !decoded.profiles.isEmpty || !decoded.subscriptions.isEmpty {
-            // One Keychain snapshot replaces a separate SecItem lookup for
-            // every protocol, REALITY, WireGuard-peer, advanced-JSON, and
-            // subscription-URL field. App-state loading already hydrates all
-            // of these values into memory; only the round-trip count changes.
-            decoded.profiles = decoded.profiles.map { $0.hydratingSecrets(from: storedSecrets) }
-            decoded.subscriptions = decoded.subscriptions.map { $0.hydratingSecrets(from: storedSecrets) }
+    private struct SupportedState: Decodable {
+        enum CodingKeys: CodingKey { case schemaVersion }
+        let data: HopAppData
+
+        init(from decoder: Decoder) throws {
+            let keys = try decoder.container(keyedBy: CodingKeys.self)
+            guard try keys.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0 <= HopAppData.currentSchemaVersion else {
+                throw LibraryRecoveryError.newerSchema
+            }
+            data = try HopAppData(from: decoder)
         }
-        if envelope == nil || hadInlineProfileSecrets || hadInlineSubscriptionURLs || didMigrateToXray || didMigrateSubscriptionProvenance || didMigrateAdvancedTLS || didMigrateLegacyLogState {
-            guard save(decoded) else { throw CocoaError(.fileWriteUnknown) }
+    }
+
+    private func adoptLegacyLibraryIfPresent() throws -> HopAppData? {
+        let candidates = Set(legacyURLs).subtracting([url]).filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !candidates.isEmpty else {
+            try prepareEmptyLibrary()
+            return nil
         }
-        return decoded
+        let oldStores = candidates.map {
+            HopAppDataStore(url: $0, secretStore: secretStore, authenticationStore: authenticationStore, sharedLogStore: sharedLogStore, maximumFileBytes: maximumFileBytes)
+        }
+        let previous = try oldStores.count == 1 ? oldStores[0] : recoverableLegacyStore(in: oldStores)
+        guard let library = try previous.loadExisting() else { throw CocoaError(.fileReadNoPermission) }
+        guard write(library, reason: .adoptLegacyLibrary) else { throw CocoaError(.fileWriteUnknown) }
+        try? FileManager.default.removeItem(at: previous.url)
+        return try loadExisting()
+    }
+
+    /// An earlier writer may already have pruned the generation at one of
+    /// the historical paths. Only adopt the sole readable snapshot when
+    /// every existing Keychain account is accounted for by that snapshot.
+    private func recoverableLegacyStore(in candidates: [Self]) throws -> Self {
+        var recoverable: [(store: Self, state: HopAppData, digest: SHA256.Digest)] = []
+        for candidate in candidates {
+            guard let bytes = try readState(at: candidate.url) else { continue }
+            do {
+                let result = try candidate.readAuthenticatedState(bytes)
+                recoverable.append((candidate, result.state, SHA256.hash(data: bytes)))
+            } catch is DecodingError {
+                continue
+            } catch let error as CocoaError where error.code == .fileReadNoPermission || error.code == .fileReadCorruptFile {
+                continue
+            }
+        }
+        guard let choice = recoverable.first, recoverable.allSatisfy({ $0.digest == choice.digest }),
+              let generation = choice.state.secretGeneration, let keys = choice.state.secretKeys
+        else { throw LibraryRecoveryError.conflictingLibraries }
+        let accounts = Set(keys + keys.map { Self.snapshotKey($0, generation: generation) } + [KeychainSecretBackend.accessGroupProbeAccount])
+        guard try secretStore.allValues().keys.allSatisfy(accounts.contains) else { throw LibraryRecoveryError.conflictingLibraries }
+        return choice.store
+    }
+
+    private func removeLegacyVMessCipherCredentials(_ data: inout HopAppData) -> Bool {
+        var changed = false
+        for index in data.profiles.indices {
+            guard case var .vmess(options) = data.profiles[index].options,
+                  let delimiter = options.security.firstIndex(of: "="),
+                  options.security[..<delimiter].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "password"
+            else { continue }
+            options.security = "auto"
+            data.profiles[index].options = .vmess(options)
+            changed = true
+        }
+        return changed
     }
 
     /// Performs the destructive engine-compatibility migration exactly once.
@@ -713,6 +822,7 @@ struct HopAppDataStore {
         }
 
         data.logs.removeAll()
+        data.extensionLogCursor = nil
         data.schemaVersion = HopAppData.currentSchemaVersion
         do {
             try sharedLogStore.clear()
@@ -726,7 +836,7 @@ struct HopAppDataStore {
 
     @discardableResult
     func save(_ data: HopAppData) -> Bool {
-        write(data, replacingUnreadableLibrary: false)
+        write(data, reason: .save)
     }
 
     /// Invoked only after the user explicitly confirms replacement. Commit the
@@ -739,29 +849,41 @@ struct HopAppDataStore {
             ruleConfigurations: RuleConfiguration.builtInConfigurations,
             activeRuleConfigurationID: RuleConfiguration.defaultConfiguration.id,
             legacyExtensionLogPurgePending: legacyExtensionLogPurgePending ? true : nil,
-        ), replacingUnreadableLibrary: true)
+        ), reason: .reset)
     }
 
-    private func write(_ data: HopAppData, replacingUnreadableLibrary: Bool) -> Bool {
+    private enum WriteReason { case save, adoptLegacyLibrary, reset }
+
+    private func write(_ data: HopAppData, reason: WriteReason) -> Bool {
         do {
+            let isFirstCommit = !FileManager.default.fileExists(atPath: url.path)
+            if reason == .save, isFirstCommit {
+                try prepareEmptyLibrary()
+            }
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let secretItems = Dictionary(data.profiles.flatMap(\.keychainSecretItems) + data.subscriptions.compactMap(\.keychainURLItem), uniquingKeysWith: { _, last in last })
             let snapshot = secretWriteCache.prepare(secretItems)
             var redacted = data
             redacted.profiles = data.profiles.map { $0.redactingSecrets() }
+            _ = removeLegacyVMessCipherCredentials(&redacted)
             redacted.subscriptions = data.subscriptions.map { $0.redactingSecrets() }
             redacted.secretGeneration = snapshot.generation
             redacted.secretKeys = secretItems.keys.sorted()
             let encoded = try JSONEncoder.hop.encode(redacted)
-            let secret = try prepareAuthenticationSecret(replacingUnreadableLibrary: replacingUnreadableLibrary)
+            guard encoded.count <= maximumFileBytes else { throw CocoaError(.fileWriteOutOfSpace) }
+            let secret = try prepareAuthenticationSecret(replacingUnreadableLibrary: reason == .reset)
             guard let signature = TunnelConfigAuthenticator.signature(for: encoded, secret: secret) else {
                 throw CocoaError(.fileWriteUnknown)
             }
             let envelope = try JSONEncoder().encode(AppStateEnvelope(payload: encoded, signature: signature))
+            guard envelope.count <= maximumFileBytes else { throw CocoaError(.fileWriteOutOfSpace) }
             let generationKeys = Set(secretItems.keys.map { Self.snapshotKey($0, generation: snapshot.generation) })
             if snapshot.needsWrite {
                 // Never overwrite the old generation: a failed write or process
                 // termination must leave the previous state AND its secrets usable.
+                if reason == .save, isFirstCommit, !secretItems.isEmpty {
+                    try Data(snapshot.generation.uuidString.utf8).write(to: initialCommitURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                }
                 for (key, value) in secretItems {
                     guard secretStore.setValue(value, forKey: Self.snapshotKey(key, generation: snapshot.generation)) else {
                         throw CocoaError(.fileWriteUnknown)
@@ -769,6 +891,9 @@ struct HopAppDataStore {
                 }
             }
             try envelope.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            if isFirstCommit {
+                try? FileManager.default.removeItem(at: initialCommitURL)
+            }
             // Mirror stable compatibility aliases only after the authenticated
             // state points at its complete immutable snapshot. Tunnel starts
             // use separate nonce-scoped runtime snapshots.
@@ -794,6 +919,18 @@ struct HopAppDataStore {
         TunnelConfigAuthenticator.signatureURL(forConfigURL: url)
     }
 
+    private var initialCommitURL: URL {
+        url.appendingPathExtension("initial-generation")
+    }
+
+    /// Interrupted first saves can leave staged accounts without an envelope.
+    /// Only clean the generation journaled here, never another installation's.
+    private func prepareEmptyLibrary() throws {
+        let marker = try TunnelConfigAuthenticator.readRegularFileIfPresent(at: initialCommitURL, limit: 36)
+        let generation = marker.flatMap { UUID(uuidString: String(decoding: $0, as: UTF8.self)) }
+        try secretStore.prepareEmptyLibrary(retryingGenerationPrefix: generation.map { Self.snapshotKey("", generation: $0) })
+    }
+
     private static let pendingAuthenticationKey = "pending-app-state-authentication-key"
 
     /// Bootstrap unsigned legacy state without stranding it between creating the
@@ -807,14 +944,14 @@ struct HopAppDataStore {
         if replacingUnreadableLibrary {
             return try storeAuthenticationSecret(SecretStore.randomSecret())
         }
-        let previous = try Self.readIfPresent(url)
+        let previous = try readState(at: url)
         let pending = try authenticationStore.readValue(forKey: Self.pendingAuthenticationKey)
         let secret = pending ?? SecretStore.randomSecret()
         if let previous {
             guard (try? JSONDecoder.hop.decode(HopAppData.self, from: previous)) != nil else {
                 throw CocoaError(.fileReadNoPermission)
             }
-            if let sidecar = try Self.readIfPresent(signatureURL) {
+            if let sidecar = try readLegacySignature() {
                 let signature = String(decoding: sidecar, as: UTF8.self)
                 guard pending != nil, TunnelConfigAuthenticator.isValidSignature(signature, for: previous, secret: secret) else {
                     throw CocoaError(.fileReadNoPermission)
@@ -841,12 +978,12 @@ struct HopAppDataStore {
         return secret
     }
 
-    private static func readIfPresent(_ url: URL) throws -> Data? {
-        do {
-            return try Data(contentsOf: url)
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
-            return nil
-        }
+    private func readState(at location: URL) throws -> Data? {
+        try TunnelConfigAuthenticator.readRegularFileIfPresent(at: location, limit: maximumFileBytes)
+    }
+
+    private func readLegacySignature() throws -> Data? {
+        try TunnelConfigAuthenticator.readRegularFileIfPresent(at: signatureURL, limit: Self.maximumLegacyMACBytes)
     }
 }
 
@@ -857,18 +994,19 @@ struct HopAppDataStore {
 /// save that runs before that queue is in play.
 private final class SecretWriteCache: @unchecked Sendable {
     private let lock = NSLock()
-    private var lastWritten: [String: String]?
+    private var lastWritten: [String: Data]?
     private var generation = UUID()
 
     /// Records `items` as the latest intended Keychain state and reports
     /// whether they differ from the previous write (always true for the first).
     func prepare(_ items: [String: String]) -> (generation: UUID, needsWrite: Bool) {
+        let bytes = items.mapValues { Data($0.utf8) }
         lock.lock()
         defer { lock.unlock() }
-        if lastWritten == items {
+        if lastWritten == bytes {
             return (generation, false)
         }
-        lastWritten = items
+        lastWritten = bytes
         generation = UUID()
         return (generation, true)
     }

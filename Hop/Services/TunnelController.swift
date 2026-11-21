@@ -41,17 +41,28 @@ final class TunnelController {
     private var statusObserver: NSObjectProtocol?
     private var statusObservationID = UUID()
     private var statusRefreshID = UUID()
-    private var importedExtensionLogLines: Set<String> = []
+    @ObservationIgnored private(set) var extensionLogCursor: ExtensionLogCursor?
+    @ObservationIgnored private var extensionLogReadID = UUID()
     private var lastObservedStatus: NEVPNStatus?
     private var startInProgress = false
     private var loggedStartupStop = false
     init(
         logs: [String] = [],
+        extensionLogCursor: ExtensionLogCursor? = nil,
         maximumLogEntries: Int = LogRetention.fiveHundred.rawValue,
         sharedLogStore: SharedTunnelLogStore = SharedTunnelLogStore(),
         requiresLegacyExtensionLogPurge: Bool = false,
     ) {
         self.logs = logs
+        // Older app state saved the displayed entries without a file position.
+        // Recover its newest imported line for the first incremental read.
+        self.extensionLogCursor = extensionLogCursor ?? logs.lazy.compactMap { entry -> ExtensionLogCursor? in
+            guard let timestampEnd = entry.firstIndex(of: "]") else { return nil }
+            let message = entry[entry.index(after: timestampEnd)...]
+            let prefix = " Extension "
+            guard message.hasPrefix(prefix) else { return nil }
+            return ExtensionLogCursor(file: nil, offset: 0, lastLine: String(message.dropFirst(prefix.count)))
+        }.first
         self.maximumLogEntries = maximumLogEntries
         self.sharedLogStore = sharedLogStore
         self.requiresLegacyExtensionLogPurge = requiresLegacyExtensionLogPurge
@@ -106,7 +117,7 @@ final class TunnelController {
             }
         }
         diagnosticsTask?.cancel()
-        importedExtensionLogLines.removeAll()
+        extensionLogReadID = UUID()
         lastObservedStatus = nil
         loggedStartupStop = false
         startInProgress = true
@@ -143,6 +154,7 @@ final class TunnelController {
 
         do {
             try sharedLogStore.clear()
+            extensionLogCursor = nil
             completeLegacyExtensionLogPurgeIfNeeded()
             appendLog("Cleared extension log at \(RuntimeEnvironment.tunnelLogFileURL.path)")
         } catch {
@@ -302,8 +314,13 @@ final class TunnelController {
         }
     }
 
-    func disconnect() async {
-        statusRefreshID = UUID()
+    func disconnect(
+        loadManagers: @MainActor () async throws -> [NETunnelProviderManager] = {
+            try await NETunnelProviderManager.loadAllFromPreferences()
+        },
+    ) async {
+        let actionID = UUID()
+        statusRefreshID = actionID
         guard state.isConnected || state == .connecting else {
             state = .disconnected
             // A failed session can leave the on-demand rule armed (the start
@@ -317,13 +334,20 @@ final class TunnelController {
         startInProgress = false
         diagnosticsTask?.cancel()
         do {
-            let manager = try await loadManager()
+            let manager = try await loadManager(loadManagers: loadManagers)
             // With on-demand rules active, iOS would immediately relaunch the
             // tunnel after stopVPNTunnel; disable them before stopping so a
             // manual disconnect sticks until the next connect re-arms them.
             if manager.isOnDemandEnabled {
                 manager.isOnDemandEnabled = false
-                try await save(manager)
+                do {
+                    try await save(manager)
+                } catch {
+                    // A retry must still save the disabled flag if the system
+                    // refused the first save and the reload also fails.
+                    manager.isOnDemandEnabled = true
+                    throw error
+                }
                 appendLog("On-demand connect disabled until the next manual connect")
             }
             observeStatus(for: manager.connection)
@@ -332,7 +356,14 @@ final class TunnelController {
             updateState(from: manager.connection.status, source: "disconnect")
             appendLog("Tunnel disconnect requested")
         } catch {
-            state = .failed
+            let saved = try? await loadManagers()
+            guard statusRefreshID == actionID else { return }
+            if let saved {
+                manager = Self.existingManager(in: saved)
+                installedConnection = InstalledTunnelConnection(manager: manager)
+            }
+            observeStatus(for: manager?.connection)
+            updateState(from: manager?.connection.status ?? .disconnected, source: "disconnect failure")
             appendLog("Tunnel disconnect failed: \(error.diagnosticDescription)")
             if let diagnosticHint = error.networkExtensionDiagnosticHint {
                 appendLog("Diagnostic: \(diagnosticHint)")
@@ -398,10 +429,17 @@ final class TunnelController {
     }
 
     func clearLogs() {
+        extensionLogReadID = UUID()
+        extensionLogCursor = nil
         logs.removeAll()
-        importedExtensionLogLines.removeAll()
-        if (try? sharedLogStore.clear()) != nil {
+        do {
+            try sharedLogStore.clear()
             completeLegacyExtensionLogPurgeIfNeeded()
+        } catch {
+            // Keep the import gate closed across relaunch until deletion works.
+            requiresLegacyExtensionLogPurge = true
+            appendLog("Unable to clear the shared extension log; Hop will retry.")
+            return
         }
         onLogsChanged?()
     }
@@ -413,7 +451,8 @@ final class TunnelController {
             return
         }
         try sharedLogStore.clear()
-        importedExtensionLogLines.removeAll()
+        extensionLogReadID = UUID()
+        extensionLogCursor = nil
         completeLegacyExtensionLogPurgeIfNeeded()
     }
 
@@ -428,47 +467,35 @@ final class TunnelController {
     /// Reads the shared tunnel log file off the main actor — the read is up to
     /// 512 KB of file I/O, and it runs on hot paths (status notifications, the
     /// post-start diagnostics, the Logs tab refresh).
-    func syncExtensionLogs() async {
+    func syncExtensionLogs(
+        read: @MainActor (SharedTunnelLogStore, ExtensionLogCursor?) async throws -> ExtensionLogBatch = { store, cursor in
+            try await Task.detached(priority: .utility) { try store.readBatch(after: cursor) }.value
+        },
+    ) async {
         if requiresLegacyExtensionLogPurge {
-            let purgeResult: Result<Void, Error> = await Task.detached(priority: .utility) { [sharedLogStore] in
-                do {
-                    try sharedLogStore.clear()
-                    return .success(())
-                } catch {
-                    return .failure(error)
-                }
-            }.value
-            switch purgeResult {
-            case .success:
-                importedExtensionLogLines.removeAll()
-                completeLegacyExtensionLogPurgeIfNeeded()
-            case let .failure(error):
+            do {
+                try purgeLegacyExtensionLogIfNeeded()
+            } catch {
                 let error = error as NSError
                 appendLog("Unable to clear legacy extension logs [domain=\(error.domain), code=\(error.code)]")
             }
-            // A successful purge intentionally imports nothing from the old
-            // file; a failed purge remains gated and retries on the next sync.
             return
         }
 
-        let result: Result<[String], Error> = await Task.detached(priority: .utility) { [sharedLogStore] in
-            do {
-                return try .success(sharedLogStore.readLines())
-            } catch {
-                return .failure(error)
+        let readID = UUID()
+        extensionLogReadID = readID
+        do {
+            let batch = try await read(sharedLogStore, extensionLogCursor)
+            guard readID == extensionLogReadID else { return }
+            let cursorChanged = extensionLogCursor != batch.cursor
+            extensionLogCursor = batch.cursor
+            if !batch.lines.isEmpty {
+                appendLogs(batch.lines.map { "Extension \($0)" })
+            } else if cursorChanged {
+                onLogsChanged?()
             }
-        }.value
-
-        switch result {
-        case let .success(lines):
-            let newLines = lines.filter { !importedExtensionLogLines.contains($0) }
-            appendLogs(newLines.map { "Extension \($0)" })
-            // Rebuild rather than accumulate: the shared file only appends and
-            // the reader only sees its bounded tail, so a line absent from
-            // `lines` can never be read again — retaining it would grow the
-            // dedup set without bound over a long session.
-            importedExtensionLogLines = Set(lines)
-        case let .failure(error):
+        } catch {
+            guard readID == extensionLogReadID else { return }
             appendLog("Unable to read extension logs: \(error.diagnosticDescription)")
         }
     }

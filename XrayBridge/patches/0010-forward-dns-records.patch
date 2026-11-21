@@ -1,0 +1,647 @@
+diff --git a/app/dns/dns.go b/app/dns/dns.go
+index e452bda..792fb93 100644
+--- a/app/dns/dns.go
++++ b/app/dns/dns.go
+@@ -307,6 +307,10 @@ func (s *DNS) LookupIP(domain string, option dns.IPOption) ([]net.IP, uint32, er
+ }
+ 
+ func (s *DNS) sortClients(domain string) []*Client {
++	return s.sortClientsFor(domain, nil)
++}
++
++func (s *DNS) sortClientsFor(domain string, accepts func(*Client) bool) []*Client {
+ 	clients := make([]*Client, 0, len(s.clients))
+ 	clientUsed := make([]bool, len(s.clients))
+ 	clientNames := make([]string, 0, len(s.clients))
+@@ -322,6 +326,9 @@ func (s *DNS) sortClients(domain string) []*Client {
+ 		for _, match := range matchSlice {
+ 			info := s.matcherInfos[match]
+ 			client := s.clients[info.clientIdx]
++			if accepts != nil && !accepts(client) {
++				continue
++			}
+ 			domainRule := info.domainRule
+ 			domainRules = append(domainRules, fmt.Sprintf("%s(DNS idx:%d)", domainRule, info.clientIdx))
+ 			if clientUsed[info.clientIdx] {
+@@ -341,7 +348,7 @@ func (s *DNS) sortClients(domain string) []*Client {
+ 	if !(s.disableFallback || s.disableFallbackIfMatch && hasMatch) {
+ 		// Default round-robin query
+ 		for idx, client := range s.clients {
+-			if clientUsed[idx] || client.skipFallback {
++			if clientUsed[idx] || client.skipFallback || (accepts != nil && !accepts(client)) {
+ 				continue
+ 			}
+ 			clientUsed[idx] = true
+@@ -357,13 +364,13 @@ func (s *DNS) sortClients(domain string) []*Client {
+ 	logDecision(s.ctx, domain, domainRules, clientNames)
+ 
+ 	if len(clients) == 0 {
+-		if len(s.clients) > 0 {
+-			clients = append(clients, s.clients[0])
+-			clientNames = append(clientNames, s.clients[0].Name())
+-			errors.LogWarning(s.ctx, "domain ", domain, " will use the first DNS: ", clientNames)
+-		} else {
+-			errors.LogError(s.ctx, "no DNS clients available for domain ", domain, " and no default clients configured")
++		for _, client := range s.clients {
++			if accepts == nil || accepts(client) {
++				errors.LogWarning(s.ctx, "domain ", domain, " will use the first eligible DNS: ", client.Name())
++				return []*Client{client}
++			}
+ 		}
++		errors.LogError(s.ctx, "no eligible DNS client for domain ", domain)
+ 	}
+ 
+ 	return clients
+diff --git a/app/dns/hop_wire.go b/app/dns/hop_wire.go
+new file mode 100644
+index 0000000..de8485e
+--- /dev/null
++++ b/app/dns/hop_wire.go
+@@ -0,0 +1,51 @@
++package dns
++
++import (
++	"context"
++	"errors"
++	"strings"
++	"time"
++
++	wire "github.com/miekg/dns"
++	"github.com/xtls/xray-core/common/session"
++)
++
++type wireServer interface {
++	exchangeWire(context.Context, wire.Question, []byte) ([]byte, error)
++}
++
++// ExchangeWire retains the preset's resolver and the inbound tag used for its
++// proxy/direct policy. FakeDNS only synthesizes addresses and is skipped here.
++func (s *DNS) ExchangeWire(ctx context.Context, q wire.Question, packet []byte) ([]byte, error) {
++	var lastErr error
++	clients := s.sortClientsFor(strings.TrimSuffix(q.Name, "."), func(client *Client) bool {
++		_, ok := client.server.(wireServer)
++		return ok
++	})
++	for _, client := range clients {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		timeout := client.timeoutMs
++		if timeout <= 0 {
++			timeout = 4 * time.Second
++		}
++		resolverCtx, cancel := context.WithTimeout(ctx, timeout)
++		resolverCtx = session.ContextWithInbound(resolverCtx, &session.Inbound{Tag: client.tag})
++		resolverCtx = session.ContextWithContent(resolverCtx, &session.Content{Protocol: "https", SkipDNSResolve: true})
++		response, err := client.server.(wireServer).exchangeWire(resolverCtx, q, packet)
++		cancel()
++		if err == nil {
++			return response, nil
++		}
++		lastErr = err
++	}
++	if lastErr == nil {
++		lastErr = errors.New("no configured resolver supports wire queries")
++	}
++	return nil, lastErr
++}
++
++func (s *DoHNameServer) exchangeWire(ctx context.Context, _ wire.Question, packet []byte) ([]byte, error) {
++	return s.dohHTTPSContext(ctx, packet)
++}
+diff --git a/app/dns/hop_wire_local_darwin.go b/app/dns/hop_wire_local_darwin.go
+new file mode 100644
+index 0000000..375f7d2
+--- /dev/null
++++ b/app/dns/hop_wire_local_darwin.go
+@@ -0,0 +1,185 @@
++//go:build darwin && cgo
++
++package dns
++
++/*
++#include <dns_sd.h>
++#include <stdint.h>
++#include <stdlib.h>
++
++extern void hopDarwinDNSReply(uintptr_t, uint32_t, int32_t, char *, uint16_t, uint16_t, uint16_t, void *, uint32_t);
++
++static void hopDNSReply(DNSServiceRef ref, DNSServiceFlags flags, uint32_t iface, DNSServiceErrorType status,
++    const char *name, uint16_t type, uint16_t class, uint16_t len, const void *data, uint32_t ttl, void *token) {
++    hopDarwinDNSReply((uintptr_t)token, flags, status, (char *)name, type, class, len, (void *)data, ttl);
++}
++
++static DNSServiceErrorType hopDNSQuery(DNSServiceRef *ref, const char *name, uint16_t type, uint16_t class, uintptr_t token) {
++    return DNSServiceQueryRecord(ref, kDNSServiceFlagsReturnIntermediates | kDNSServiceFlagsTimeout,
++        kDNSServiceInterfaceIndexAny, name, type, class, hopDNSReply, (void *)token);
++}
++*/
++import "C"
++
++import (
++	"context"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"runtime/cgo"
++	"strings"
++	"time"
++	"unsafe"
++
++	"github.com/miekg/dns"
++	"golang.org/x/sys/unix"
++)
++
++// DNS-SD selects the system's scoped resolver for the question. Keep the
++// operation on one goroutine so cancellation and callbacks cannot race ref teardown.
++func (*LocalNameServer) exchangeWire(ctx context.Context, question dns.Question, packet []byte) ([]byte, error) {
++	result, err := newDarwinWireReply(question, packet)
++	if err != nil {
++		return nil, err
++	}
++	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
++	defer cancel()
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++
++	token := cgo.NewHandle(result)
++	defer token.Delete()
++	name := C.CString(question.Name)
++	defer C.free(unsafe.Pointer(name))
++	var ref C.DNSServiceRef
++	if status := C.hopDNSQuery(&ref, name, C.uint16_t(question.Qtype), C.uint16_t(question.Qclass), C.uintptr_t(token)); status != 0 {
++		return nil, fmt.Errorf("system DNS query failed (%d)", status)
++	}
++	defer C.DNSServiceRefDeallocate(ref)
++
++	fd := C.DNSServiceRefSockFD(ref)
++	if fd < 0 {
++		return nil, errors.New("system DNS query has no socket")
++	}
++	fds := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
++	deadline, _ := ctx.Deadline()
++	for !result.done && result.err == nil {
++		if err := ctx.Err(); err != nil {
++			return nil, err
++		}
++		left := time.Until(deadline)
++		if left <= 0 {
++			return nil, context.DeadlineExceeded
++		}
++		// DNS-SD owns the socket. Only it may read or close it. A short poll
++		// interval bounds cancellation latency even with no daemon response.
++		wait := min(left, 100*time.Millisecond)
++		n, err := unix.Poll(fds, int((wait+time.Millisecond-1)/time.Millisecond))
++		if errors.Is(err, unix.EINTR) {
++			continue
++		}
++		if err != nil {
++			return nil, err
++		}
++		if n == 0 {
++			continue
++		}
++		if fds[0].Revents&unix.POLLIN == 0 {
++			return nil, errors.New("system DNS socket closed")
++		}
++		if status := C.DNSServiceProcessResult(ref); status != 0 {
++			return nil, fmt.Errorf("system DNS response failed (%d)", status)
++		}
++	}
++	if result.err != nil {
++		return nil, result.err
++	}
++	if err := ctx.Err(); err != nil {
++		return nil, err
++	}
++	return result.packet, nil
++}
++
++// DNS-SD returns individual records with uncompressed wire-format RDATA.
++// Build a response containing the original ID and question, then append those
++// records directly. Keep the receipt of a CNAME separate from its final answer.
++type darwinWireReply struct {
++	packet    []byte
++	qtype     uint16
++	sawAnswer bool
++	done      bool
++	err       error
++}
++
++func newDarwinWireReply(q dns.Question, packet []byte) (*darwinWireReply, error) {
++	if len(packet) < 12 || len(packet) > dns.MaxMsgSize || !dns.IsFqdn(q.Name) || strings.IndexByte(q.Name, 0) >= 0 {
++		return nil, errors.New("invalid system DNS question")
++	}
++	msg := dns.Msg{
++		MsgHdr: dns.MsgHdr{
++			Id: binary.BigEndian.Uint16(packet), Response: true,
++			RecursionDesired: packet[2]&1 != 0, RecursionAvailable: true, CheckingDisabled: packet[3]&0x10 != 0,
++		},
++		Question: []dns.Question{q},
++	}
++	wire, err := msg.Pack()
++	if err != nil {
++		return nil, err
++	}
++	return &darwinWireReply{packet: wire, qtype: q.Qtype}, nil
++}
++
++//export hopDarwinDNSReply
++func hopDarwinDNSReply(token C.uintptr_t, flags C.uint32_t, status C.int32_t, owner *C.char, rrtype, class, size C.uint16_t, data unsafe.Pointer, ttl C.uint32_t) {
++	result := cgo.Handle(token).Value().(*darwinWireReply)
++	if result.done || result.err != nil {
++		return
++	}
++	if status != C.kDNSServiceErr_NoError {
++		result.finishStatus(int32(status))
++		return
++	}
++	if flags&C.kDNSServiceFlagsAdd != 0 {
++		result.appendRecord(C.GoString(owner), uint16(rrtype), uint16(class), uint32(ttl), unsafe.Slice((*byte)(data), int(size)))
++	}
++	result.done = result.sawAnswer && flags&C.kDNSServiceFlagsMoreComing == 0
++}
++
++const (
++	darwinNoSuchName   = C.kDNSServiceErr_NoSuchName
++	darwinNoSuchRecord = C.kDNSServiceErr_NoSuchRecord
++)
++
++func (r *darwinWireReply) finishStatus(status int32) {
++	switch status {
++	case darwinNoSuchName:
++		r.packet[3] |= dns.RcodeNameError
++	case darwinNoSuchRecord:
++		// The system reports no record of the requested type (NODATA).
++	default:
++		r.err = fmt.Errorf("system DNS returned status %d", status)
++	}
++	r.done = true
++}
++
++func (r *darwinWireReply) appendRecord(owner string, rrtype, class uint16, ttl uint32, data []byte) {
++	var name [255]byte
++	n, err := dns.PackDomainName(owner, name[:], 0, nil, false)
++	if err != nil {
++		r.err = err
++		return
++	}
++	if n+10+len(data) > dns.MaxMsgSize-len(r.packet) {
++		r.err = errors.New("system DNS answer exceeds maximum packet size")
++		return
++	}
++	r.packet = append(r.packet, name[:n]...)
++	r.packet = binary.BigEndian.AppendUint16(r.packet, rrtype)
++	r.packet = binary.BigEndian.AppendUint16(r.packet, class)
++	r.packet = binary.BigEndian.AppendUint32(r.packet, ttl)
++	r.packet = binary.BigEndian.AppendUint16(r.packet, uint16(len(data)))
++	r.packet = append(r.packet, data...)
++	binary.BigEndian.PutUint16(r.packet[6:8], binary.BigEndian.Uint16(r.packet[6:8])+1)
++	r.sawAnswer = r.sawAnswer || rrtype == r.qtype || r.qtype == dns.TypeANY
++}
+diff --git a/app/dns/hop_wire_local_darwin_test.go b/app/dns/hop_wire_local_darwin_test.go
+new file mode 100644
+index 0000000..e389386
+--- /dev/null
++++ b/app/dns/hop_wire_local_darwin_test.go
+@@ -0,0 +1,79 @@
++//go:build darwin && cgo
++
++package dns
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/miekg/dns"
++)
++
++func TestHopSystemWireRecords(t *testing.T) {
++	query := new(dns.Msg)
++	query.SetQuestion("alias.example.", dns.TypeTXT)
++	query.Id = 0xabcd
++	packet, err := query.Pack()
++	if err != nil {
++		t.Fatal(err)
++	}
++	result, err := newDarwinWireReply(query.Question[0], packet)
++	if err != nil {
++		t.Fatal(err)
++	}
++	result.appendRecord("alias.example.", dns.TypeCNAME, dns.ClassINET, 45, []byte{3, 'd', 's', 't', 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 0})
++	if result.sawAnswer || result.err != nil {
++		t.Fatalf("intermediate CNAME treated as final: %+v", result)
++	}
++	result.appendRecord("dst.example.", dns.TypeTXT, dns.ClassINET, 70, []byte{2, 'o', 'k'})
++	result.appendRecord("dst.example.", dns.TypeTXT, dns.ClassINET, 60, []byte{3, 't', 'w', 'o'})
++	var reply dns.Msg
++	if !result.sawAnswer || result.err != nil {
++		t.Fatal(result.err)
++	}
++	if err := reply.Unpack(result.packet); err != nil {
++		t.Fatal(err)
++	}
++	if !reply.Response || !reply.RecursionDesired || reply.Id != query.Id || len(reply.Question) != 1 ||
++		reply.Question[0] != query.Question[0] || len(reply.Answer) != 3 ||
++		reply.Answer[0].(*dns.CNAME).Target != "dst.example." || reply.Answer[1].(*dns.TXT).Txt[0] != "ok" ||
++		reply.Answer[2].Header().Ttl != 60 {
++		t.Fatalf("unexpected system answer: %v", &reply)
++	}
++}
++
++func TestHopSystemWireNegativeAndInvalidResults(t *testing.T) {
++	q := dns.Question{Name: "host.example.", Qclass: dns.ClassINET, Qtype: dns.TypeHTTPS}
++	for _, tc := range []struct {
++		status int32
++		code   int
++	}{{darwinNoSuchName, dns.RcodeNameError}, {darwinNoSuchRecord, dns.RcodeSuccess}} {
++		result, err := newDarwinWireReply(q, make([]byte, 12))
++		if err != nil {
++			t.Fatal(err)
++		}
++		result.finishStatus(tc.status)
++		var reply dns.Msg
++		if err := reply.Unpack(result.packet); err != nil {
++			t.Fatal(err)
++		}
++		if !result.done || result.err != nil || reply.Rcode != tc.code || len(reply.Answer) != 0 {
++			t.Fatalf("negative response: %v, %v", &reply, result.err)
++		}
++	}
++	result, err := newDarwinWireReply(q, make([]byte, 12))
++	if err != nil {
++		t.Fatal(err)
++	}
++	result.appendRecord(q.Name, q.Qtype, q.Qclass, 60, make([]byte, dns.MaxMsgSize))
++	if result.err == nil || len(result.packet) > dns.MaxMsgSize {
++		t.Fatal("oversized answer accepted")
++	}
++
++	ctx, cancel := context.WithCancel(context.Background())
++	cancel()
++	if _, err := new(LocalNameServer).exchangeWire(ctx, q, make([]byte, 12)); !errors.Is(err, context.Canceled) {
++		t.Fatalf("cancelled lookup: %v", err)
++	}
++}
+diff --git a/app/dns/hop_wire_test.go b/app/dns/hop_wire_test.go
+new file mode 100644
+index 0000000..ec86f2e
+--- /dev/null
++++ b/app/dns/hop_wire_test.go
+@@ -0,0 +1,47 @@
++package dns
++
++import (
++	"bytes"
++	"context"
++	"io"
++	"net/http"
++	"testing"
++
++	wire "github.com/miekg/dns"
++	"github.com/xtls/xray-core/common/session"
++)
++
++type hopDoHTransport func(*http.Request) (*http.Response, error)
++
++func (f hopDoHTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
++
++func TestHopDoHWireUsesConfiguredResolver(t *testing.T) {
++	var query, reply wire.Msg
++	query.SetQuestion("example.", wire.TypeHTTPS)
++	packet, _ := query.Pack()
++	reply.SetReply(&query)
++	rr, err := wire.NewRR("example. 20 IN HTTPS 1 target.example. alpn=h2")
++	if err != nil {
++		t.Fatal(err)
++	}
++	reply.Answer = []wire.RR{rr}
++	want, _ := reply.Pack()
++	doh := &DoHNameServer{dohURL: "https://resolver.test/dns-query", cacheController: &CacheController{name: "test"}}
++	doh.httpClient = &http.Client{Transport: hopDoHTransport(func(r *http.Request) (*http.Response, error) {
++		inbound := session.InboundFromContext(r.Context())
++		content := session.ContentFromContext(r.Context())
++		got, err := io.ReadAll(r.Body)
++		if err != nil || !bytes.Equal(got, packet) || r.URL.String() != doh.dohURL || r.Method != "POST" || inbound == nil || inbound.Tag != "dns-query" || content == nil || !content.SkipDNSResolve {
++			t.Fatal("wrong resolver, route or query", err)
++		}
++		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(want))}, nil
++	})}
++	for _, disableFallback := range []bool{false, true} {
++		resolver := &DNS{ctx: context.Background(), disableFallback: disableFallback,
++			clients: []*Client{{server: &FakeDNSServer{}}, {server: doh, tag: "dns-query"}}}
++		got, err := resolver.ExchangeWire(context.Background(), query.Question[0], packet)
++		if err != nil || !bytes.Equal(got, want) {
++			t.Fatalf("lost HTTPS answer (disableFallback=%t): %v", disableFallback, err)
++		}
++	}
++}
+diff --git a/app/dns/nameserver_doh.go b/app/dns/nameserver_doh.go
+index ed7f184..0cb36c2 100644
+--- a/app/dns/nameserver_doh.go
++++ b/app/dns/nameserver_doh.go
+@@ -244,11 +244,17 @@ func (s *DoHNameServer) dohHTTPSContext(ctx context.Context, b []byte) ([]byte,
+ 
+ 	defer resp.Body.Close()
+ 	if resp.StatusCode != http.StatusOK {
+-		io.Copy(io.Discard, resp.Body) // flush resp.Body so that the conn is reusable
++		// Closing the body cancels the HTTP/2 stream.
+ 		return nil, fmt.Errorf("DOH server returned code %d", resp.StatusCode)
+ 	}
+ 
+-	return io.ReadAll(resp.Body)
++	// A DNS wire message has a 16-bit length. Bound the decoded body
++	// independently of HTTP Content-Length, including compressed responses.
++	data, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
++	if len(data) > 65535 {
++		return nil, errors.New("oversized DoH response")
++	}
++	return data, err
+ }
+ 
+ // QueryIP implements Server.
+diff --git a/proxy/dns/dns.go b/proxy/dns/dns.go
+index 847ae58..1794ca1 100644
+--- a/proxy/dns/dns.go
++++ b/proxy/dns/dns.go
+@@ -252,6 +252,17 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, d internet.
+ 				continue
+ 			}
+ 
++			// Hop's default DNS outbound serves the full resolver. Explicit Xray
++			// rules keep their configured semantics, and A/AAAA retain FakeDNS.
++			if len(h.rules) == 0 && qType != dnsmessage.TypeA && qType != dnsmessage.TypeAAAA {
++				if client, ok := h.client.(wireDNSClient); ok {
++					if err := h.startWireQuery(ctx, client, b, id, qType, domain, writer, srcNetwork == net.Network_UDP, timer); err != nil {
++						return err
++					}
++					continue
++				}
++			}
++
+ 			action, rCode := h.applyRules(qType, domain)
+ 			switch action {
+ 			case RuleAction_Drop:
+diff --git a/proxy/dns/hop_wire.go b/proxy/dns/hop_wire.go
+new file mode 100644
+index 0000000..8723ca1
+--- /dev/null
++++ b/proxy/dns/hop_wire.go
+@@ -0,0 +1,80 @@
++package dns
++
++import (
++	"context"
++	"errors"
++	"strings"
++
++	wire "github.com/miekg/dns"
++	"github.com/xtls/xray-core/common/buf"
++	dnsproto "github.com/xtls/xray-core/common/protocol/dns"
++	"github.com/xtls/xray-core/common/signal"
++	"golang.org/x/net/dns/dnsmessage"
++)
++
++type wireDNSClient interface {
++	ExchangeWire(context.Context, wire.Question, []byte) ([]byte, error)
++}
++
++func (h *Handler) startWireQuery(ctx context.Context, client wireDNSClient, packet *buf.Buffer, id uint16, qtype dnsmessage.Type, domain string, writer dnsproto.MessageWriter, udp bool, timer *signal.ActivityTimer) error {
++	if !tryAcquireDNSLookup() {
++		packet.Release()
++		return h.rejectNonIPQuery(id, qtype, domain, writer, dnsmessage.RCodeServerFailure)
++	}
++	go func() {
++		defer releaseDNSLookup()
++		defer packet.Release()
++		var query wire.Msg
++		if err := query.Unpack(packet.Bytes()); err != nil || query.Response || query.Opcode != wire.OpcodeQuery || len(query.Question) != 1 {
++			if ctx.Err() == nil {
++				_ = h.rejectNonIPQuery(id, qtype, domain, writer, dnsmessage.RCodeFormatError)
++			}
++			return
++		}
++		raw, err := client.ExchangeWire(ctx, query.Question[0], packet.Bytes())
++		if ctx.Err() != nil {
++			return
++		}
++		if err == nil {
++			raw, err = wireReply(&query, raw, udp)
++		}
++		if err != nil {
++			err = h.rejectNonIPQuery(id, qtype, domain, writer, dnsmessage.RCodeServerFailure)
++		} else {
++			err = writer.WriteMessage(buf.FromBytes(raw))
++		}
++		if err != nil {
++			timer.SetTimeout(0)
++		}
++	}()
++	return nil
++}
++
++// Preserve answer, authority, additional records and upstream RCODE on the
++// wire. A short TC reply makes oversized UDP answers retryable over TCP.
++func wireReply(query *wire.Msg, raw []byte, udp bool) ([]byte, error) {
++	var reply wire.Msg
++	if len(raw) > wire.MaxMsgSize || reply.Unpack(raw) != nil || !reply.Response ||
++		reply.Id != query.Id || reply.Opcode != query.Opcode || len(reply.Question) != 1 {
++		return nil, errors.New("invalid DNS reply")
++	}
++	q, r := query.Question[0], reply.Question[0]
++	if q.Qtype != r.Qtype || q.Qclass != r.Qclass || !strings.EqualFold(q.Name, r.Name) {
++		return nil, errors.New("unexpected DNS reply question")
++	}
++	if udp {
++		limit := wire.MinMsgSize
++		if opt := query.IsEdns0(); opt != nil {
++			limit = max(limit, min(1232, int(opt.UDPSize())))
++		}
++		if len(raw) > limit {
++			reply.Truncated = true
++			reply.Answer, reply.Ns, reply.Extra = nil, nil, nil
++			if reply.Rcode > 15 {
++				reply.SetEdns0(uint16(limit), false)
++			}
++			return reply.Pack()
++		}
++	}
++	return raw, nil
++}
+diff --git a/proxy/dns/hop_wire_test.go b/proxy/dns/hop_wire_test.go
+new file mode 100644
+index 0000000..87a6e48
+--- /dev/null
++++ b/proxy/dns/hop_wire_test.go
+@@ -0,0 +1,69 @@
++package dns
++
++import (
++	"bytes"
++	"strings"
++	"testing"
++
++	wire "github.com/miekg/dns"
++)
++
++func TestHopWireReplies(t *testing.T) {
++	for _, rr := range []string{
++		"service.example. 60 IN TXT \"ok\"",
++		"service.example. 60 IN SRV 0 5 443 target.example.",
++		"service.example. 60 IN HTTPS 1 target.example. alpn=h2",
++	} {
++		answer, err := wire.NewRR(rr)
++		if err != nil {
++			t.Fatal(err)
++		}
++		var query, reply wire.Msg
++		query.SetQuestion(answer.Header().Name, answer.Header().Rrtype)
++		reply.SetReply(&query)
++		reply.Answer = []wire.RR{answer}
++		raw, err := reply.Pack()
++		if err != nil {
++			t.Fatal(err)
++		}
++		forwarded, err := wireReply(&query, raw, true)
++		if err != nil || !bytes.Equal(raw, forwarded) {
++			t.Fatalf("reply for %s: %v", rr, err)
++		}
++		reply.Id++
++		badID, _ := reply.Pack()
++		if _, err := wireReply(&query, badID, false); err == nil {
++			t.Fatal("accepted different transaction")
++		}
++	}
++}
++
++func TestHopWireNegativeAndTruncatedReplies(t *testing.T) {
++	var query, reply wire.Msg
++	query.SetQuestion("example.", wire.TypeTXT)
++	reply.SetRcode(&query, wire.RcodeNameError)
++	soa, err := wire.NewRR("example. 30 IN SOA ns.example. host.example. 1 2 3 4 5")
++	if err != nil {
++		t.Fatal(err)
++	}
++	reply.Ns = []wire.RR{soa}
++	negative, _ := reply.Pack()
++	if out, err := wireReply(&query, negative, true); err != nil || !bytes.Equal(negative, out) {
++		t.Fatal("lost negative authority", err)
++	}
++	reply.SetReply(&query)
++	reply.Answer = []wire.RR{&wire.TXT{Hdr: wire.RR_Header{Name: "example.", Rrtype: wire.TypeTXT, Class: wire.ClassINET}, Txt: []string{strings.Repeat("a", 250), strings.Repeat("b", 250), strings.Repeat("c", 250)}}}
++	raw, _ := reply.Pack()
++	out, err := wireReply(&query, raw, true)
++	var truncated wire.Msg
++	if err != nil || truncated.Unpack(out) != nil || !truncated.Truncated || len(truncated.Answer) != 0 || len(out) > 512 {
++		t.Fatal("invalid UDP truncation", err)
++	}
++	if out, err = wireReply(&query, raw, false); err != nil || !bytes.Equal(out, raw) {
++		t.Fatal("lost full TCP response", err)
++	}
++	query.SetEdns0(1232, false)
++	if out, err = wireReply(&query, raw, true); err != nil || !bytes.Equal(out, raw) {
++		t.Fatal("lost full EDNS response", err)
++	}
++}

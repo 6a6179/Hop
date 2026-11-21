@@ -111,6 +111,18 @@ final class LatencyTesterTests: XCTestCase {
         XCTAssertEqual(store.nodeLatencies[profile.id], .failure("Endpoint host is not permitted for latency testing"))
     }
 
+    func testWireGuardProbeUsesFirstEffectivePeerEndpoint() {
+        let fallback = Endpoint(host: "fallback.example", port: 51111)
+        let peer = Endpoint(host: "peer.example", port: 52222)
+        var options = WireGuardOptions(privateKey: "key", peerPublicKey: "peer", localAddress: ["10.0.0.2"],
+                                       peers: [WireGuardPeer(publicKey: "peer", endpoint: peer)])
+        var profile = ProxyProfile(name: "WireGuard", endpoint: fallback, options: .wireGuard(options), security: .none)
+        XCTAssertEqual(profile.probeEndpoint, peer)
+        options.peers?[0].endpoint = nil
+        profile.options = .wireGuard(options)
+        XCTAssertEqual(profile.probeEndpoint, fallback)
+    }
+
     // MARK: - ICMP packet construction
 
     func testICMPv4EchoRequestHasValidChecksum() {

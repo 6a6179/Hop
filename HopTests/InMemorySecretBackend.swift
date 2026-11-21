@@ -70,6 +70,12 @@ final class InMemorySecretBackend: SecretBackend, @unchecked Sendable {
         allKeysCount += 1
         return Array(storage.keys)
     }
+
+    func hasLibraryCredentials() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !storage.isEmpty
+    }
 }
 
 extension SecretStore {

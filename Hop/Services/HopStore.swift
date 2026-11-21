@@ -108,6 +108,7 @@ final class HopStore {
     var pendingExternalImportText: String?
     var persistenceError: String?
     let libraryLoadFailed: Bool
+    let libraryRecoveryMessage: String?
 
     private let dataStore: HopAppDataStore
     private let latencyTester = LatencyTester()
@@ -159,9 +160,11 @@ final class HopStore {
         do {
             loaded = try dataStore.loadExisting()
             libraryLoadFailed = false
+            libraryRecoveryMessage = nil
         } catch {
             loaded = nil
             libraryLoadFailed = true
+            libraryRecoveryMessage = (error as? LibraryRecoveryError)?.errorDescription ?? (error as? LibraryCredentialError)?.errorDescription
         }
         hasPersistableState = loaded != nil
         // A missing or rejected state cannot prove that its shared log is safe,
@@ -195,6 +198,7 @@ final class HopStore {
         self.settings = settings ?? loaded?.settings ?? .defaults
         self.tunnel = tunnel ?? TunnelController(
             logs: loaded?.logs ?? [],
+            extensionLogCursor: loaded?.extensionLogCursor,
             sharedLogStore: dataStore.sharedLogStore,
             requiresLegacyExtensionLogPurge: requiresLegacyExtensionLogPurge,
         )
@@ -370,11 +374,17 @@ final class HopStore {
         guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else {
             return
         }
-        profiles[index] = profile
+        withBatchedPersist {
+            if profiles[index].name != profile.name {
+                bindNamedReferences(toProfiles: [profile.id], groups: [], introducing: profile.name)
+            }
+            profiles[index] = profile
+        }
     }
 
     func deleteProfile(id: ProxyProfile.ID) {
         withBatchedPersist {
+            bindNamedReferences(toProfiles: [id], groups: [], removing: true)
             profiles.removeAll { $0.id == id }
             nodeLatencies[id] = nil
             // Shared repair also drops routing rules that target the profile —
@@ -398,6 +408,9 @@ final class HopStore {
             return
         }
         withBatchedPersist {
+            if groups[index].name != group.name {
+                bindNamedReferences(toProfiles: [], groups: [group.id], introducing: group.name)
+            }
             groups[index] = group
             normalizeSelectedTarget()
         }
@@ -405,6 +418,7 @@ final class HopStore {
 
     func deleteGroup(id: ProxyGroup.ID) {
         withBatchedPersist {
+            bindNamedReferences(toProfiles: [], groups: [id], removing: true)
             groups.removeAll { $0.id == id }
             // Shared repair also drops routing rules that target the group —
             // a dangling rule target fails the next tunnel config build.
@@ -424,6 +438,7 @@ final class HopStore {
         let removedProfileIDs = Set(profiles.lazy.filter { $0.subscriptionID == id }.map(\.id))
         let removedGroupIDs = Set(groups.lazy.filter { $0.subscriptionID == id }.map(\.id))
         withBatchedPersist {
+            bindNamedReferences(toProfiles: removedProfileIDs, groups: removedGroupIDs, removing: true)
             profiles.removeAll { removedProfileIDs.contains($0.id) }
             groups.removeAll { removedGroupIDs.contains($0.id) }
             repairReferences(removingProfiles: removedProfileIDs, groups: removedGroupIDs)
@@ -712,9 +727,9 @@ final class HopStore {
         )
     }
 
-    /// Applies only the security-change categories shown by the manual review.
-    /// The current state is checked again so an intervening profile edit cannot
-    /// introduce a new, unreviewed category before this confirmation lands.
+    /// Applies the snapshot shown in the manual review. Recheck the saved and
+    /// proposed records so edits to an already-reviewed field require a new
+    /// decision, even when its label is unchanged.
     @discardableResult
     func confirmSecuritySubscriptionRefresh(
         _ result: ImportResult,
@@ -912,6 +927,38 @@ final class HopStore {
         )
     }
 
+    /// Resolve references in their original namespace before a manual rename
+    /// or deletion. Built-ins keep their dynamic semantics.
+    private func bindNamedReferences(toProfiles profileIDs: Set<UUID>, groups groupIDs: Set<UUID>, introducing newName: String? = nil, removing: Bool = false) {
+        let targets = SubscriptionRefreshMerger.RoutingTargetIndex(profiles: profiles, groups: groups)
+        let introducedName = newName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        func bound(_ target: OutboundTarget) -> OutboundTarget {
+            guard case let .named(name) = target else { return target }
+            let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !["direct", "reject", "proxy"].contains(normalized) else { return target }
+            switch targets.resolve(target) {
+            case let .profile(id) where profileIDs.contains(id) || normalized == introducedName: return .profile(id)
+            case let .group(id) where groupIDs.contains(id) || normalized == introducedName: return .group(id)
+            default: return target
+            }
+        }
+
+        for index in groups.indices {
+            groups[index].members = groups[index].members.map(bound)
+            groups[index].defaultTarget = groups[index].defaultTarget.map(bound)
+        }
+        for index in ruleConfigurations.indices {
+            for row in ruleConfigurations[index].rules.indices {
+                let target = ruleConfigurations[index].rules[row].target
+                let replacement = bound(target)
+                if target != replacement {
+                    ruleConfigurations[index].rules[row].target = removing ? .reject : replacement
+                }
+            }
+        }
+        selectedTarget = selectedTarget.map(bound)
+    }
+
     private func repairReferences(
         removingProfiles profileIDs: Set<ProxyProfile.ID>,
         groups groupIDs: Set<ProxyGroup.ID>,
@@ -994,7 +1041,8 @@ final class HopStore {
         // private/loopback/link-local address. An imported subscription could
         // otherwise turn the "test latency" action into a LAN scanner. This
         // mirrors the SSRF policy applied to subscription fetches.
-        let host = profile.endpoint.host
+        let endpoint = profile.probeEndpoint
+        let host = endpoint.host
         let resolver = latencyProbeHostResolver
         nodeLatencies[profile.id] = .testing
         let probeHost = await Task.detached(priority: .userInitiated) {
@@ -1006,7 +1054,7 @@ final class HopStore {
         }
         let result = await latencyTester.measure(
             host: probeHost,
-            port: profile.endpoint.port,
+            port: endpoint.port,
             serverName: profile.security.tls?.serverName ?? host,
             usesTLS: profile.security.layer != .none,
             method: settings.latencyTestMethod,
@@ -1038,7 +1086,14 @@ final class HopStore {
     }
 
     func clearLogs() {
+        let wasPending = tunnel.requiresLegacyExtensionLogPurge
         tunnel.clearLogs()
+        // An explicit deletion must enqueue its state and cursor immediately.
+        // Completing a pending purge already saved the same snapshot.
+        logPersistTask?.cancel()
+        if !wasPending || tunnel.requiresLegacyExtensionLogPurge {
+            persistLoadedState()
+        }
     }
 
     func acknowledgeXrayMigration() {
@@ -1091,6 +1146,7 @@ final class HopStore {
             selectedTarget: selectedTarget,
             settings: settings,
             logs: tunnel.logs,
+            extensionLogCursor: tunnel.extensionLogCursor,
             ruleConfigurations: ruleConfigurations,
             activeRuleConfigurationID: activeRuleConfigurationID,
             schemaVersion: HopAppData.currentSchemaVersion,

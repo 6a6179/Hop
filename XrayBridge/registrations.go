@@ -1,8 +1,8 @@
 package libXray
 
-// Keep this list explicit. Importing main/distro/all also registers command,
-// reverse-proxy, metrics-listener, and server-only functionality that Hop does
-// not expose and should not carry in its memory-constrained tunnel extension.
+// Keep direct registrations explicit. The JSON config loader also pulls in
+// commander, metrics and reverse transitively. Hop's configuration builder
+// controls which features the app exposes and the extension starts.
 import (
 	_ "github.com/xtls/xray-core/app/dispatcher"
 	_ "github.com/xtls/xray-core/app/dns"

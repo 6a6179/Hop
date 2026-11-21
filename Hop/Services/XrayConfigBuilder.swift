@@ -55,12 +55,6 @@ struct XrayConfigBuilder {
             rule.target == .selectedProxy ? selectedDestination : try resolver.resolve(rule.target)
         } : []
 
-        let reachableProfiles = profiles.filter { resolver.profileIDs.contains($0.id) }
-        try require(
-            reachableProfiles.count + 3 <= limits.maxReachableOutbounds,
-            path: "/outbounds",
-            "The configuration needs \(reachableProfiles.count + 3) outbounds; iOS permits at most \(limits.maxReachableOutbounds).",
-        )
         try require(
             resolver.urlGroups.values.reduce(0) { $0 + $1.memberTags.count } <= limits.maxObservatoryTargets,
             path: "/observatory/subjectSelector",
@@ -76,7 +70,7 @@ struct XrayConfigBuilder {
 
         try validateURLGroups(Array(resolver.urlGroups.values))
 
-        var outbounds = try reachableProfiles.map { try outboundDictionary(for: $0, tokenizingSecretsWith: nonce) }
+        var outbounds = try reachableProfileOutbounds(resolver: resolver, tokenizingSecretsWith: nonce)
         try validateHeavyOutboundCount(outbounds)
         outbounds.append([
             "tag": .string("direct"),
@@ -244,14 +238,6 @@ private extension XrayConfigBuilder {
         "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
         "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
         "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
-    ]
-
-    static let appleOnlyRuleKinds: Set<RoutingRuleKind> = [
-        .networkType,
-        .networkIsExpensive,
-        .networkIsConstrained,
-        .wifiSSID,
-        .wifiBSSID,
     ]
 
     static let profileAdvancedKeys: Set<String> = [
@@ -427,6 +413,30 @@ private extension XrayConfigBuilder {
         ]
     }
 
+    /// Render each reachable profile once and follow the effective socket chain after
+    /// typed and advanced settings have merged. Keep the user's stable outbound order.
+    func reachableProfileOutbounds(resolver: XrayReachabilityResolver, tokenizingSecretsWith nonce: String?) throws -> [JSONObject] {
+        var queue = resolver.profiles.filter { resolver.profileIDs.contains($0.id) }
+        var discovered = resolver.profileIDs
+        var rendered: [UUID: JSONObject] = [:]
+        var index = 0
+        while index < queue.count {
+            try require(discovered.count + 3 <= limits.maxReachableOutbounds, path: "/outbounds", "The configuration exceeds the iOS limit of \(limits.maxReachableOutbounds) outbounds.")
+            let profile = queue[index]
+            index += 1
+            let outbound = try outboundDictionary(for: profile, tokenizingSecretsWith: nonce)
+            rendered[profile.id] = outbound
+            if let tag = outbound["streamSettings"]?.objectValue?["sockopt"]?.objectValue?["dialerProxy"]?.stringValue,
+               tag.hasPrefix("proxy-"), let id = UUID(uuidString: String(tag.dropFirst("proxy-".count))),
+               let dependency = resolver.profilesByID[id], tag == Self.tag(for: dependency),
+               discovered.insert(id).inserted
+            {
+                queue.append(dependency)
+            }
+        }
+        return resolver.profiles.compactMap { rendered[$0.id] }
+    }
+
     func outboundDictionary(for original: ProxyProfile, tokenizingSecretsWith nonce: String?) throws -> JSONObject {
         try validate(original)
         let runtime = try original.normalizingShadowsocks2022Keys()
@@ -572,12 +582,11 @@ private extension XrayConfigBuilder {
                 }
                 try require((peer.allowedIPs?.count ?? 2) <= 32, path: "\(peerPath)/allowedIPs", "Each WireGuard peer supports at most 32 allowed-IP entries on iOS.")
                 for (position, prefix) in (peer.allowedIPs ?? []).enumerated() {
-                    try require(validWireGuardPrefix(prefix), path: "\(peerPath)/allowedIPs/\(position)", "WireGuard allowed IP must be an IPv4 or IPv6 CIDR prefix.")
+                    try require(Endpoint.hostBits(inCIDR: prefix) != nil, path: "\(peerPath)/allowedIPs/\(position)", "WireGuard allowed IP must be an IPv4 or IPv6 CIDR prefix.")
                 }
-                if let endpoint = peer.endpoint {
-                    try require(!endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, path: "\(peerPath)/endpoint/host", "WireGuard peer endpoint host is required.")
-                    try require((1 ... 65535).contains(endpoint.port), path: "\(peerPath)/endpoint/port", "WireGuard peer endpoint port must be between 1 and 65535.")
-                }
+                let endpoint = peer.endpoint ?? profile.endpoint
+                try require(Endpoint.isValidWireGuardHost(endpoint.host), path: "\(peerPath)/endpoint/host", "WireGuard peer endpoint must be an IP literal or a valid DNS name.")
+                try require((1 ... 65535).contains(endpoint.port), path: "\(peerPath)/endpoint/port", "WireGuard peer endpoint port must be between 1 and 65535.")
                 if let keepAlive = peer.keepAliveSeconds {
                     try require((0 ... 65535).contains(keepAlive), path: "\(peerPath)/keepAliveSeconds", "WireGuard keepalive must be between 0 and 65535 seconds.")
                 }
@@ -954,6 +963,7 @@ private extension XrayConfigBuilder {
         }
         if let fakeDNS = values["fakeDns"] {
             let pools = fakeDNS.arrayValue ?? [fakeDNS]
+            try require(!pools.isEmpty, path: "/settings/xrayAdvanced/fakeDns", "FakeDNS requires at least one pool.")
             try require(pools.count <= 2, path: "/settings/xrayAdvanced/fakeDns", "At most two FakeDNS pools are allowed on iOS.")
             var totalEntries = 0
             for (index, pool) in pools.enumerated() {
@@ -964,16 +974,16 @@ private extension XrayConfigBuilder {
                 }
                 try validateCaseInsensitiveKeys(object, allowed: ["ipPool", "poolSize"], path: path)
                 let rawEntries = try uniqueCaseInsensitiveValue("poolSize", in: object, path: path)
-                if rawEntries != nil {
-                    try require(
-                        rawEntries?.integerValue != nil,
-                        path: "\(path)/poolSize",
-                        "FakeDNS pool size must be an in-range integer.",
-                    )
+                guard let entries = rawEntries?.integerValue, entries > 0 else {
+                    throw XrayConfigError.validationFailed([XrayValidationIssue(path: "\(path)/poolSize", message: "FakeDNS pool size must be a positive in-range integer.")])
                 }
-                let entries = rawEntries?.integerValue ?? 0
-                try require(entries >= 0, path: "\(path)/poolSize", "FakeDNS pool size cannot be negative.")
                 try require(entries <= limits.maxFakeDNSPoolEntries, path: "\(path)/poolSize", "FakeDNS pool size exceeds the \(limits.maxFakeDNSPoolEntries)-entry iOS limit.")
+                let rawCIDR = try uniqueCaseInsensitiveValue("ipPool", in: object, path: path)
+                guard let cidr = rawCIDR?.stringValue, let hostBits = Endpoint.hostBits(inCIDR: cidr) else {
+                    throw XrayConfigError.validationFailed([XrayValidationIssue(path: "\(path)/ipPool", message: "FakeDNS requires an IPv4 or IPv6 CIDR prefix.")])
+                }
+                // The core requires the pool size to be strictly below 2^hostBits.
+                try require(Int.bitWidth - entries.leadingZeroBitCount <= hostBits, path: "\(path)/poolSize", "FakeDNS pool size must be smaller than its subnet.")
                 totalEntries += entries
             }
             try require(totalEntries <= limits.maxFakeDNSPoolEntries, path: "/settings/xrayAdvanced/fakeDns", "FakeDNS exceeds the \(limits.maxFakeDNSPoolEntries)-entry iOS limit.")
@@ -1261,6 +1271,11 @@ private extension XrayConfigBuilder {
         }
         var xmux = extra["xmux"]?.objectValue ?? [:]
         try require(extra["xmux"] == nil || extra["xmux"]?.objectValue != nil, path: "\(path)/extra/xmux", "XHTTP xmux must be a JSON object.")
+        if let concurrency = try uniqueCaseInsensitiveValue("maxConcurrency", in: xmux, path: "\(path)/extra/xmux") {
+            // Xray treats these limits as mutually exclusive. A concurrency target
+            // alone can create more connections than the extension can afford.
+            try require(numericBounds(concurrency) == 0 ... 0, path: "\(path)/extra/xmux/maxConcurrency", "XHTTP requires a fixed connection limit on iOS. Remove maxConcurrency or set it to zero.")
+        }
         fillIfMissing("maxConnections", value: .number(Double(limits.maxXHTTPConnections)), into: &xmux)
         extra["xmux"] = .object(xmux)
         fillIfMissing("scMaxBufferedPosts", value: .number(Double(limits.maxXHTTPBufferedPosts)), into: &extra)
@@ -1306,26 +1321,6 @@ private extension XrayConfigBuilder {
         }
         guard let bytes = Data(base64Encoded: raw + "="), bytes.count == 32 else { return nil }
         return bytes.map { String(format: "%02x", $0) }.joined()
-    }
-
-    func validWireGuardPrefix(_ value: String) -> Bool {
-        let parts = value.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-        guard parts.count == 2, let bits = Int(parts[1]), String(bits) == parts[1],
-              !parts[0].utf8.contains(0), !parts[0].contains("%")
-        else { return false }
-        let address = String(parts[0])
-        // Darwin accepts zero-padded IPv4 octets; Go's netip.ParsePrefix rejects them.
-        if address.contains("."), let dotted = address.split(separator: ":").last,
-           dotted.split(separator: ".").contains(where: { $0.count > 1 && $0.first == "0" })
-        {
-            return false
-        }
-        if address.contains(":") {
-            var ipv6 = in6_addr()
-            return (0 ... 128).contains(bits) && inet_pton(AF_INET6, address, &ipv6) == 1
-        }
-        var ipv4 = in_addr()
-        return (0 ... 32).contains(bits) && inet_pton(AF_INET, address, &ipv4) == 1
     }
 
     func wireGuardSettings(profile: ProxyProfile, options: WireGuardOptions) -> JSONObject {
@@ -1543,7 +1538,7 @@ private extension XrayConfigBuilder {
         sniff: Bool,
     ) throws -> JSONObject {
         let path = "/routing/rules/\(index)"
-        try require(!Self.appleOnlyRuleKinds.contains(rule.kind), path: path, "\(rule.kind.displayName) is Apple-specific and cannot be reproduced by Xray routing.")
+        try require(rule.kind.isAvailableInXray, path: path, "\(rule.kind.displayName) is Apple-specific and cannot be reproduced by Xray routing.")
         if rule.kind == .protocolSniff {
             try require(sniff, path: path, "Protocol routing requires traffic sniffing.")
         }
@@ -1560,17 +1555,16 @@ private extension XrayConfigBuilder {
         case .domainSuffix:
             result["domain"] = .array(values.map { .string("domain:\($0)") })
         case .domainKeyword:
-            result["domain"] = .array(values.map(JSONValue.string))
+            result["domain"] = .array(values.map { .string("keyword:\($0)") })
         case .domainRegex:
             try require(values.allSatisfy(ImportPolicy.isSafeRegexPattern), path: path, "Domain regex is too large or unsafe.")
             result["domain"] = .array(values.map { .string("regexp:\($0)") })
-        case .ipCIDR:
-            result["ip"] = .array(values.map(JSONValue.string))
+        case .ipCIDR, .sourceIPCIDR:
+            try require(!values.isEmpty && values.allSatisfy { Endpoint.ipAddressWidth($0) != nil || Endpoint.hostBits(inCIDR: $0) != nil }, path: path, "Enter an IP address or a CIDR prefix.")
+            result[rule.kind == .ipCIDR ? "ip" : "sourceIP"] = .array(values.map(JSONValue.string))
         case .ipIsPrivate:
             try require(boolValue(rule.value) == true, path: path, "Xray cannot express the negated private-IP matcher.")
             result["ip"] = .array([.string("geoip:private")])
-        case .sourceIPCIDR:
-            result["sourceIP"] = .array(values.map(JSONValue.string))
         case .sourceIPIsPrivate:
             try require(boolValue(rule.value) == true, path: path, "Xray cannot express the negated private-source-IP matcher.")
             result["sourceIP"] = .array([.string("geoip:private")])
@@ -2354,7 +2348,7 @@ private final class XrayReachabilityResolver {
     let groups: [ProxyGroup]
     private let maxGroupDepth: Int
     private let maxResolutionSteps: Int
-    private let profilesByID: [ProxyProfile.ID: ProxyProfile]
+    let profilesByID: [ProxyProfile.ID: ProxyProfile]
     private let groupsByID: [ProxyGroup.ID: ProxyGroup]
     private let profilesByName: [String: [ProxyProfile]]
     private let groupsByName: [String: [ProxyGroup]]

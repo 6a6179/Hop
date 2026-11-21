@@ -4,6 +4,78 @@ import XCTest
 
 @MainActor
 final class TunnelControllerLogTests: XCTestCase {
+    func testFailedOnDemandSaveKeepsDisconnectAvailableAndRetriesSaveBeforeStopping() async {
+        let controller = TunnelController()
+        let saved = StatusTestTunnelManager(status: .connected)
+        saved.isOnDemandEnabled = true
+        saved.saveError = NSError(domain: "test.preferences", code: 1)
+        await controller.refreshStatus { [saved] }
+
+        let reloaded = StatusTestTunnelManager(status: .connected)
+        reloaded.isOnDemandEnabled = true
+        await controller.disconnect { [reloaded] }
+        XCTAssertEqual(controller.state, .connected)
+        XCTAssertEqual(saved.testConnection.stopCount, 0)
+        XCTAssertTrue(saved.isOnDemandEnabled)
+
+        await controller.disconnect { [reloaded] }
+        XCTAssertEqual(reloaded.savedOnDemandFlags, [false])
+        XCTAssertEqual(reloaded.testConnection.stopCount, 1)
+        XCTAssertEqual(controller.state, .disconnected)
+    }
+
+    func testClearDiscardsAlreadyReadExtensionLogBatch() async throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let controller = TunnelController(sharedLogStore: SharedTunnelLogStore(url: url))
+        try Data("old entry\n".utf8).write(to: url)
+
+        await controller.syncExtensionLogs { store, previous in
+            let batch = try store.readBatch(after: previous)
+            controller.clearLogs()
+            return batch
+        }
+        XCTAssertTrue(controller.logs.isEmpty)
+        XCTAssertNil(controller.extensionLogCursor)
+        await controller.syncExtensionLogs()
+        XCTAssertTrue(controller.logs.isEmpty)
+    }
+
+    func testLogCursorSurvivesRelaunchDuplicateLinesAndRotation() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("hop-tunnel.log")
+        let dataStore = HopAppDataStore(
+            url: directory.appendingPathComponent("hop-state.json"), secretStore: .inMemory(),
+            authenticationStore: .inMemory(), sharedLogStore: SharedTunnelLogStore(url: url),
+        )
+        let store = HopStore(dataStore: dataStore)
+        try Data("first\nsecond\n".utf8).write(to: url)
+        await store.tunnel.syncExtensionLogs()
+        store.persist()
+        store.flushPendingPersists()
+
+        let restored = HopStore(dataStore: dataStore)
+        XCTAssertEqual(restored.tunnel.extensionLogCursor, store.tunnel.extensionLogCursor)
+        await restored.tunnel.syncExtensionLogs()
+        XCTAssertEqual(restored.tunnel.logs, store.tunnel.logs)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("second\n".utf8))
+        try handle.close()
+        await restored.tunnel.syncExtensionLogs()
+        XCTAssertEqual(restored.tunnel.logs.filter { $0.hasSuffix("Extension second") }.count, 2)
+
+        try Data("second\nthird\n".utf8).write(to: url, options: .atomic)
+        await restored.tunnel.syncExtensionLogs()
+        XCTAssertEqual(restored.tunnel.logs.filter { $0.hasSuffix("Extension second") }.count, 2)
+        XCTAssertEqual(restored.tunnel.logs.filter { $0.hasSuffix("Extension third") }.count, 1)
+        restored.clearLogs()
+        restored.flushPendingPersists()
+        XCTAssertTrue(try XCTUnwrap(dataStore.loadExisting()).logs.isEmpty)
+        XCTAssertNil(try XCTUnwrap(dataStore.loadExisting()).extensionLogCursor)
+    }
+
     func testRefreshReadsInstalledTargetAndModeFromPreferences() async throws {
         let controller = TunnelController()
         let saved = StatusTestTunnelManager(status: .connected)
@@ -358,6 +430,12 @@ final class TunnelControllerLogTests: XCTestCase {
 
 private final class StatusTestConnection: NEVPNConnection, @unchecked Sendable {
     var currentStatus: NEVPNStatus = .disconnected
+    var stopCount = 0
+
+    override func stopVPNTunnel() {
+        stopCount += 1
+        currentStatus = .disconnected
+    }
 
     override var status: NEVPNStatus {
         currentStatus
@@ -366,6 +444,13 @@ private final class StatusTestConnection: NEVPNConnection, @unchecked Sendable {
 
 private final class StatusTestTunnelManager: NETunnelProviderManager, @unchecked Sendable {
     let testConnection = StatusTestConnection()
+    var saveError: Error?
+    var savedOnDemandFlags: [Bool] = []
+
+    override func saveToPreferences(completionHandler: (@Sendable (Error?) -> Void)? = nil) {
+        savedOnDemandFlags.append(isOnDemandEnabled)
+        completionHandler?(saveError)
+    }
 
     override var connection: NEVPNConnection {
         testConnection

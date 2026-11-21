@@ -252,9 +252,9 @@ private struct RuleEditorView: View {
             Form {
                 Section {
                     Picker("Type", selection: $draft.kind) {
-                        ForEach(RoutingRuleKind.allCases, id: \.self) { kind in
+                        ForEach(RoutingRuleKind.allCases.filter { $0.isAvailableInXray || $0 == draft.kind }, id: \.self) { kind in
                             Text(kind.displayName).tag(kind)
-                                .disabled(kind == .final && hasOtherFinal)
+                                .disabled(!kind.isAvailableInXray || (kind == .final && hasOtherFinal))
                         }
                     }
                     .onChange(of: draft.kind) { _, newKind in
@@ -264,7 +264,9 @@ private struct RuleEditorView: View {
                     if draft.kind.isBoolean {
                         Picker("Match", selection: $draft.value) {
                             Text("Yes").tag("true")
-                            Text("No").tag("false")
+                            if draft.value != "true" {
+                                Text("Unsupported (\(draft.value))").tag(draft.value).disabled(true)
+                            }
                         }
                     } else {
                         TextField(draft.kind.valuePrompt, text: $draft.value)
@@ -296,7 +298,7 @@ private struct RuleEditorView: View {
                 } header: {
                     Text("Rule")
                 } footer: {
-                    Text(draft.kind == .final && hasOtherFinal ? "Edit the existing Final rule to change the fallback." : draft.kind.footerText)
+                    Text(draft.availabilityIssue(sniffTraffic: store.settings.sniffTraffic) ?? (draft.kind == .final && hasOtherFinal ? "Edit the existing Final rule to change the fallback." : draft.kind.footerText))
                 }
 
                 if let validationError {
@@ -325,7 +327,7 @@ private struct RuleEditorView: View {
                         validationError = nil
                         Task { @MainActor in
                             do {
-                                try await draft.validate()
+                                try await draft.validate(sniffTraffic: store.settings.sniffTraffic)
                                 onSave(draft.rule)
                                 dismiss()
                             } catch {
@@ -338,7 +340,7 @@ private struct RuleEditorView: View {
                             }
                         }
                     }
-                    .disabled(!draft.isValid || isSaving || (draft.kind == .final && hasOtherFinal))
+                    .disabled(!draft.isValid || draft.availabilityIssue(sniffTraffic: store.settings.sniffTraffic) != nil || isSaving || (draft.kind == .final && hasOtherFinal))
                 }
             }
             .interactiveDismissDisabled(isSaving)
@@ -356,6 +358,9 @@ struct RuleEditorDraft {
         id = rule.id
         kind = rule.kind
         value = rule.value
+        if kind.isBoolean, ["yes", "1", "true"].contains(value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) {
+            value = "true"
+        }
         target = rule.target
     }
 
@@ -376,13 +381,28 @@ struct RuleEditorDraft {
         !trimmedValue.isEmpty
     }
 
-    func validate() async throws {
+    func availabilityIssue(sniffTraffic: Bool) -> String? {
+        if !kind.isAvailableInXray {
+            return "This Apple-specific matcher is unavailable in Xray. Choose a different rule type."
+        }
+        if kind.isBoolean, value != "true" {
+            return "Xray can match private IPs only with Yes. Choose Yes or a different rule type."
+        }
+        if kind == .protocolSniff, !sniffTraffic {
+            return "Enable traffic sniffing in Settings to use protocol rules."
+        }
+        return nil
+    }
+
+    func validate(sniffTraffic: Bool = true) async throws {
         // Validate the matcher independently of unrelated outbound credentials.
         var candidate = rule
         candidate.target = .direct
+        var settings = AppSettings.defaults
+        settings.sniffTraffic = sniffTraffic
         let json = try XrayConfigBuilder().build(
             profiles: [], groups: [], selectedTarget: .direct,
-            routingMode: .rule, rules: [candidate],
+            routingMode: .rule, rules: [candidate], settings: settings,
         )
         try await XrayCoreClient.validate(configJSON: json)
     }

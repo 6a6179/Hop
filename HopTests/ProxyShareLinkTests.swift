@@ -23,17 +23,65 @@ final class ProxyShareLinkTests: XCTestCase {
         }
     }
 
-    func testVMessGRPCAuthorityDoesNotReplaceDefaultTLSName() throws {
-        let profile = ProxyProfile(
-            name: "VMess gRPC",
-            endpoint: Endpoint(host: "edge.example.net", port: 443),
-            options: .vmess(VMessOptions(uuid: "11111111-1111-4111-8111-111111111111", security: "auto", alterID: 0)),
+    func testVMessTransportHostDoesNotReplaceDefaultTLSName() throws {
+        for transport in [
+            TransportOptions(type: .grpc, host: "rpc.example.net:8443", serviceName: "rpc"),
+            TransportOptions(type: .websocket, path: "/ws", host: "ws.example.net"),
+            TransportOptions(type: .httpUpgrade, path: "/upgrade", host: "http.example.net"),
+            TransportOptions(type: .xhttp, path: "/x", host: "x.example.net"),
+        ] {
+            let profile = ProxyProfile(
+                name: "VMess TLS",
+                endpoint: Endpoint(host: "edge.example.net", port: 443),
+                options: .vmess(VMessOptions(uuid: "11111111-1111-4111-8111-111111111111", security: "auto", alterID: 0)),
+                security: .tls(TLSOptions()),
+                transport: transport,
+            )
+            let parsed = try roundTrip(profile)
+            XCTAssertEqual(parsed.transport, profile.transport)
+            XCTAssertEqual(parsed.security.tls?.serverName, profile.endpoint.host)
+        }
+    }
+
+    func testShareRefusesProfilesThatWouldLoseAdvancedSettings() throws {
+        var profile = ProxyProfile(
+            name: "Private headers",
+            endpoint: Endpoint(host: "edge.example", port: 443),
+            options: .trojan(TrojanOptions(password: "token")),
             security: .tls(TLSOptions()),
-            transport: TransportOptions(type: .grpc, host: "rpc.example.net:8443", serviceName: "rpc"),
+            xrayAdvanced: XrayAdvancedDocument(["streamSettings": .object(["wsSettings": .object(["headers": .object(["X-Token": .string("sensitive")])])])]),
         )
-        let parsed = try roundTrip(profile)
-        XCTAssertEqual(parsed.transport, profile.transport)
-        XCTAssertEqual(parsed.security.tls?.serverName, profile.endpoint.host)
+        XCTAssertNil(ProxyShareLink.shareLink(for: profile))
+        let reason = try XCTUnwrap(ProxyShareLink.unavailableReason(for: profile))
+        XCTAssertTrue(reason.contains("streamSettings"))
+        XCTAssertFalse(reason.contains("sensitive"))
+        profile.xrayAdvanced = XrayAdvancedDocument()
+        XCTAssertNotNil(ProxyShareLink.shareLink(for: profile))
+    }
+
+    func testHysteriaCertificatePinUsesStandardName() throws {
+        let pin = String(repeating: "a1", count: 32)
+        var profile = try XCTUnwrap(importService.importText("hy2://secret@edge.example?pcs=\(pin)").profiles.first)
+        let link = try XCTUnwrap(ProxyShareLink.shareLink(for: profile))
+        let fields = try XCTUnwrap(URLComponents(string: link)?.queryItems)
+        XCTAssertEqual(fields.first { $0.name == "pinSHA256" }?.value, pin)
+        XCTAssertNil(fields.first { $0.name == "pcs" })
+        XCTAssertEqual(try roundTrip(profile).security.tls?.pinnedPeerCertSHA256, pin)
+        profile.security.tls?.pinnedPeerCertSHA256 = "\(pin),\(pin)"
+        XCTAssertNil(ProxyShareLink.shareLink(for: profile))
+        XCTAssertNotNil(ProxyShareLink.unavailableReason(for: profile))
+    }
+
+    func testWireGuardLegacyEmptyAndAbsentAllowedIPsRemainDistinct() throws {
+        for allowedIPs: [String]? in [nil, []] {
+            let profile = ProxyProfile(
+                name: "WG",
+                endpoint: Endpoint(host: "peer.example", port: 51820),
+                options: .wireGuard(WireGuardOptions(privateKey: "key", peerPublicKey: "peer", localAddress: ["10.0.0.2/32"], allowedIPs: allowedIPs)),
+                security: .none,
+            )
+            XCTAssertEqual(try roundTrip(profile).options.wireGuardValue?.allowedIPs, allowedIPs)
+        }
     }
 
     // MARK: - Round-trip helpers

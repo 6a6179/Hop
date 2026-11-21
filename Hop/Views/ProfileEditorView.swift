@@ -4,19 +4,21 @@ import SwiftUI
 /// draft and only produces a `ProxyProfile` when validation passes.
 struct ProfileEditorView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(HopStore.self) private var store
+    @State private var showingEditConflict = false
     @State private var draft: ProfileEditorDraft
 
     let isNew: Bool
-    let onSave: (ProxyProfile) -> Void
+    let onSave: (ProxyProfile) -> Bool
 
-    init(profile: ProxyProfile, isNew: Bool = false, onSave: @escaping (ProxyProfile) -> Void) {
+    init(profile: ProxyProfile, isNew: Bool = false, onSave: @escaping (ProxyProfile) -> Bool) {
         _draft = State(initialValue: ProfileEditorDraft(profile: profile))
         self.isNew = isNew
         self.onSave = onSave
     }
 
     var body: some View {
-        let validation = draft.validation
+        let validation = draft.validation(availableProfiles: store.profiles)
 
         NavigationStack {
             Form {
@@ -35,7 +37,7 @@ struct ProfileEditorView: View {
                             Text(proto.displayName).tag(proto)
                         }
                     }
-                    ProfileTextField(draft.proto == .wireGuard ? "Peer Host" : "Host", text: $draft.host)
+                    ProfileTextField(draft.proto == .wireGuard ? "Peer Host" : "Host", text: $draft.host, prompt: "example.com")
                     ProfileTextField(draft.proto == .wireGuard ? "Peer Port" : "Port", text: $draft.port, prompt: "443", keyboardType: .numberPad)
                 }
 
@@ -57,6 +59,11 @@ struct ProfileEditorView: View {
                     }
                 }
             }
+            .alert("Node changed or removed", isPresented: $showingEditConflict) {
+                Button("OK") {}
+            } message: {
+                Text("The library changed while this editor was open. Reopen the node to edit its current settings.")
+            }
             .navigationTitle(isNew ? "New Node" : "Edit Node")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -70,11 +77,14 @@ struct ProfileEditorView: View {
                     Button("Save") {
                         // Revalidate on the explicit save action so a stale
                         // rendered button can never admit a changed draft.
-                        guard let profile = draft.validation.profile else {
+                        guard let profile = draft.validation(availableProfiles: store.profiles).profile else {
                             return
                         }
-                        onSave(profile)
-                        dismiss()
+                        if onSave(profile) {
+                            dismiss()
+                        } else {
+                            showingEditConflict = true
+                        }
                     }
                     .disabled(validation.profile == nil)
                 }
@@ -471,6 +481,7 @@ struct ProfileEditorDraft {
     var wireGuardPeerPublicKey = ""
     var wireGuardPreSharedKey = ""
     var wireGuardLocalAddresses = ""
+    private var originalFirstPeerAllowedIPs: [String]?
     var wireGuardAllowedIPs = ""
     var wireGuardReserved = ""
     var wireGuardKeepAlive = ""
@@ -576,7 +587,8 @@ struct ProfileEditorDraft {
             wireGuardPeerPublicKey = firstPeer?.publicKey ?? options.peerPublicKey
             wireGuardPreSharedKey = firstPeer?.preSharedKey ?? ""
             wireGuardLocalAddresses = options.localAddress.joined(separator: ", ")
-            wireGuardAllowedIPs = firstPeer?.allowedIPs?.joined(separator: ", ") ?? ""
+            originalFirstPeerAllowedIPs = firstPeer?.allowedIPs
+            wireGuardAllowedIPs = originalFirstPeerAllowedIPs?.joined(separator: ", ") ?? ""
             wireGuardReserved = options.reserved?.map(String.init).joined(separator: ", ") ?? ""
             wireGuardKeepAlive = firstPeer?.keepAliveSeconds.map(String.init) ?? ""
             wireGuardMTU = options.mtu.map(String.init) ?? ""
@@ -626,6 +638,10 @@ struct ProfileEditorDraft {
     }
 
     var validation: ProfileEditorValidation {
+        validation(availableProfiles: [])
+    }
+
+    func validation(availableProfiles: [ProxyProfile]) -> ProfileEditorValidation {
         guard !trimmed(name).isEmpty else {
             return .invalid("Enter a name.")
         }
@@ -744,7 +760,7 @@ struct ProfileEditorDraft {
             let advanced = try XrayAdvancedDocument(jsonString: xrayAdvancedJSON, schemaVersion: advancedSchemaVersion)
             let candidate = try makeProfile(advanced: advanced.isEmpty ? nil : advanced)
             if let issue = XrayConfigBuilder().validationIssues(
-                profiles: [candidate],
+                profiles: [candidate] + availableProfiles.filter { $0.id != candidate.id },
                 groups: [],
                 selectedTarget: .profile(candidate.id),
                 routingMode: .global,
@@ -817,7 +833,8 @@ struct ProfileEditorDraft {
         get throws {
             let publicKey = trimmed(wireGuardPeerPublicKey)
             let preSharedKey = optional(wireGuardPreSharedKey)
-            let allowedIPs = optionalList(from: wireGuardAllowedIPs)
+            let allowedIPs = wireGuardAllowedIPs == (originalFirstPeerAllowedIPs?.joined(separator: ", ") ?? "")
+                ? originalFirstPeerAllowedIPs : optionalList(from: wireGuardAllowedIPs)
             let keepAlive = Int(trimmed(wireGuardKeepAlive))
             var peers = wireGuardPeers
             if peers?.isEmpty == false {

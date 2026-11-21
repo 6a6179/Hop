@@ -105,6 +105,34 @@ final class ProfileEditorTests: XCTestCase {
         }
     }
 
+    func testFirstWireGuardPeerKeepsEmptyAllowedIPsOnRename() throws {
+        for explicitPeers in [false, true] {
+            let peer = WireGuardPeer(publicKey: wireGuardKey(2), allowedIPs: [])
+            let profile = ProxyProfile(name: "Old", endpoint: Endpoint(host: "vpn.example", port: 51820),
+                                       options: .wireGuard(WireGuardOptions(privateKey: wireGuardKey(1), peerPublicKey: peer.publicKey,
+                                                                            localAddress: ["10.0.0.2/32"], allowedIPs: [],
+                                                                            peers: explicitPeers ? [peer] : nil)), security: .none)
+            var draft = ProfileEditorDraft(profile: profile)
+            draft.name = "Renamed"
+            guard case let .wireGuard(saved) = try XCTUnwrap(draft.validation.profile).options else { return XCTFail("Expected WireGuard") }
+            XCTAssertEqual(saved.effectivePeers[0].allowedIPs, [])
+        }
+    }
+
+    @MainActor
+    func testNodeEditorStartsWithoutSNIOverrideAndChecksTheOriginalRecord() {
+        let original = ProfilesView.newProfile()
+        XCTAssertTrue(original.endpoint.host.isEmpty)
+        XCTAssertNil(original.security.tls?.serverName)
+        XCTAssertTrue(ProfilesView.canSaveEditor(original: original, isNew: true, current: nil))
+        XCTAssertFalse(ProfilesView.canSaveEditor(original: original, isNew: false, current: nil))
+        XCTAssertTrue(ProfilesView.canSaveEditor(original: original, isNew: false, current: original))
+        XCTAssertFalse(ProfilesView.canSaveEditor(original: original, isNew: true, current: original))
+        var changed = original
+        changed.endpoint.host = "updated.example"
+        XCTAssertFalse(ProfilesView.canSaveEditor(original: original, isNew: false, current: changed))
+    }
+
     func testWireGuardEditsFirstExplicitEndpointWithoutRetargetingOtherPeers() throws {
         let fallback = Endpoint(host: "fallback.example.com", port: 51820)
         let first = WireGuardPeer(publicKey: wireGuardKey(2), endpoint: Endpoint(host: "first.example.com", port: 51821))

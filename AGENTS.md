@@ -18,7 +18,7 @@ Guidance for AI coding agents working in this repository.
 - Check this file and any more-specific `AGENTS.md` files before modifying files.
 - Prefer small, focused changes that preserve the current SwiftUI/XcodeGen structure.
 - Do not manually edit `Hop.xcodeproj/project.pbxproj` for durable project changes. Edit `project.yml`, then run `xcodegen generate`.
-- Do not replace or rebuild `Frameworks/LibXray.xcframework` unless explicitly asked. Ordinary rebuilds verify against the committed digest before installation. For an intentional engine update, use `scripts/build-libxray.sh --update-manifest`, then verify reproducibility with an ordinary rebuild.
+- On a fresh checkout, build the missing `Frameworks/LibXray.xcframework` with the checksum-verified bootstrap command below. Reuse an installed framework for ordinary work. Replacing the reviewed engine or updating its checksum requires an explicit request. For an intentional engine update, use `scripts/build-libxray.sh --update-manifest`, then verify reproducibility with an ordinary rebuild.
 - The worktree may be dirty or uncommitted; do not revert unrelated user changes.
 
 ## Formatting and style
@@ -47,7 +47,7 @@ Security and consistency properties that code changes must not regress:
   - Subscription refreshes must never silently replace a matched profile's security-critical values. Automatic/unreviewed merges use `SubscriptionRefreshSecurityPolicy.preserveExisting`; manual refreshes return `.needsSecurityConfirmation` for TLS/REALITY layer and floor, pins, verification names, ECH, PQ curves, VLESS Encryption/Auth, REALITY public-key, and ML-DSA changes before `.applyReviewedChanges` may apply them. A matched node can never newly enable `allowInsecure`, even after another change is reviewed; refused changes are recorded in the warnings the store logs.
   - Subscription refreshes must not install routing rules from the response; rules only apply through reviewed manual imports. When a refresh removes an explicit local rule target, preserve the rule and route it to Reject rather than deleting it into a later fallback.
   - WireGuard refreshes must preserve peer keys, PSKs, endpoints, and allowed-IP routing until reviewed; compare effective peer values rather than generated peer IDs.
-  - Every UI path that saves imported nodes with `allowInsecure` must run the blocking `insecureTLSImportConfirmation` first. The sheet flows gate themselves; the QR-scan and refresh paths in `ProfilesView` gate via `pendingInsecureScan`. New import paths need the same gate. This permits preserving a legacy node for editing only: `XrayConfigBuilder` must continue rejecting it until the user enables normal validation or supplies certificate pins.
+  - Every UI path that saves imported nodes with `allowInsecure` must run the blocking `insecureTLSImportConfirmation` first. QR scans open a prefilled `ImportTextSheet`, which owns the import confirmation. `ProfilesView` holds new insecure subscription nodes in `pendingInsecureRefresh` until the user confirms. New import paths need the same gate. `XrayConfigBuilder` must keep blocking legacy insecure nodes until the user enables normal verification or supplies certificate pins.
   - Subscription refreshes extend that gate to *new* nodes: `SubscriptionRefreshMerger.newInsecureProfileNames` decides which imported allow-insecure nodes are new (vs. updates to already-insecure nodes), `HopStore.refreshSubscription` returns `.needsInsecureConfirmation` instead of applying them, and `autoRefreshStaleSubscriptions` skips such refreshes outright — no user is present to confirm.
   - URL-scheme payloads — `hop://import` and the registered proxy share-link schemes (`AppShellView.proxyLinkSchemes`, mirrored in the app Info.plist's `CFBundleURLTypes`; a test asserts they stay in sync) — are untrusted (any app can open them). They only flow into the prefilled `ImportTextSheet`, never applied directly, so the preview and allow-insecure gates stay in force. The sheet auto-previews only payloads that parse locally; subscription URLs are never fetched without an explicit user tap.
   - Imported display names are sanitized (`ImportPolicy.sanitizeImportedName`, applied via `ImportResult.sanitizingNames()` at the `importText` exits): bidi/invisible characters are stripped and length is capped so a crafted name can't spoof the allow-insecure confirmation alert. Keep new parser entry points on this path.
@@ -67,6 +67,12 @@ Security and consistency properties that code changes must not regress:
 - Pin GitHub Actions `uses:` references to commit SHAs with the tag in a trailing comment; do not move them back to mutable tags.
 
 ## Build and test commands
+
+Before building, testing, or packaging on a fresh checkout, select Xcode 26.5 (17F42) with iOS and Simulator SDKs 26.5 (23F73). Bootstrap the ignored framework once with this command.
+
+```sh
+[ -d Frameworks/LibXray.xcframework ] || GOTOOLCHAIN=go1.27.4 scripts/build-libxray.sh
+```
 
 Regenerate the project after `project.yml` changes:
 

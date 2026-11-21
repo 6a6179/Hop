@@ -93,6 +93,11 @@ struct XrayFormSchema {
                 fields[key] = .object(field)
             }
         }
+        if name == "XmuxConfig", Self.lookup("maxConcurrency", in: value?.objectValue ?? [:]) == nil {
+            // Hop fixes the physical connection count for XHTTP. Keep legacy
+            // concurrency fields visible for correction, but don't offer new ones.
+            fields.removeValue(forKey: "maxConcurrency")
+        }
         if name == "SocketConfig" {
             fields["tcpFastOpen"] = .object(["jsonTypes": .array([.string("boolean"), .string("integer")])])
         }

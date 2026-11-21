@@ -10,7 +10,19 @@ import Foundation
 /// Links embed the node's credentials by design — that is what sharing a node
 /// means — so the UI only produces them from an explicit user action.
 enum ProxyShareLink {
+    static func unavailableReason(for profile: ProxyProfile) -> String? {
+        if let advanced = profile.xrayAdvanced, !advanced.isEmpty {
+            let fields = advanced.values.keys.sorted().joined(separator: ", ")
+            return "Sharing would omit advanced Xray settings (\(fields))."
+        }
+        if profile.proto == .hysteria2, profile.security.tls?.pinnedPeerCertSHA256?.contains(",") == true {
+            return "A Hysteria 2 share link supports one certificate pin. This node uses multiple pins."
+        }
+        return nil
+    }
+
     static func shareLink(for profile: ProxyProfile) -> String? {
+        guard unavailableReason(for: profile) == nil else { return nil }
         switch profile.options {
         case let .vless(options):
             var query = securityQuery(profile.security)
@@ -29,7 +41,7 @@ enum ProxyShareLink {
             return link(scheme: "trojan", userInfo: options.password, profile: profile, query: query)
 
         case let .hysteria2(options):
-            var query = securityQuery(profile.security, omitLayerKey: true)
+            var query = securityQuery(profile.security, omitLayerKey: true, pinKey: "pinSHA256")
             query += transportQuery(profile.transport)
             if let obfs = options.obfs, !obfs.isEmpty {
                 query.append(("obfs", obfs))
@@ -103,7 +115,7 @@ enum ProxyShareLink {
             if let value = firstPeer.preSharedKey, !value.isEmpty {
                 query.append(("presharedkey", value))
             }
-            if let value = firstPeer.allowedIPs, !value.isEmpty {
+            if let value = firstPeer.allowedIPs {
                 query.append(("allowedips", value.joined(separator: ",")))
             }
             if let value = options.reserved, !value.isEmpty {
@@ -178,9 +190,9 @@ enum ProxyShareLink {
             object["tls"] = profile.security.layer == .reality ? "reality" : "tls"
             if let serverName = tls.serverName, !serverName.isEmpty {
                 object["sni"] = serverName
-            } else if profile.transport.type == .grpc, profile.transport.host?.isEmpty == false {
-                // VMess readers can fall back to "host" for SNI. Keep the
-                // original verification name separate from the gRPC authority.
+            } else if let transportHost = object["host"] as? String, !transportHost.isEmpty {
+                // VMess readers use the transport host as fallback SNI. Preserve
+                // the TLS identity used by the original node.
                 object["sni"] = profile.endpoint.host
             }
             if !tls.alpn.isEmpty {
@@ -258,7 +270,7 @@ enum ProxyShareLink {
 
     /// `omitLayerKey` is for QUIC-based schemes (hysteria2/tuic) where TLS is
     /// implied and links conventionally carry only sni/alpn/insecure.
-    private static func securityQuery(_ security: ProxySecurity, omitLayerKey: Bool = false) -> [(String, String)] {
+    private static func securityQuery(_ security: ProxySecurity, omitLayerKey: Bool = false, pinKey: String = "pcs") -> [(String, String)] {
         var query: [(String, String)] = []
         switch security.layer {
         case .none:
@@ -282,7 +294,7 @@ enum ProxyShareLink {
                 query.append(("fp", fingerprint))
             }
             if let pins = tls.pinnedPeerCertSHA256, !pins.isEmpty {
-                query.append(("pcs", pins))
+                query.append((pinKey, pins))
             }
             if let names = tls.verifyPeerCertByName, !names.isEmpty {
                 query.append(("vcn", names))

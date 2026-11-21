@@ -34,6 +34,13 @@ struct ProxyProfile: Identifiable, Hashable, Codable {
         options.proto
     }
 
+    var probeEndpoint: Endpoint {
+        if case let .wireGuard(options) = options, let first = options.peers?.first?.endpoint {
+            return first
+        }
+        return endpoint
+    }
+
     var displaySecurity: String {
         switch security.layer {
         case .none:

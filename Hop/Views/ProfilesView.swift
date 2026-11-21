@@ -58,10 +58,10 @@ struct ProfilesView: View {
 
                     Section("Create") {
                         Button("New Node", systemImage: "server.rack") {
-                            activeSheet = .profile(Self.newProfile())
+                            activeSheet = .profile(Self.newProfile(), isNew: true)
                         }
                         Button("New Group", systemImage: "rectangle.stack.badge.plus") {
-                            activeSheet = .group(Self.newGroup(profiles: store.profiles))
+                            activeSheet = .group(Self.newGroup(profiles: store.profiles), isNew: true)
                         }
                     }
                 } label: {
@@ -77,23 +77,29 @@ struct ProfilesView: View {
             applyPendingSecurityRefresh()
         }) { sheet in
             switch sheet {
-            case let .profile(profile):
-                ProfileEditorView(profile: profile, isNew: !store.profiles.contains(where: { $0.id == profile.id })) { updatedProfile in
-                    if store.profiles.contains(where: { $0.id == updatedProfile.id }) {
-                        store.updateProfile(updatedProfile)
+            case let .profile(profile, isNew):
+                ProfileEditorView(profile: profile, isNew: isNew) { updated in
+                    let current = store.profiles.first { $0.id == profile.id }
+                    guard Self.canSaveEditor(original: profile, isNew: isNew, current: current) else { return false }
+                    if isNew {
+                        store.addProfile(updated)
                     } else {
-                        store.addProfile(updatedProfile)
+                        store.updateProfile(updated)
                     }
                     selectedSection = .nodes
+                    return true
                 }
-            case let .group(group):
-                ProxyGroupEditorView(group: group) { updatedGroup in
-                    if store.groups.contains(where: { $0.id == updatedGroup.id }) {
-                        store.updateGroup(updatedGroup)
+            case let .group(group, isNew):
+                ProxyGroupEditorView(group: group, isNew: isNew) { updated in
+                    let current = store.groups.first { $0.id == group.id }
+                    guard Self.canSaveEditor(original: group, isNew: isNew, current: current) else { return false }
+                    if isNew {
+                        store.addGroup(updated)
                     } else {
-                        store.addGroup(updatedGroup)
+                        store.updateGroup(updated)
                     }
                     selectedSection = .nodes
+                    return true
                 }
             case let .importText(prefill):
                 ImportTextSheet(importService: importService, initialText: prefill) { saveResult in
@@ -115,8 +121,16 @@ struct ProfilesView: View {
                                     let change = pending.changes[index]
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(change.profileName).font(.headline)
-                                        Text(change.fields.map(\.rawValue).joined(separator: ", "))
-                                            .foregroundStyle(.secondary)
+                                        ForEach(change.details, id: \.field) { detail in
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                Text(detail.field.rawValue).font(.subheadline.weight(.semibold))
+                                                Text("Current: \(detail.before)")
+                                                Text("Proposed: \(detail.after)")
+                                            }
+                                            .font(.footnote)
+                                            .textSelection(.enabled)
+                                            .padding(.vertical, 3)
+                                        }
                                     }
                                 }
                             }
@@ -268,7 +282,7 @@ struct ProfilesView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         Button("New Node") {
-                            activeSheet = .profile(Self.newProfile())
+                            activeSheet = .profile(Self.newProfile(), isNew: true)
                         }
                         .buttonStyle(.bordered)
                     }
@@ -289,7 +303,7 @@ struct ProfilesView: View {
                     .accessibilityAddTraits(store.selectedTarget == .profile(profile.id) ? .isSelected : [])
                     .contextMenu {
                         Button("Edit", systemImage: "pencil") {
-                            activeSheet = .profile(profile)
+                            activeSheet = .profile(profile, isNew: false)
                         }
                         if let link = ProxyShareLink.shareLink(for: profile) {
                             // Share actions embed the node's credentials —
@@ -303,6 +317,10 @@ struct ProfilesView: View {
                             }
                             Button("Show QR Code", systemImage: "qrcode") {
                                 shareQRItem = ShareQRItem(profileName: profile.name, link: link)
+                            }
+                        } else if let reason = ProxyShareLink.unavailableReason(for: profile) {
+                            Button("Share Link Unavailable", systemImage: "info.circle") {
+                                importNotice = ProfileImportNotice(title: "Share Link Unavailable", message: reason)
                             }
                         }
                     }
@@ -322,7 +340,7 @@ struct ProfilesView: View {
                         }
 
                         Button {
-                            activeSheet = .profile(profile)
+                            activeSheet = .profile(profile, isNew: false)
                         } label: {
                             Label("Edit", systemImage: "pencil")
                         }
@@ -367,7 +385,7 @@ struct ProfilesView: View {
                     .accessibilityAddTraits(store.selectedTarget == .group(group.id) ? .isSelected : [])
                     .contextMenu {
                         Button("Edit", systemImage: "pencil") {
-                            activeSheet = .group(group)
+                            activeSheet = .group(group, isNew: false)
                         }
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
@@ -378,7 +396,7 @@ struct ProfilesView: View {
                         }
 
                         Button {
-                            activeSheet = .group(group)
+                            activeSheet = .group(group, isNew: false)
                         } label: {
                             Label("Edit", systemImage: "pencil")
                         }
@@ -626,12 +644,25 @@ struct ProfilesView: View {
         }
     }
 
-    private static func newProfile() -> ProxyProfile {
+    static func canSaveEditor<Value: Encodable>(original: Value, isNew: Bool, current: Value?) -> Bool {
+        if isNew {
+            return current == nil
+        }
+        guard let current else { return false }
+        // Credential spelling is byte-sensitive. Swift String equality folds
+        // canonically equivalent Unicode even if the provider changed bytes.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let before = try? encoder.encode(original), let now = try? encoder.encode(current) else { return false }
+        return before == now
+    }
+
+    static func newProfile() -> ProxyProfile {
         ProxyProfile(
             name: "New VLESS Node",
-            endpoint: Endpoint(host: "example.com", port: 443),
+            endpoint: Endpoint(host: "", port: 443),
             options: .vless(VLESSOptions(uuid: "", flow: nil)),
-            security: .tls(TLSOptions(serverName: "example.com")),
+            security: .tls(TLSOptions()),
         )
     }
 
@@ -660,17 +691,17 @@ private enum ProfilesSection: CaseIterable {
 }
 
 private enum ProfilesSheet: Identifiable {
-    case profile(ProxyProfile)
-    case group(ProxyGroup)
+    case profile(ProxyProfile, isNew: Bool)
+    case group(ProxyGroup, isNew: Bool)
     case importText(prefill: String)
     case scanner
     case securityReview
 
     var id: String {
         switch self {
-        case let .profile(profile):
+        case let .profile(profile, _):
             "profile-\(profile.id.uuidString)"
-        case let .group(group):
+        case let .group(group, _):
             "group-\(group.id.uuidString)"
         case let .importText(prefill):
             // The prefill participates in identity so a hop:// payload arriving

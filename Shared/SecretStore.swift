@@ -21,9 +21,14 @@ protocol SecretBackend: Sendable {
     /// All stored keys; lets `replaceAll` prune stale items without a blanket
     /// delete-everything-first pass.
     func allKeys() throws -> [String]
+    func hasLibraryCredentials() throws -> Bool
 }
 
 extension SecretBackend {
+    func hasLibraryCredentials() throws -> Bool {
+        try allKeys().contains { $0 != KeychainSecretBackend.accessGroupProbeAccount }
+    }
+
     /// Compatibility implementation for simple/test backends. The Keychain
     /// backend overrides this with one `SecItemCopyMatching` query.
     func allValues() throws -> [String: String] {
@@ -80,6 +85,22 @@ struct SecretStore {
     /// hydration. Per-key reads remain available for tunnel token resolution.
     func allValues() throws -> [String: String] {
         try backend.allValues()
+    }
+
+    /// An absent app-state file can indicate a changed signing container.
+    /// Preserve existing profile accounts until its envelope is available.
+    func prepareEmptyLibrary(retryingGenerationPrefix prefix: String?) throws {
+        guard let prefix else {
+            guard try !backend.hasLibraryCredentials() else { throw LibraryCredentialError.missingLibrary }
+            return
+        }
+        let keys = try backend.allKeys().filter { $0 != KeychainSecretBackend.accessGroupProbeAccount }
+        guard keys.allSatisfy({ $0.hasPrefix(prefix) }) else {
+            throw LibraryCredentialError.missingLibrary
+        }
+        for key in keys {
+            guard backend.removeValue(forKey: key) else { throw CocoaError(.fileWriteUnknown) }
+        }
     }
 
     @discardableResult
@@ -190,11 +211,20 @@ struct SecretStore {
     }
 }
 
+enum LibraryCredentialError: LocalizedError {
+    case missingLibrary
+
+    var errorDescription: String? {
+        "Saved credentials are present, but their library file is unavailable. Restore the App Group used by your previous installation, then retry."
+    }
+}
+
 /// `SecItem`-backed secret store. Falls back to a process-local keychain when
 /// the access-group entitlement is unavailable (unsigned builds), so single
 /// processes still work; cross-process sharing on device requires the
 /// `keychain-access-groups` entitlement on both targets.
 struct KeychainSecretBackend: SecretBackend {
+    static let accessGroupProbeAccount = "cat.string.hop.accessgroup.probe"
     let service: String
     let accessGroup: String?
 
@@ -230,6 +260,15 @@ struct KeychainSecretBackend: SecretBackend {
         }
     }
 
+    func hasLibraryCredentials() throws -> Bool {
+        let result = try items(returnData: false, includeGroup: accessGroup != nil, onlyFirst: true)
+        guard let item = result.first else { return false }
+        if item[kSecAttrAccount as String] as? String == Self.accessGroupProbeAccount {
+            return try allKeys().contains { $0 != Self.accessGroupProbeAccount }
+        }
+        return true
+    }
+
     func allValues() throws -> [String: String] {
         var values: [String: String] = [:]
         for item in try items(returnData: true, includeGroup: accessGroup != nil) {
@@ -242,19 +281,19 @@ struct KeychainSecretBackend: SecretBackend {
         return values
     }
 
-    private func items(returnData: Bool, includeGroup: Bool) throws -> [[String: Any]] {
+    private func items(returnData: Bool, includeGroup: Bool, onlyFirst: Bool = false) throws -> [[String: Any]] {
         var query = baseQuery(account: nil, includeGroup: includeGroup)
         query[kSecReturnAttributes as String] = true
         if returnData {
             query[kSecReturnData as String] = true
         }
-        query[kSecMatchLimit as String] = kSecMatchLimitAll
+        query[kSecMatchLimit as String] = onlyFirst ? kSecMatchLimitOne : kSecMatchLimitAll
 
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecMissingEntitlement, includeGroup {
             _ = Self.didLogEntitlementFallback
-            return try items(returnData: returnData, includeGroup: false)
+            return try items(returnData: returnData, includeGroup: false, onlyFirst: onlyFirst)
         }
         if status == errSecItemNotFound {
             return []
@@ -343,7 +382,7 @@ struct KeychainSecretBackend: SecretBackend {
     /// throwaway item with no explicit access group and reading back the group
     /// the system assigned it.
     static func appIdentifierPrefix(service: String) -> String? {
-        let account = "cat.string.hop.accessgroup.probe"
+        let account = accessGroupProbeAccount
         let base: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

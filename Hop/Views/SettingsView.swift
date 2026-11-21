@@ -21,7 +21,7 @@ struct SettingsView: View {
                 Toggle(isOn: $store.settings.killSwitch) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Kill Switch")
-                        Text("Blocks traffic on VPN drops. May block Wi-Fi sign-in.")
+                        Text("Blocks internet traffic if the VPN drops. Local network traffic and iOS system exceptions can still use the network.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -74,12 +74,6 @@ struct SettingsView: View {
                     LogsView()
                 }
 
-                Picker("Level", selection: $store.settings.logLevel) {
-                    ForEach(ConfigLogLevel.allCases, id: \.self) { level in
-                        Text(level.displayName).tag(level)
-                    }
-                }
-
                 Picker("Keep", selection: $store.settings.logRetention) {
                     ForEach(LogRetention.allCases, id: \.self) { retention in
                         Text(retention.displayName).tag(retention)
@@ -93,8 +87,6 @@ struct SettingsView: View {
                 }
             } header: {
                 Text("Logs")
-            } footer: {
-                Text("Level applies on next connect.")
             }
 
             Section {

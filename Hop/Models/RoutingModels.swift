@@ -163,6 +163,13 @@ enum RoutingRuleKind: String, CaseIterable, Codable, Identifiable {
         }
     }
 
+    var isAvailableInXray: Bool {
+        switch self {
+        case .networkType, .networkIsExpensive, .networkIsConstrained, .wifiSSID, .wifiBSSID: false
+        default: true
+        }
+    }
+
     var isBoolean: Bool {
         switch self {
         case .final:
